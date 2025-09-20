@@ -382,6 +382,19 @@ class Game3D {
         // Game modes
         this.gameMode = 'play'; // Only play mode now
         
+        // Temporary stub to prevent errors during cleanup
+        this.createMode = {
+            highlightObjects: [],
+            previewObject: null,
+            tool: 'wall',
+            gridSize: 20,
+            customMaze: [],
+            isMouseDown: false,
+            lastGridPos: null,
+            startLinePos: null,
+            isShiftHeld: false
+        };
+        
         // Play mode (Diablo-style) state
         this.playMode = {
             // WASD move + mouse aim
@@ -3859,12 +3872,7 @@ class Game3D {
                 return;
             }
             
-            // Track SHIFT key for create mode
-            if (event.code === 'ShiftLeft' || event.code === 'ShiftRight') {
-                if (this.gameMode === 'create') {
-                    this.createMode.isShiftHeld = true;
-                }
-            }
+            // Track SHIFT key (legacy create mode support removed)
             
             // Control scheme switching
             if (event.code === 'Digit1') {
@@ -3906,23 +3914,13 @@ class Game3D {
                 this.showMessage(this.showControlsUI ? 'Control panel shown' : 'Control panel hidden');
             }
             
-            // Open toolbox modal with T key (create mode only)
-            if (event.code === 'KeyT' && this.gameMode === 'create') {
-                this.toggleToolboxModal();
-            }
+            // T key (legacy toolbox support removed)
             
             // Weapon switching is now handled by selectGridItemByShortcut()
             
-            // Q and E for tank controls (scheme 3) or create mode tools
-            if (this.gameMode === 'create' && !this.modalOpen) {
-                // Create mode: Q for wall, E for erase
-                if (event.code === 'KeyQ') {
-                    this.setCreateTool('wall');
-                }
-                if (event.code === 'KeyE') {
-                    this.setCreateTool('erase');
-                }
-            } else if (this.controlScheme === 3) {
+            // Q and E keys (legacy create mode tool support removed)
+            
+            if (this.controlScheme === 3) {
                 // Tank controls: Q and E for turning
                 if (event.code === 'KeyE') {
                     this.characterRotation -= Math.PI / 2; // 90 degrees left
@@ -4053,13 +4051,7 @@ class Game3D {
         document.addEventListener('keyup', (event) => {
             this.keys[event.code] = false;
             
-            // Track SHIFT key release for create mode
-            if (event.code === 'ShiftLeft' || event.code === 'ShiftRight') {
-                if (this.gameMode === 'create') {
-                    this.createMode.isShiftHeld = false;
-                    this.createMode.startLinePos = null; // Reset line start
-                }
-            }
+            // SHIFT key release (legacy create mode support removed)
             
             // No special handling needed on space release now
         });
@@ -4071,12 +4063,9 @@ class Game3D {
                 return;
             }
             
-            // Handle create mode preview
-            if (this.gameMode === 'create' && !this.modalOpen) {
-                this.handleCreateModeHover();
-                // Don't process other mouse events in create mode
-                return;
-            } else if (this.gameMode === 'play' && !this.modalOpen) {
+            // Legacy create mode preview support removed
+            
+            if (this.gameMode === 'play' && !this.modalOpen) {
                 // Track mouse for aim/orbit. Use pointer lock deltas if locked; otherwise client coords.
                 const canvas = document.getElementById('gameCanvas');
                 const rect = canvas.getBoundingClientRect();
@@ -4173,10 +4162,7 @@ class Game3D {
                 return;
             }
             
-            if (this.gameMode === 'create' && !this.modalOpen) {
-                this.createMode.isMouseDown = true;
-                this.handleCreateModeClick(event);
-            } else if (this.gameMode === 'play' && !this.modalOpen) {
+            if (this.gameMode === 'play' && !this.modalOpen) {
                 // Handle press-and-drag continuous move if holding button (optional)
                 this.handlePlayClick(event);
                 // Start continuous firing for machine gun
@@ -4196,11 +4182,7 @@ class Game3D {
                 return;
             }
             
-            if (this.gameMode === 'create' && !this.modalOpen) {
-                this.createMode.isMouseDown = false;
-                this.createMode.lastGridPos = null;
-                this.createMode.startLinePos = null; // Reset line start
-            } else if (this.gameMode === 'play' && !this.modalOpen) {
+            if (this.gameMode === 'play' && !this.modalOpen) {
                 // Stop continuous firing
                 if (event.button === 0) { // Left click
                     this.isFiring = false;
@@ -4210,9 +4192,7 @@ class Game3D {
         
         // Click handler
         document.addEventListener('click', (event) => {
-            if (this.gameMode === 'create' && !this.modalOpen) {
-                this.handleCreateModeClick(event);
-            } else if (this.gameMode === 'play' && !this.modalOpen) {
+            if (this.gameMode === 'play' && !this.modalOpen) {
                 // Ensure pointer lock; first click acquires lock instead of shooting
                 if (!this.isPointerLocked) {
                     document.body.requestPointerLock();
