@@ -2395,6 +2395,10 @@ class Game3D {
         
         const entCol = 0; // Entry is always at column 0
         const exitCol = cols - 1; // Exit is always at column width-1
+        
+        console.log(`Entry point: row=${entRow}, col=${entCol}, world=(${startX + entCol * cellSize}, ${startZ + entRow * cellSize})`);
+        console.log(`Exit point: row=${exitRow}, col=${exitCol}, world=(${startX + exitCol * cellSize}, ${startZ + exitRow * cellSize})`);
+        
         // Create markers slightly above ground at cell centers
         const entranceGeometry = new THREE.ConeGeometry(0.5, 2, 8);
         const entranceMaterial = new THREE.MeshLambertMaterial({ color: 0x00ff00, emissive: 0x004400 });
@@ -6665,19 +6669,26 @@ class Game3D {
         this.setGameMode('play');
         this.setViewMode('iso');
         
-        // Reset player
-        this.resetPlayer();
+        // Reset player (but don't reset position yet)
+        if (this.player) {
+            this.player.hp = this.player.maxHp;
+            this.player.velocity.set(0, 0, 0);
+            this.player.invulnerable = false;
+        }
         
         // Position player at entry point
         if (this.levelStartWorld) {
+            console.log(`Spawning player at entry point:`, this.levelStartWorld);
             this.player.position.set(this.levelStartWorld.x, 0, this.levelStartWorld.z);
             // Face toward the maze interior (toward end)
             if (this.levelEndWorld) {
                 const dx = this.levelEndWorld.x - this.levelStartWorld.x;
                 const dz = this.levelEndWorld.z - this.levelStartWorld.z;
                 this.characterRotation = Math.atan2(dx, dz);
+                console.log(`Player facing toward exit:`, this.levelEndWorld);
             }
         } else {
+            console.log(`No entry point found, spawning at center`);
             // Fallback to center if no entry point found
             this.player.position.set(0, 0, 0);
         }
