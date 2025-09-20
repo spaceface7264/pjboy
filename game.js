@@ -373,26 +373,9 @@ class Game3D {
         };
         
         // Theme system
-        this.themeName = 'neon';
+        this.themeName = 'desert';
         this.themes = {
-            neon: {
-                ground: 0x001100,
-                grid: 0x00ff00,
-                wall: 0x003300,
-                wallEmissive: 0x000800,
-                sky: 0x000011,
-                ambient: 0x001122,
-                sun: 0x00ff88
-            },
-            forest: {
-                ground: 0x203b20,
-                grid: 0x5cff5c,
-                wall: 0x2a5a2e,
-                wallEmissive: 0x0b180c,
-                sky: 0x87b5ff,
-                ambient: 0x1b3020,
-                sun: 0xfff2a8
-            },
+            
             desert: {
                 ground: 0xc2b280,
                 grid: 0xffe8a0,
@@ -402,15 +385,7 @@ class Game3D {
                 ambient: 0x705f3a,
                 sun: 0xffd27a
             },
-            dungeon: {
-                ground: 0x202020,
-                grid: 0x66ffcc,
-                wall: 0x333333,
-                wallEmissive: 0x070707,
-                sky: 0x080808,
-                ambient: 0x101010,
-                sun: 0x88aaff
-            }
+            
         };
         this.materials = { wall: null };
         
@@ -931,10 +906,9 @@ class Game3D {
             this.birdsEyeCamera.rotation.x = -Math.PI/2; // Look straight down
             this.birdsEyeCamera.rotation.y = 0; // Face forward
             
-            // Initialize quaternion from Euler angles
-            const quatY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), this.birdsEyeCamera.rotation.y);
-            const quatX = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), this.birdsEyeCamera.rotation.x);
-            this.birdsEyeCamera.quaternion.multiplyQuaternions(quatY, quatX);
+            // Initialize Three.js build-in orthographic camera
+            this.birdsEyeCamera.position.set(0, 50, 0); // Adjust height as needed
+            this.birdsEyeCamera.lookAt(0, 0, 0); // Look at world center
         }
         // Hide player model in FPV to avoid clipping into the camera
         if (this.player && this.player.model) {
@@ -2466,41 +2440,69 @@ class Game3D {
     generateAsciiPerfectMaze(width, height) {
         let w = (width % 2 === 0) ? width - 1 : width;
         let h = (height % 2 === 0) ? height - 1 : height;
-
+    
         const grid = Array.from({ length: h }, () => Array.from({ length: w }, () => '#'));
-        const inBounds = (x, y) => x > 0 && x < w - 1 && y > 0 && y < h - 1;
-                const carve = (x, y) => { grid[y][x] = '.'; };
-
+        
+        // Fixed bounds check - allow cells up to but not including the border
+        const inBounds = (x, y) => x >= 1 && x <= w - 2 && y >= 1 && y <= h - 2;
+        
+        const carve = (x, y) => { grid[y][x] = '.'; };
+    
         // Start at random odd cell
         let sx = 1 + 2 * Math.floor(Math.random() * ((w - 1) / 2));
         let sy = 1 + 2 * Math.floor(Math.random() * ((h - 1) / 2));
         carve(sx, sy);
-
+    
         const stack = [{ x: sx, y: sy }];
         const dirs = [[0, -2], [2, 0], [0, 2], [-2, 0]];
-
+    
         while (stack.length) {
             const cur = stack[stack.length - 1];
             const neighbors = dirs
-                .map(([dx, dy]) => ({ nx: cur.x + dx, ny: cur.y + dy, bx: cur.x + dx / 2, by: cur.y + dy / 2 }))
-                .filter(n => inBounds(n.nx, n.ny) && grid[n.ny][n.nx] === '#');
-
-            if (neighbors.length === 0) { stack.pop(); continue; }
-
+                .map(([dx, dy]) => ({ 
+                    nx: cur.x + dx, 
+                    ny: cur.y + dy, 
+                    bx: cur.x + dx / 2, 
+                    by: cur.y + dy / 2 
+                }))
+                .filter(n => 
+                    inBounds(n.nx, n.ny) && 
+                    grid[n.ny][n.nx] === '#'
+                );
+    
+            if (neighbors.length === 0) { 
+                stack.pop(); 
+                continue; 
+            }
+    
             const pick = neighbors[Math.floor(Math.random() * neighbors.length)];
-            grid[pick.by][pick.bx] = '.';
-            grid[pick.ny][pick.nx] = '.';
+            grid[pick.by][pick.bx] = '.'; // Carve the wall between
+            grid[pick.ny][pick.nx] = '.'; // Carve the destination cell
             stack.push({ x: pick.nx, y: pick.ny });
         }
-
-        // Entrance and exit
-        let entY = 1; for (let y = 1; y < h - 1; y++) if (grid[y][1] === '.') { entY = y; break; }
-        let extY = h - 2; for (let y = h - 2; y >= 1; y--) if (grid[y][w - 2] === '.') { extY = y; break; }
-        grid[entY][0] = '.'; grid[extY][w - 1] = '.';
-
+    
+        // Create entrance and exit
+        let entY = 1; 
+        for (let y = 1; y < h - 1; y++) { 
+            if (grid[y][1] === '.') { 
+                entY = y; 
+                break; 
+            }
+        }
+        
+        let extY = h - 2; 
+        for (let y = h - 2; y >= 1; y--) { 
+            if (grid[y][w - 2] === '.') { 
+                extY = y; 
+                break; 
+            }
+        }
+        
+        grid[entY][0] = '.'; 
+        grid[extY][w - 1] = '.';
+    
         return grid.map(row => row.join(''));
     }
-
     generateAsciiPerfectMazeByDifficulty(level) {
         const d = Math.max(1, Math.min(10, parseInt(level) || 5));
         const size = 25 + (d - 1) * 8; // 25..97
@@ -4294,10 +4296,20 @@ class Game3D {
             this.renderer.setSize(window.innerWidth, window.innerHeight);
         });
         
-        // Mouse wheel for weapon switching
+        // Mouse wheel for weapon switching and bird's eye camera elevation
         document.addEventListener('wheel', (event) => {
             // Block wheel input when drawer is open
             if (this.isDrawerOpen) {
+                return;
+            }
+            
+            // Bird's eye camera elevation
+            if (this.gameMode === 'play' && this.viewMode === 'birds-eye') {
+                const direction = event.deltaY > 0 ? -1 : 1; // Scroll down = lower, scroll up = higher
+                const elevationSpeed = 5; // Units per scroll
+                this.birdsEyeCamera.position.y += direction * elevationSpeed;
+                // Clamp height to reasonable bounds
+                this.birdsEyeCamera.position.y = Math.max(10, Math.min(200, this.birdsEyeCamera.position.y));
                 return;
             }
             
@@ -6555,26 +6567,23 @@ class Game3D {
         const speed = this.birdsEyeCamera.speed;
         const moveSpeed = speed * deltaTime;
         
-        // Calculate movement direction based on camera quaternion
+        // For bird's eye view, we want flat movement (no vertical component from WASD)
+        // Only use horizontal movement vectors
         const forward = new THREE.Vector3(0, 0, -1);
         const right = new THREE.Vector3(1, 0, 0);
-        const up = new THREE.Vector3(0, 1, 0);
         
-        // Apply camera quaternion to movement vectors
-        forward.applyQuaternion(this.birdsEyeCamera.quaternion);
-        right.applyQuaternion(this.birdsEyeCamera.quaternion);
-        up.applyQuaternion(this.birdsEyeCamera.quaternion);
+        // Apply only Y rotation (yaw) to movement vectors for flat movement
+        const yawQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), this.birdsEyeCamera.rotation.y);
+        forward.applyQuaternion(yawQuat);
+        right.applyQuaternion(yawQuat);
         
-        // Movement input
+        // Movement input - only horizontal movement
         const movement = new THREE.Vector3();
         
         if (this.keys['KeyW']) movement.add(forward);
         if (this.keys['KeyS']) movement.sub(forward);
         if (this.keys['KeyA']) movement.sub(right);
         if (this.keys['KeyD']) movement.add(right);
-        if (this.keys['KeyQ']) movement.sub(up); // Q = down
-        if (this.keys['KeyE']) movement.add(up); // E = up
-        if (this.keys['Space']) movement.add(up); // Space = up (height increase)
         
         // Apply movement
         movement.multiplyScalar(moveSpeed);
