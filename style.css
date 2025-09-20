@@ -390,7 +390,7 @@ body.modal-open .modal {
     height: 100%;
     background: rgba(0, 0, 0, 0.95);
     display: none;
-    z-index: 1000;
+    z-index: 10000;
     font-family: 'Courier New', monospace;
     color: #00ff00;
     backdrop-filter: blur(5px);

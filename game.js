@@ -3861,15 +3861,6 @@ class Game3D {
         document.addEventListener('keydown', (event) => {
             this.keys[event.code] = true;
             
-            // Debug: Log game state for ø key
-            if (event.code === 'KeyO' && event.shiftKey) {
-                console.log('ø key detected, gameState:', this.gameState, 'gameMode:', this.gameMode);
-            }
-            
-            // Debug: Log all key presses
-            if (event.code === 'KeyV') {
-                console.log('V key detected in keydown handler');
-            }
             
             // Comprehensive input blocking system
             if (this.shouldBlockInput(event)) {
@@ -3926,7 +3917,6 @@ class Game3D {
             
             // Toggle map overlay with ø key
             if (event.code === 'KeyO' && event.shiftKey) {
-                console.log('ø key pressed - toggling map overlay');
                 event.preventDefault(); // Prevent default behavior
                 this.toggleMapOverlay();
             }
@@ -6854,7 +6844,6 @@ class Game3D {
     // ===== Map Overlay Functions =====
     
     toggleMapOverlay() {
-        console.log('toggleMapOverlay called, gameState:', this.gameState);
         if (this.gameState !== 'playing') {
             this.showMessage('Map only available during gameplay');
             return;
@@ -6862,13 +6851,6 @@ class Game3D {
         
         this.showMapOverlay = !this.showMapOverlay;
         const mapOverlay = document.getElementById('map-overlay');
-        console.log('Map overlay element found:', !!mapOverlay);
-        console.log('showMapOverlay:', this.showMapOverlay);
-        
-        if (mapOverlay) {
-            console.log('Map overlay current display:', mapOverlay.style.display);
-            console.log('Map overlay computed style:', window.getComputedStyle(mapOverlay).display);
-        }
         
         if (this.showMapOverlay) {
             this.updateMapOverlay();
@@ -6876,17 +6858,11 @@ class Game3D {
                 mapOverlay.style.display = 'block';
                 mapOverlay.style.visibility = 'visible';
                 mapOverlay.style.opacity = '1';
-                mapOverlay.style.zIndex = '1000';
-                console.log('Map overlay set to display: block');
-                console.log('Map overlay after setting:', mapOverlay.style.display);
-                console.log('Map overlay visibility:', mapOverlay.style.visibility);
-                console.log('Map overlay z-index:', mapOverlay.style.zIndex);
             }
             this.showMessage('Map opened - Press ø to close');
         } else {
             if (mapOverlay) {
                 mapOverlay.style.display = 'none';
-                console.log('Map overlay set to display: none');
             }
             this.showMessage('Map closed');
         }
@@ -6961,21 +6937,6 @@ class Game3D {
         }
         if (mapPlayerPos) {
             mapPlayerPos.textContent = `${clampedX}, ${clampedZ}`;
-        }
-    }
-    
-    // Debug function to test map overlay
-    testMapOverlay() {
-        console.log('Testing map overlay...');
-        const mapOverlay = document.getElementById('map-overlay');
-        if (mapOverlay) {
-            mapOverlay.style.display = 'block';
-            mapOverlay.style.visibility = 'visible';
-            mapOverlay.style.opacity = '1';
-            mapOverlay.style.zIndex = '1000';
-            console.log('Map overlay forced to show');
-        } else {
-            console.log('Map overlay element not found!');
         }
     }
 }
