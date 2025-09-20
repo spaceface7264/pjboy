@@ -63,50 +63,26 @@
         <div id="settings-modal" class="modal">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h2 id="settings-title">Game Settings & Map Control</h2>
+                    <h2 id="settings-title">Instillinger</h2>
                     <span class="close">&times;</span>
                 </div>
                 <div class="modal-body">
                     <div class="settings-section">
-                        <h3 id="maze-selection-title">Maze Selection</h3>
-                        <div class="maze-buttons">
-                            <button class="maze-btn" data-maze="0">Wide Halls</button>
-                            <button class="maze-btn" data-maze="1">Classic Small</button>
-                            <button class="maze-btn" data-maze="2">Open Arena</button>
-                            <button class="maze-btn" data-maze="3">Spiral</button>
-                            <button class="maze-btn" data-maze="4">Labyrinth</button>
-                            <button class="maze-btn" data-maze="5">ASCII Maze</button>
-                        </div>
-                        <div class="maze-description">
-                            <p id="maze-desc">Large maze with wide 5-cell halls</p>
-                        </div>
-                    </div>
-                    
-                    <div class="settings-section">
-                        <h3 id="difficulty-title">Difficulty</h3>
+                        <h3 id="difficulty-title">Sværhedsgrad</h3>
                         <div>
                             <input id="maze-difficulty" type="range" min="1" max="10" value="5" style="width:100%" />
                             <div style="text-align:right; font-size:12px; opacity:0.8;">Level: <span id="maze-difficulty-value">5</span></div>
                         </div>
+
+                        <h3 id="maze-selection-title">Ny Labyrint</h3>
+                        <div class="maze-buttons">
+                            <button class="maze-btn" data-maze="5">Start</button>
+                        </div>
+                            
+                       
                     </div>
 
-                    <div class="settings-section">
-                        <h3 id="view-title">View</h3>
-                        <div class="view-buttons">
-                            <button class="view-btn" data-view="iso">Isometric</button>
-                            <button class="view-btn" data-view="fpv">First Person</button>
-                        </div>
-                    </div>
 
-                    <div class="settings-section">
-                        <h3 id="theme-title">Theme</h3>
-                        <div class="theme-buttons">
-                            <button class="maze-btn theme-btn" data-theme="neon">Neon</button>
-                            <button class="maze-btn theme-btn" data-theme="forest">Forest</button>
-                            <button class="maze-btn theme-btn" data-theme="desert">Desert</button>
-                            <button class="maze-btn theme-btn" data-theme="dungeon">Dungeon</button>
-                        </div>
-                    </div>
 
                     <div class="settings-section">
                         <h3 id="language-title">Language</h3>
@@ -116,30 +92,8 @@
                         </div>
                     </div>
 
-                    <div class="settings-section">
-                        <h3 id="game-mode-title">Game Mode</h3>
-                        <div class="mode-buttons">
-                            <button class="mode-btn" data-mode="play">Play Mode</button>
-                        </div>
-                    </div>
+
                     
-                    <div class="settings-section">
-                        <h3 id="game-info-title">Game Info</h3>
-                        <div class="info-grid">
-                            <div class="info-item">
-                                <span class="info-label">Current Position:</span>
-                                <span id="player-pos">(0, 0, 0)</span>
-                            </div>
-                            <div class="info-item">
-                                <span class="info-label">Facing Direction:</span>
-                                <span id="player-facing">North (0°)</span>
-                            </div>
-                            <div class="info-item">
-                                <span class="info-label">Camera Angle:</span>
-                                <span id="camera-info">0°</span>
-                            </div>
-                        </div>
-                    </div>
                 </div>
             </div>
         </div>

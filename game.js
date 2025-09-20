@@ -33,7 +33,7 @@ class Game3D {
             groundDot: null
         };
         this.modelYawOffset = 0; // Yaw offset to align model forward with aim (radians)
-        this.viewMode = 'iso'; // 'iso' | 'fpv' | 'birds-eye' | 'ghost'
+        this.viewMode = 'fpv'; // 'iso' | 'fpv' | 'birds-eye' | 'ghost'
         this.fpvPitch = 0;
         this.fpvYawSensitivity = 0.0025;
         this.fpvBobAmplitude = 0.05; // camera bobbing in meters
@@ -59,7 +59,7 @@ class Game3D {
             quaternion: new THREE.Quaternion(),
             heightSpeed: 30 // Speed for height changes
         };
-        this.showControlsUI = true; // Toggle for control panel visibility
+        this.showControlsUI = false; // Toggle for control panel visibility
         
         // Game state management
         this.gameState = 'menu'; // 'menu', 'playing', 'levelComplete', 'gameOver'
@@ -1926,16 +1926,33 @@ class Game3D {
         
         // Create new maze
         this.createLabyrinth();
-        // If this is the labyrinth map and start is known, spawn player there
+        // If this is the labyrinth map and start is known, spawn player outside maze entry
         const cur = this.savedMazes[this.currentMazeIndex];
         if (cur && (cur.type === 'labyrinth' || cur.name === 'Labyrinth' || cur.type === 'ascii') && this.levelStartWorld) {
-            this.player.position.set(this.levelStartWorld.x, 0, this.levelStartWorld.z);
-            // Face toward the maze interior (toward end)
+            // Calculate direction from entry to exit to determine which way is "into" the maze
+            let directionIntoMaze = new THREE.Vector3(1, 0, 0); // Default to positive X direction
             if (this.levelEndWorld) {
-                const dx = this.levelEndWorld.x - this.levelStartWorld.x;
-                const dz = this.levelEndWorld.z - this.levelStartWorld.z;
-                this.characterRotation = Math.atan2(dx, dz);
+                directionIntoMaze = new THREE.Vector3(
+                    this.levelEndWorld.x - this.levelStartWorld.x,
+                    0,
+                    this.levelEndWorld.z - this.levelStartWorld.z
+                ).normalize();
             }
+            
+            // Spawn player outside the maze entry (one cell size away from entry point)
+            const cellSize = 3; // This should match the cellSize used in createLabyrinth
+            const spawnOffset = directionIntoMaze.clone().multiplyScalar(-cellSize);
+            const spawnPosition = this.levelStartWorld.clone().add(spawnOffset);
+            
+            this.player.position.set(spawnPosition.x, 0, spawnPosition.z);
+            
+            // Face toward the green start marker (entry point)
+            const directionToStart = new THREE.Vector3(
+                this.levelStartWorld.x - spawnPosition.x,
+                0,
+                this.levelStartWorld.z - spawnPosition.z
+            ).normalize();
+            this.characterRotation = Math.atan2(directionToStart.x, directionToStart.z);
         }
     }
     
@@ -4020,17 +4037,40 @@ class Game3D {
                 console.log('Resetting camera and player position');
                 // Exit pointer lock for clarity
                 if (document.pointerLockElement) document.exitPointerLock();
-                this.setViewMode('iso');
+                this.setViewMode('fpv');
                 this.currentCameraAngle = 0;
                 this.playMode.mouseNDC.set(0, 0);
-                // Prefer labyrinth start if available
+                // Prefer labyrinth start if available - spawn outside maze entry
                 const cur = this.savedMazes[this.currentMazeIndex];
                 if (cur && cur.type === 'labyrinth' && this.levelStartWorld) {
-                    this.player.position.copy(this.levelStartWorld);
+                    // Calculate direction from entry to exit to determine which way is "into" the maze
+                    let directionIntoMaze = new THREE.Vector3(1, 0, 0); // Default to positive X direction
+                    if (this.levelEndWorld) {
+                        directionIntoMaze = new THREE.Vector3(
+                            this.levelEndWorld.x - this.levelStartWorld.x,
+                            0,
+                            this.levelEndWorld.z - this.levelStartWorld.z
+                        ).normalize();
+                    }
+                    
+                    // Spawn player outside the maze entry (one cell size away from entry point)
+                    const cellSize = 3; // This should match the cellSize used in createLabyrinth
+                    const spawnOffset = directionIntoMaze.clone().multiplyScalar(-cellSize);
+                    const spawnPosition = this.levelStartWorld.clone().add(spawnOffset);
+                    
+                    this.player.position.set(spawnPosition.x, 0, spawnPosition.z);
+                    
+                    // Face toward the green start marker (entry point)
+                    const directionToStart = new THREE.Vector3(
+                        this.levelStartWorld.x - spawnPosition.x,
+                        0,
+                        this.levelStartWorld.z - spawnPosition.z
+                    ).normalize();
+                    this.characterRotation = Math.atan2(directionToStart.x, directionToStart.z);
                 } else {
                     this.player.position.set(0, 0, 0);
+                    this.characterRotation = 0;
                 }
-                this.characterRotation = 0;
                 // Nudge camera immediately
                 this.updateCamera();
             }
@@ -4218,7 +4258,10 @@ class Game3D {
         document.addEventListener('pointerlockchange', () => {
             this.isPointerLocked = document.pointerLockElement === document.body;
             // Cursor visibility based on mode/lock
-            if (this.isPointerLocked && this.gameMode === 'play') {
+            if (this.gameState === 'menu') {
+                // Always show cursor on start screen
+                document.body.style.cursor = 'default';
+            } else if (this.isPointerLocked && this.gameMode === 'play') {
                 document.body.style.cursor = 'none';
             } else if (this.gameMode === 'create') {
                 document.body.style.cursor = 'crosshair';
@@ -6668,6 +6711,12 @@ class Game3D {
         if (openingScreen) {
             openingScreen.style.display = 'flex';
         }
+        // Ensure cursor is visible on start screen
+        document.body.style.cursor = 'default';
+        // Exit pointer lock if active
+        if (document.pointerLockElement) {
+            document.exitPointerLock();
+        }
     }
     
     startGame() {
@@ -6699,7 +6748,7 @@ class Game3D {
         
         // Set up play mode
         this.setGameMode('play');
-        this.setViewMode('iso');
+        this.setViewMode('fpv');
         
         // Reset player (but don't reset position yet)
         if (this.player) {
@@ -6708,17 +6757,37 @@ class Game3D {
             this.player.invulnerable = false;
         }
         
-        // Position player at entry point
+        // Position player outside maze entry, facing the green start marker
         if (this.levelStartWorld) {
-            console.log(`Spawning player at entry point:`, this.levelStartWorld);
-            this.player.position.set(this.levelStartWorld.x, 0, this.levelStartWorld.z);
-            // Face toward the maze interior (toward end)
+            console.log(`Spawning player outside maze entry:`, this.levelStartWorld);
+            
+            // Calculate direction from entry to exit to determine which way is "into" the maze
+            let directionIntoMaze = new THREE.Vector3(1, 0, 0); // Default to positive X direction
             if (this.levelEndWorld) {
-                const dx = this.levelEndWorld.x - this.levelStartWorld.x;
-                const dz = this.levelEndWorld.z - this.levelStartWorld.z;
-                this.characterRotation = Math.atan2(dx, dz);
-                console.log(`Player facing toward exit:`, this.levelEndWorld);
+                directionIntoMaze = new THREE.Vector3(
+                    this.levelEndWorld.x - this.levelStartWorld.x,
+                    0,
+                    this.levelEndWorld.z - this.levelStartWorld.z
+                ).normalize();
             }
+            
+            // Spawn player outside the maze entry (one cell size away from entry point)
+            const cellSize = 3; // This should match the cellSize used in createLabyrinth
+            const spawnOffset = directionIntoMaze.clone().multiplyScalar(-cellSize);
+            const spawnPosition = this.levelStartWorld.clone().add(spawnOffset);
+            
+            this.player.position.set(spawnPosition.x, 0, spawnPosition.z);
+            
+            // Face toward the green start marker (entry point)
+            const directionToStart = new THREE.Vector3(
+                this.levelStartWorld.x - spawnPosition.x,
+                0,
+                this.levelStartWorld.z - spawnPosition.z
+            ).normalize();
+            this.characterRotation = Math.atan2(directionToStart.x, directionToStart.z);
+            
+            console.log(`Player spawned outside maze at:`, spawnPosition);
+            console.log(`Player facing green start marker at:`, this.levelStartWorld);
         } else {
             console.log(`No entry point found, spawning at center`);
             // Fallback to center if no entry point found
@@ -6959,6 +7028,12 @@ function setupScreenButtons(game) {
             game.gameState = 'menu';
             game.hideAllScreens();
             document.getElementById('opening-screen').style.display = 'flex';
+            // Ensure cursor is visible on start screen
+            document.body.style.cursor = 'default';
+            // Exit pointer lock if active
+            if (document.pointerLockElement) {
+                document.exitPointerLock();
+            }
         });
     });
     
