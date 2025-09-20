@@ -50,6 +50,7 @@ class Game3D {
             heightSpeed: 20 // Speed for height changes
         };
         this.showControlsUI = true; // Toggle for control panel visibility
+        this.showMapOverlay = false; // Toggle for map overlay visibility
         
         // Game state management
         this.gameState = 'menu'; // 'menu', 'playing', 'levelComplete', 'gameOver'
@@ -2446,7 +2447,7 @@ class Game3D {
 
         const grid = Array.from({ length: h }, () => Array.from({ length: w }, () => '#'));
         const inBounds = (x, y) => x > 0 && x < w - 1 && y > 0 && y < h - 1;
-        const carve = (x, y) => { grid[y][x] = '.'; };
+                const carve = (x, y) => { grid[y][x] = '.'; };
 
         // Start at random odd cell
         let sx = 1 + 2 * Math.floor(Math.random() * ((w - 1) / 2));
@@ -3916,6 +3917,12 @@ class Game3D {
                 this.showControlsUI = !this.showControlsUI;
                 this.updateControlsUI();
                 this.showMessage(this.showControlsUI ? 'Control panel shown' : 'Control panel hidden');
+            }
+            
+            // Toggle map overlay with Tab key
+            if (event.code === 'Tab') {
+                event.preventDefault(); // Prevent default tab behavior
+                this.toggleMapOverlay();
             }
             
             // Open toolbox modal with T key (create mode only)
@@ -5460,6 +5467,7 @@ class Game3D {
         // Game controls
         const gameControls = [
             'H - Toggle Controls',
+            'TAB - Map Overlay',
             'P - Settings',
             'T - Toolbox',
             'M - Open Drawer',
@@ -6896,6 +6904,140 @@ window.addEventListener('load', () => {
                 game.toggleInventory();
                 event.preventDefault();
             }
+        }
+    });
+    
+    // ===== Map Overlay Functions =====
+    
+    toggleMapOverlay() {
+        if (this.gameState !== 'playing') {
+            this.showMessage('Map only available during gameplay');
+            return;
+        }
+        
+        this.showMapOverlay = !this.showMapOverlay;
+        const mapOverlay = document.getElementById('map-overlay');
+        
+        if (this.showMapOverlay) {
+            this.updateMapOverlay();
+            mapOverlay.style.display = 'block';
+            this.showMessage('Map opened - Press Tab to close');
+        } else {
+            mapOverlay.style.display = 'none';
+            this.showMessage('Map closed');
+        }
+    }
+    
+    updateMapOverlay() {
+        if (!this.lastMazeInfo || !this.lastMazeInfo.maze) {
+            console.warn('No maze data available for map');
+            return;
+        }
+        
+        const { maze, startX, startZ, cellSize } = this.lastMazeInfo;
+        const rows = maze.length;
+        const cols = maze[0].length;
+        
+        // Calculate player position in maze coordinates
+        const playerMazeX = Math.round((this.player.position.x - startX) / cellSize);
+        const playerMazeZ = Math.round((this.player.position.z - startZ) / cellSize);
+        
+        // Clamp player position to maze bounds
+        const clampedX = Math.max(0, Math.min(cols - 1, playerMazeX));
+        const clampedZ = Math.max(0, Math.min(rows - 1, playerMazeZ));
+        
+        // Create map display
+        let mapDisplay = '';
+        for (let row = 0; row < rows; row++) {
+            for (let col = 0; col < cols; col++) {
+                let char = maze[row][col];
+                let className = '';
+                
+                // Check if this is the player position
+                if (row === clampedZ && col === clampedX) {
+                    char = '@';
+                    className = 'map-player';
+                }
+                // Check if this is the entry point
+                else if (row === Math.floor(rows/2) && col === 0 && maze[row][col] === '.') {
+                    char = 'S';
+                    className = 'map-entry';
+                }
+                // Check if this is the exit point
+                else if (row === Math.floor(rows/2) && col === cols - 1 && maze[row][col] === '.') {
+                    char = 'E';
+                    className = 'map-exit';
+                }
+                // Regular path
+                else if (char === '.') {
+                    char = ' ';
+                    className = 'map-path';
+                }
+                // Wall
+                else if (char === '#') {
+                    char = '#';
+                    className = 'map-wall';
+                }
+                
+                mapDisplay += `<span class="${className}">${char}</span>`;
+            }
+            mapDisplay += '\n';
+        }
+        
+        // Update map content
+        const mapContent = document.getElementById('map-content');
+        const mapLevel = document.getElementById('map-level');
+        const mapPlayerPos = document.getElementById('map-player-pos');
+        
+        if (mapContent) {
+            mapContent.innerHTML = mapDisplay;
+        }
+        if (mapLevel) {
+            mapLevel.textContent = this.currentLevel;
+        }
+        if (mapPlayerPos) {
+            mapPlayerPos.textContent = `${clampedX}, ${clampedZ}`;
+        }
+    }
+}
+
+// Start the game
+window.addEventListener('load', () => {
+    const game = new Game3D();
+    
+    // Expose game instance globally for easy character loading
+    window.game = game;
+    
+    // Setup screen buttons
+    setupScreenButtons(game);
+    // Using custom in-code lion archer model (no external GLTF)
+
+    // Ensure crosshair element exists
+    const crosshairCheck = document.getElementById('crosshair');
+    if (!crosshairCheck) {
+        console.log('Creating missing crosshair element...');
+        const crosshair = document.createElement('div');
+        crosshair.id = 'crosshair';
+        crosshair.style.cssText = 'position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 18px; height: 18px; pointer-events: none; z-index: 999999; display: none;';
+        crosshair.innerHTML = `
+            <div style="position: absolute; top: 50%; left: 50%; width: 8px; height: 8px; background: #00ff00; box-shadow: 0 0 10px #00ff00, 0 0 20px #00ff00; border-radius: 50%; transform: translate(-50%, -50%);"></div>
+        `;
+        document.body.appendChild(crosshair);
+        console.log('Crosshair element created');
+    } else {
+        console.log('Crosshair element found');
+    }
+
+    // Global inventory hotkeys
+    document.addEventListener('keydown', (event) => {
+        if (event.code === 'KeyI') {
+            game.toggleInventory();
+        }
+        if (event.code === 'KeyC') {
+            game.toggleCharacter();
+        }
+        if (event.code === 'KeyQ') {
+            game.toggleQuickbar();
         }
     });
 });
