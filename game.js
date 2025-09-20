@@ -5155,6 +5155,11 @@ class Game3D {
     }
     
     fixedUpdate(deltaTime) {
+        // Only run game logic when in playing state
+        if (this.gameState !== 'playing') {
+            return;
+        }
+        
         // All game logic goes here - runs at fixed 60 FPS
         this.updatePlayer(deltaTime);
         
@@ -5189,6 +5194,11 @@ class Game3D {
     }
     
     render() {
+        // Only render game UI when in playing state
+        if (this.gameState !== 'playing') {
+            return;
+        }
+        
         // All rendering and UI updates go here - runs at display refresh rate
         this.clearAllUI();
         this.updateControlsUI();
