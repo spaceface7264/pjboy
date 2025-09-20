@@ -482,18 +482,14 @@ class Game3D {
     setupInputListeners() {
         // Movement input
         this.eventBus.on('input:movement', (data) => {
-            // Update keys object for backward compatibility
-            this.keys['KeyW'] = data.movement.forward;
-            this.keys['KeyS'] = data.movement.backward;
-            this.keys['KeyA'] = data.movement.left;
-            this.keys['KeyD'] = data.movement.right;
+            // InputManager handles key state - no need to update here
+            // this.keys is now a getter that reads from InputManager
         });
 
         // Action input
         this.eventBus.on('input:actions', (data) => {
-            // Update keys object for backward compatibility
-            this.keys['ShiftLeft'] = data.actions.sprinting;
-            this.keys['Space'] = data.actions.jumping;
+            // InputManager handles key state - no need to update here
+            // this.keys is now a getter that reads from InputManager
         });
 
         // Specific action handlers
@@ -706,7 +702,8 @@ class Game3D {
 
     handleWindowBlur() {
         // Clear movement state when window loses focus
-        this.keys = {};
+        // InputManager already handles clearing keys, so no action needed here
+        console.log('Window lost focus - input state cleared by InputManager');
     }
 
     handleWindowResize(data) {
