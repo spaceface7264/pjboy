@@ -6865,12 +6865,29 @@ class Game3D {
         console.log('Map overlay element found:', !!mapOverlay);
         console.log('showMapOverlay:', this.showMapOverlay);
         
+        if (mapOverlay) {
+            console.log('Map overlay current display:', mapOverlay.style.display);
+            console.log('Map overlay computed style:', window.getComputedStyle(mapOverlay).display);
+        }
+        
         if (this.showMapOverlay) {
             this.updateMapOverlay();
-            mapOverlay.style.display = 'block';
+            if (mapOverlay) {
+                mapOverlay.style.display = 'block';
+                mapOverlay.style.visibility = 'visible';
+                mapOverlay.style.opacity = '1';
+                mapOverlay.style.zIndex = '1000';
+                console.log('Map overlay set to display: block');
+                console.log('Map overlay after setting:', mapOverlay.style.display);
+                console.log('Map overlay visibility:', mapOverlay.style.visibility);
+                console.log('Map overlay z-index:', mapOverlay.style.zIndex);
+            }
             this.showMessage('Map opened - Press ø to close');
         } else {
-            mapOverlay.style.display = 'none';
+            if (mapOverlay) {
+                mapOverlay.style.display = 'none';
+                console.log('Map overlay set to display: none');
+            }
             this.showMessage('Map closed');
         }
     }
@@ -6944,6 +6961,21 @@ class Game3D {
         }
         if (mapPlayerPos) {
             mapPlayerPos.textContent = `${clampedX}, ${clampedZ}`;
+        }
+    }
+    
+    // Debug function to test map overlay
+    testMapOverlay() {
+        console.log('Testing map overlay...');
+        const mapOverlay = document.getElementById('map-overlay');
+        if (mapOverlay) {
+            mapOverlay.style.display = 'block';
+            mapOverlay.style.visibility = 'visible';
+            mapOverlay.style.opacity = '1';
+            mapOverlay.style.zIndex = '1000';
+            console.log('Map overlay forced to show');
+        } else {
+            console.log('Map overlay element not found!');
         }
     }
 }
