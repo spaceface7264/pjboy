@@ -321,6 +321,10 @@ class UIManager {
             this.updateHUD(data);
         });
         
+        this.eventBus.on('ui:update', (data) => {
+            this.updateHUD(data);
+        });
+        
         this.eventBus.on('ui:updateWeapon', (data) => {
             this.updateWeaponDisplay(data);
         });
@@ -345,6 +349,7 @@ class UIManager {
             case 'playing':
                 this.hideAll(['openingScreen', 'levelCompleteScreen', 'gameOverScreen']);
                 this.show('hudContainer');
+                this.show('uiOverlay');
                 break;
                 
             case 'levelComplete':

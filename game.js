@@ -932,40 +932,34 @@ class Game3D {
     // ===== Weapon HUD Model System =====
     
     buildHUDModel() {
-        // Single source of truth for weapon state - called by HUD and gameplay
+        // Build complete HUD model for UIManager
         const currentWeapon = this.getCurrentWeapon();
-        if (!currentWeapon) return null;
-        
-        const weaponId = this.player.weapons[this.player.currentWeaponIndex];
-        const cooldown = this.weaponCooldowns[weaponId] || 0;
-        const ammoCount = this.inventory.ammo || 0;
         
         return {
+            // Game state
+            currentLevel: this.currentLevel || 1,
+            playerLives: this.playerLives || 3,
+            totalScore: this.totalScore || 0,
+            
+            // Player stats
+            playerHP: Math.floor(this.player?.hp || 100),
+            playerMaxHP: this.player?.maxHp || 100,
+            playerEnergy: this.inventory?.energy || 0,
+            playerShield: this.inventory?.shield || 0,
+            
             // Weapon info
-            weapon: currentWeapon,
-            weaponId: weaponId,
-            weaponIndex: this.player.currentWeaponIndex,
-            
-            // Ammo state
-            ammoCount: ammoCount,
-            isReloading: this.isReloading,
-            reloadTime: this.reloadTime,
-            reloadProgress: this.isReloading ? Math.max(0, (2.0 - this.reloadTime) / 2.0) : 0,
-            
-            // Cooldown state
-            cooldown: cooldown,
-            cooldownPercent: Math.max(0, (cooldown / currentWeapon.cooldown) * 100),
-            canFire: this.canFire(),
+            currentWeapon: currentWeapon?.name || 'None',
+            playerAmmo: this.inventory?.ammo || 0,
             
             // Power-ups
             powerUps: {
-                weaponBuff: this.powerUps.weaponBuff,
-                jetpackFuel: Math.floor(this.powerUps.jetpackFuel)
+                weaponBuff: this.powerUps?.weaponBuff || false,
+                jetpackFuel: Math.floor(this.powerUps?.jetpackFuel || 0)
             },
             
             // Player state
             gameMode: this.gameMode,
-            isDrawerOpen: this.isDrawerOpen
+            isDrawerOpen: this.isDrawerOpen || false
         };
     }
     
@@ -5387,14 +5381,9 @@ class Game3D {
         }
         
         // All rendering and UI updates go here - runs at display refresh rate
-        this.clearAllUI();
         this.updateControlsUI();
-        this.updateHealthUI();
-        this.updateCompassUI();
-        // this.updateWeaponPowerUpUI(); // Replaced by new HUD system
         this.updateCrosshairUI();
         this.updateGroundTargetIndicator();
-        // this.updateInventoryGridUI(); // Hidden for now
         this.updateToasts();
         
         // Emit UI update for new HUD system
@@ -5418,98 +5407,7 @@ class Game3D {
     
     
     
-    clearAllUI() {
-        // Remove ALL possible UI elements (except modals, inventory, and crosshair)
-        const allUIElements = [
-            // Old HUD elements
-            'player-hp-hud', 'weapon-hud', 'top-center-ui', 
-            'jetpack-hud', 'enemy-count-hud', 'compass-hud',
-            'player-pos', 'player-facing', 'camera-info',
-            // Any other possible UI elements
-            'objective-msg', 'facing-indicator',
-            'control-ui', 'maze-ui'
-        ];
-        
-        allUIElements.forEach(id => {
-            const el = document.getElementById(id);
-            if (el && id !== 'crosshair' && id !== 'controls-ui' && id !== 'inventory-grid-ui' && id !== 'inventory-drawer') { // Explicitly protect crosshair, controls, inventory grid, and drawer
-                el.remove();
-            }
-        });
-        
-        // Also remove any elements with common UI classes
-        const uiClasses = ['hud-element', 'game-ui', 'ui-panel', 'control-panel'];
-        uiClasses.forEach(className => {
-            const elements = document.querySelectorAll(`.${className}`);
-            elements.forEach(el => el.remove());
-        });
-        
-        // Remove any elements positioned in top-right area that might be interfering
-        const allDivs = document.querySelectorAll('div');
-        allDivs.forEach(div => {
-            const style = window.getComputedStyle(div);
-            if ((style.position === 'absolute' || style.position === 'fixed') && 
-                (style.top === '20px' || style.top === '10px' || style.top === '0px' || style.top === '50%') &&
-                (style.right === '20px' || style.right === '10px' || style.right === '0px' || style.left === '50%')) {
-                // Check if it's not one of our protected UI elements
-                if (!div.id || (!div.id.includes('health-ui') && 
-                    !div.id.includes('compass-ui') && 
-                    !div.id.includes('weapon-powerup-ui') &&
-                    !div.id.includes('settings-modal') &&
-                    !div.id.includes('toolbox-modal') &&
-                    !div.id.includes('inventory-ui') &&
-                    !div.id.includes('crosshair'))) {
-                    div.remove();
-                }
-            }
-        });
-    }
 
-    updateHealthUI() {
-        // Only show in play mode
-        if (this.gameMode !== 'play') {
-            return;
-        }
-        
-        // Create or update health UI (top right)
-        let hud = document.getElementById('health-ui');
-        if (!hud) {
-            hud = document.createElement('div');
-            hud.id = 'health-ui';
-            hud.style.position = 'absolute';
-            hud.style.top = '20px';
-            hud.style.right = '20px';
-            hud.style.background = 'rgba(0,0,0,0.8)';
-            hud.style.border = '2px solid #ff6666';
-            hud.style.borderRadius = '8px';
-            hud.style.padding = '12px 16px';
-            hud.style.color = '#ff6666';
-            hud.style.fontFamily = 'Courier New, monospace';
-            hud.style.fontSize = '16px';
-            hud.style.fontWeight = 'bold';
-            hud.style.zIndex = '1000';
-            document.body.appendChild(hud);
-        }
-        
-        const hpPercent = (this.player.hp / this.player.maxHp) * 100;
-        const hpColor = hpPercent > 60 ? '#00ff00' : hpPercent > 30 ? '#ffff00' : '#ff6666';
-        
-        hud.innerHTML = `
-            <div style="text-align: center; margin-bottom: 8px; font-size: 14px; opacity: 0.8;">${this.t('health').toUpperCase()}</div>
-            <div style="text-align: center; font-size: 20px; color: ${hpColor}; margin-bottom: 8px;">
-                ${Math.floor(this.player.hp)}/${this.player.maxHp}
-            </div>
-            <div style="width: 140px; height: 10px; background: rgba(255,255,255,0.2); border-radius: 5px; overflow: hidden;">
-                <div style="
-                    width: ${hpPercent}%; 
-                    height: 100%; 
-                    background: ${hpColor}; 
-                    transition: width 0.1s;
-                "></div>
-            </div>
-        `;
-        hud.style.display = 'block';
-    }
     
     updateWeaponPowerUpUI() {
         // Only show in play mode
@@ -6701,79 +6599,6 @@ class Game3D {
         this.showMessage(`Swapped items between slots ${fromSlot + 1} and ${toSlot + 1}`);
     }
     
-    updateCompassUI() {
-        // Only show in play mode
-        if (this.gameMode !== 'play') {
-            return;
-        }
-        
-        // Create or update compass UI (bottom right)
-        let hud = document.getElementById('compass-ui');
-        if (!hud) {
-            hud = document.createElement('div');
-            hud.id = 'compass-ui';
-            hud.style.position = 'absolute';
-            hud.style.bottom = '20px';
-            hud.style.right = '20px';
-            hud.style.background = 'rgba(0,0,0,0.8)';
-            hud.style.border = '2px solid #00ff00';
-            hud.style.borderRadius = '8px';
-            hud.style.padding = '12px 16px';
-            hud.style.color = '#00ff00';
-            hud.style.fontFamily = 'Courier New, monospace';
-            hud.style.fontSize = '16px';
-            hud.style.fontWeight = 'bold';
-            hud.style.zIndex = '1000';
-            hud.style.width = '120px';
-            hud.style.height = '120px';
-            hud.style.display = 'flex';
-            hud.style.alignItems = 'center';
-            hud.style.justifyContent = 'center';
-            document.body.appendChild(hud);
-        }
-        
-        // Calculate player facing direction
-        const facingAngle = this.characterRotation * (180 / Math.PI);
-        const normalizedAngle = ((facingAngle % 360) + 360) % 360;
-        
-        // Determine cardinal direction
-        let direction = '';
-        let directionSymbol = '';
-        if (normalizedAngle >= 337.5 || normalizedAngle < 22.5) {
-            direction = this.t('north');
-            directionSymbol = '↑';
-        } else if (normalizedAngle >= 22.5 && normalizedAngle < 67.5) {
-            direction = this.t('northeast');
-            directionSymbol = '↗';
-        } else if (normalizedAngle >= 67.5 && normalizedAngle < 112.5) {
-            direction = this.t('east');
-            directionSymbol = '→';
-        } else if (normalizedAngle >= 112.5 && normalizedAngle < 157.5) {
-            direction = this.t('southeast');
-            directionSymbol = '↘';
-        } else if (normalizedAngle >= 157.5 && normalizedAngle < 202.5) {
-            direction = this.t('south');
-            directionSymbol = '↓';
-        } else if (normalizedAngle >= 202.5 && normalizedAngle < 247.5) {
-            direction = this.t('southwest');
-            directionSymbol = '↙';
-        } else if (normalizedAngle >= 247.5 && normalizedAngle < 292.5) {
-            direction = this.t('west');
-            directionSymbol = '←';
-        } else if (normalizedAngle >= 292.5 && normalizedAngle < 337.5) {
-            direction = this.t('northwest');
-            directionSymbol = '↖';
-        }
-        
-        hud.innerHTML = `
-            <div style="text-align: center;">
-                <div style="font-size: 24px; margin-bottom: 4px;">${directionSymbol}</div>
-                <div style="font-size: 12px; opacity: 0.8; margin-bottom: 2px;">${direction.toUpperCase()}</div>
-                <div style="font-size: 10px; opacity: 0.6;">${Math.round(normalizedAngle)}°</div>
-            </div>
-        `;
-        hud.style.display = 'flex';
-    }
     
     updateCrosshairUI() {
         // Only show crosshair in FPV play mode
