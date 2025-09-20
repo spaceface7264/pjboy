@@ -49,6 +49,7 @@ class Game3D {
             quaternion: new THREE.Quaternion(),
             heightSpeed: 20 // Speed for height changes
         };
+        this.showControlsUI = true; // Toggle for control panel visibility
         this.crosshair3D = null;
         this.groundTargetIndicator = null; // 3D crosshair object
         this.mazeDifficulty = 5; // 1..10 for ASCII maze generator
@@ -4142,6 +4143,13 @@ class Game3D {
                 this.toggleMoreDrawer();
             }
             
+            // Toggle control panel with H key
+            if (event.code === 'KeyH') {
+                this.showControlsUI = !this.showControlsUI;
+                this.updateControlsUI();
+                this.showMessage(this.showControlsUI ? 'Control panel shown' : 'Control panel hidden');
+            }
+            
             // Open toolbox modal with T key (create mode only)
             if (event.code === 'KeyT' && this.gameMode === 'create') {
                 this.toggleToolboxModal();
@@ -5603,6 +5611,15 @@ class Game3D {
             return;
         }
         
+        // Check if control panel should be visible
+        if (!this.showControlsUI) {
+            const hud = document.getElementById('controls-ui');
+            if (hud) {
+                hud.style.display = 'none';
+            }
+            return;
+        }
+        
         // Create or update controls UI (top left)
         let hud = document.getElementById('controls-ui');
         if (!hud) {
@@ -5661,6 +5678,7 @@ class Game3D {
         
         // Game controls
         const gameControls = [
+            'H - Toggle Controls',
             'P - Settings',
             'T - Toolbox',
             'M - Open Drawer',
