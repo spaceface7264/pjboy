@@ -120,7 +120,6 @@
                         <h3 id="game-mode-title">Game Mode</h3>
                         <div class="mode-buttons">
                             <button class="mode-btn" data-mode="play">Play Mode</button>
-                            <button class="mode-btn" data-mode="create">Create Mode</button>
                         </div>
                     </div>
                     
@@ -145,47 +144,6 @@
             </div>
         </div>
         
-        <!-- Toolbox Modal for Create Mode -->
-        <div id="toolbox-modal" class="modal">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h2>Build Toolbox</h2>
-                    <span class="close-toolbox">&times;</span>
-                </div>
-                <div class="modal-body">
-                    <div class="toolbox-section">
-                        <h3>Tools</h3>
-                        <div class="tool-buttons">
-                            <button class="tool-btn active" data-tool="wall">Wall</button>
-                            <button class="tool-btn" data-tool="erase">Erase</button>
-                            <button class="tool-btn" data-tool="start">Start Point</button>
-                            <button class="tool-btn" data-tool="end">End Point</button>
-                        </div>
-                    </div>
-                    
-                    <div class="toolbox-section">
-                        <h3>Instructions</h3>
-                        <div class="toolbox-info">
-                            <p id="tool-instructions">Click on highlighted grid squares to place walls</p>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <!-- Map Overlay -->
-    <div id="map-overlay">
-        <div class="map-container">
-            <div class="map-header">
-                <h2 class="map-title">MAZE MAP - LEVEL <span id="map-level">1</span></h2>
-                <div class="map-info">
-                    <div>Press <strong>ø</strong> to close map</div>
-                    <div>Player: <span id="map-player-pos">0, 0</span></div>
-                </div>
-            </div>
-            <div id="map-content"></div>
-        </div>
     </div>
     
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
