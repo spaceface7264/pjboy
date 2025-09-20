@@ -50,6 +50,16 @@ class Game3D {
             heightSpeed: 20 // Speed for height changes
         };
         this.showControlsUI = true; // Toggle for control panel visibility
+        
+        // Game state management
+        this.gameState = 'menu'; // 'menu', 'playing', 'levelComplete', 'gameOver'
+        this.currentLevel = 1;
+        this.maxLevel = 10;
+        this.levelStartTime = 0;
+        this.levelCompleteTime = 0;
+        this.playerLives = 3;
+        this.totalScore = 0;
+        
         this.crosshair3D = null;
         this.groundTargetIndicator = null; // 3D crosshair object
         this.mazeDifficulty = 5; // 1..10 for ASCII maze generator
@@ -959,6 +969,18 @@ class Game3D {
 
         // Apply initial theme
         this.applyTheme(this.themeName);
+        
+        // Show opening screen instead of starting immediately
+        this.showOpeningScreen();
+    }
+    
+    showOpeningScreen() {
+        this.gameState = 'menu';
+        this.hideAllScreens();
+        const openingScreen = document.getElementById('opening-screen');
+        if (openingScreen) {
+            openingScreen.style.display = 'flex';
+        }
     }
     
     createPlayer() {
@@ -4800,6 +4822,9 @@ class Game3D {
         // Update direction indicators
         this.updateDirectionIndicators();
         
+        // Check for level completion
+        this.checkLevelCompletion();
+        
         // Update camera position based on mode
         this.updateCamera();
     }
@@ -6849,6 +6874,178 @@ class Game3D {
             }
         }
     }
+    
+    // Game state management methods
+    startGame() {
+        this.gameState = 'playing';
+        this.currentLevel = 1;
+        this.playerLives = 3;
+        this.totalScore = 0;
+        this.hideAllScreens();
+        this.startLevel(this.currentLevel);
+    }
+    
+    startLevel(level) {
+        this.currentLevel = level;
+        this.levelStartTime = Date.now();
+        this.gameState = 'playing';
+        
+        // Set maze difficulty based on level (1-10)
+        this.mazeDifficulty = Math.min(level, 10);
+        
+        // Generate ASCII maze for this level
+        this.generateAsciiPerfectMazeByDifficulty(level);
+        
+        // Set up play mode
+        this.setGameMode('play');
+        this.setViewMode('iso');
+        
+        // Reset player
+        this.resetPlayer();
+        
+        // Show level UI
+        this.updateLevelUI();
+        
+        console.log(`Starting Level ${level} with difficulty ${this.mazeDifficulty}`);
+    }
+    
+    completeLevel() {
+        this.gameState = 'levelComplete';
+        this.levelCompleteTime = Date.now();
+        
+        // Calculate score for this level
+        const levelTime = (this.levelCompleteTime - this.levelStartTime) / 1000;
+        const levelScore = Math.max(0, 1000 - Math.floor(levelTime * 10));
+        this.totalScore += levelScore;
+        
+        // Show level complete screen
+        this.showLevelCompleteScreen();
+        
+        console.log(`Level ${this.currentLevel} completed in ${levelTime.toFixed(1)}s, Score: ${levelScore}`);
+    }
+    
+    nextLevel() {
+        if (this.currentLevel < this.maxLevel) {
+            this.currentLevel++;
+            this.startLevel(this.currentLevel);
+        } else {
+            // Game completed!
+            this.showGameCompleteScreen();
+        }
+    }
+    
+    gameOver() {
+        this.gameState = 'gameOver';
+        this.playerLives--;
+        
+        if (this.playerLives > 0) {
+            // Restart current level
+            this.showGameOverScreen();
+        } else {
+            // Game over completely
+            this.showGameOverScreen(true);
+        }
+    }
+    
+    resetPlayer() {
+        if (this.player) {
+            this.player.hp = this.player.maxHp;
+            this.player.position.set(0, 0, 0);
+            this.player.velocity.set(0, 0, 0);
+            this.player.invulnerable = false;
+        }
+    }
+    
+    // Screen management
+    hideAllScreens() {
+        const screens = ['opening-screen', 'level-complete-screen', 'game-over-screen'];
+        screens.forEach(id => {
+            const screen = document.getElementById(id);
+            if (screen) screen.style.display = 'none';
+        });
+    }
+    
+    showLevelCompleteScreen() {
+        this.hideAllScreens();
+        const screen = document.getElementById('level-complete-screen');
+        const text = document.getElementById('level-complete-text');
+        
+        if (screen && text) {
+            text.textContent = `Level ${this.currentLevel} Complete! Score: ${this.totalScore}`;
+            screen.style.display = 'flex';
+        }
+    }
+    
+    showGameOverScreen(isFinal = false) {
+        this.hideAllScreens();
+        const screen = document.getElementById('game-over-screen');
+        const text = document.getElementById('game-over-text');
+        
+        if (screen && text) {
+            if (isFinal) {
+                text.textContent = `Final Score: ${this.totalScore} | Reached Level ${this.currentLevel}`;
+            } else {
+                text.textContent = `Lives: ${this.playerLives} | Level ${this.currentLevel}`;
+            }
+            screen.style.display = 'flex';
+        }
+    }
+    
+    showGameCompleteScreen() {
+        this.hideAllScreens();
+        const screen = document.getElementById('level-complete-screen');
+        const text = document.getElementById('level-complete-text');
+        const nextBtn = document.getElementById('next-level-btn');
+        
+        if (screen && text && nextBtn) {
+            text.textContent = `CONGRATULATIONS! All ${this.maxLevel} levels completed! Final Score: ${this.totalScore}`;
+            nextBtn.textContent = 'PLAY AGAIN';
+            screen.style.display = 'flex';
+        }
+    }
+    
+    updateLevelUI() {
+        // Create or update level display
+        let levelUI = document.getElementById('level-ui');
+        if (!levelUI) {
+            levelUI = document.createElement('div');
+            levelUI.id = 'level-ui';
+            levelUI.style.position = 'absolute';
+            levelUI.style.top = '20px';
+            levelUI.style.right = '20px';
+            levelUI.style.background = 'rgba(0,0,0,0.8)';
+            levelUI.style.border = '2px solid #00ff00';
+            levelUI.style.borderRadius = '8px';
+            levelUI.style.padding = '10px 15px';
+            levelUI.style.color = '#00ff00';
+            levelUI.style.fontFamily = 'Courier New, monospace';
+            levelUI.style.fontSize = '14px';
+            levelUI.style.fontWeight = 'bold';
+            levelUI.style.zIndex = '1000';
+            document.body.appendChild(levelUI);
+        }
+        
+        levelUI.innerHTML = `
+            <div>Level: ${this.currentLevel}/${this.maxLevel}</div>
+            <div>Lives: ${this.playerLives}</div>
+            <div>Score: ${this.totalScore}</div>
+        `;
+    }
+    
+    checkLevelCompletion() {
+        // Only check in play mode
+        if (this.gameState !== 'playing' || this.gameMode !== 'play') {
+            return;
+        }
+        
+        // Check if player has reached the exit
+        if (this.levelEndWorld && this.player) {
+            const distance = this.player.position.distanceTo(this.levelEndWorld);
+            if (distance < 2.0) { // Within 2 units of exit
+                this.completeLevel();
+            }
+        }
+    }
 }
 
 // Start the game
@@ -6858,6 +7055,8 @@ window.addEventListener('load', () => {
     // Expose game instance globally for easy character loading
     window.game = game;
     
+    // Setup screen button event listeners
+    setupScreenButtons(game);
     
     // Setup modal event listeners
     game.setupModalListeners();
@@ -6909,3 +7108,45 @@ window.addEventListener('load', () => {
         }
     });
 });
+
+// Setup screen button event listeners
+function setupScreenButtons(game) {
+    // Start game button
+    const startBtn = document.getElementById('start-game-btn');
+    if (startBtn) {
+        startBtn.addEventListener('click', () => {
+            game.startGame();
+        });
+    }
+    
+    // Next level button
+    const nextLevelBtn = document.getElementById('next-level-btn');
+    if (nextLevelBtn) {
+        nextLevelBtn.addEventListener('click', () => {
+            if (game.currentLevel < game.maxLevel) {
+                game.nextLevel();
+            } else {
+                // Play again
+                game.startGame();
+            }
+        });
+    }
+    
+    // Main menu buttons
+    const mainMenuBtns = document.querySelectorAll('#main-menu-btn, #game-over-menu-btn');
+    mainMenuBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+            game.gameState = 'menu';
+            game.hideAllScreens();
+            document.getElementById('opening-screen').style.display = 'flex';
+        });
+    });
+    
+    // Restart game button
+    const restartBtn = document.getElementById('restart-game-btn');
+    if (restartBtn) {
+        restartBtn.addEventListener('click', () => {
+            game.startLevel(game.currentLevel);
+        });
+    }
+}

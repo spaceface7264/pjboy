@@ -15,6 +15,56 @@
             </div>
         </div>
         
+        <!-- Opening Screen -->
+        <div id="opening-screen" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: linear-gradient(135deg, #000428, #004e92); display: flex; flex-direction: column; justify-content: center; align-items: center; z-index: 10000; font-family: 'Courier New', monospace;">
+            <div style="text-align: center; color: #00ff00; text-shadow: 0 0 20px #00ff00;">
+                <h1 style="font-size: 4rem; margin: 0; letter-spacing: 8px; animation: glitch 2s infinite;">PJBOY</h1>
+                <p style="font-size: 1.5rem; margin: 20px 0; opacity: 0.8; letter-spacing: 2px;">3D MAZE ADVENTURE</p>
+                <div style="margin: 40px 0;">
+                    <button id="start-game-btn" style="background: linear-gradient(45deg, #00ff00, #00aaff); border: none; padding: 15px 40px; font-size: 1.2rem; font-family: 'Courier New', monospace; color: #000; font-weight: bold; border-radius: 8px; cursor: pointer; box-shadow: 0 0 20px rgba(0,255,0,0.5); transition: all 0.3s ease; letter-spacing: 2px;">
+                        START GAME
+                    </button>
+                </div>
+                <div style="margin-top: 30px; font-size: 0.9rem; opacity: 0.6;">
+                    <p>Navigate through increasingly difficult mazes</p>
+                    <p>Find the exit to progress to the next level</p>
+                    <p>Use WASD to move, Mouse to look around</p>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Level Complete Screen -->
+        <div id="level-complete-screen" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); display: none; flex-direction: column; justify-content: center; align-items: center; z-index: 10000; font-family: 'Courier New', monospace;">
+            <div style="text-align: center; color: #00ff00; text-shadow: 0 0 20px #00ff00;">
+                <h1 style="font-size: 3rem; margin: 0; letter-spacing: 4px;">LEVEL COMPLETE!</h1>
+                <p id="level-complete-text" style="font-size: 1.5rem; margin: 20px 0; opacity: 0.8;">Level 1 Complete</p>
+                <div style="margin: 40px 0;">
+                    <button id="next-level-btn" style="background: linear-gradient(45deg, #00ff00, #00aaff); border: none; padding: 15px 40px; font-size: 1.2rem; font-family: 'Courier New', monospace; color: #000; font-weight: bold; border-radius: 8px; cursor: pointer; box-shadow: 0 0 20px rgba(0,255,0,0.5); transition: all 0.3s ease; letter-spacing: 2px; margin-right: 20px;">
+                        NEXT LEVEL
+                    </button>
+                    <button id="main-menu-btn" style="background: linear-gradient(45deg, #ff6600, #ffaa00); border: none; padding: 15px 40px; font-size: 1.2rem; font-family: 'Courier New', monospace; color: #000; font-weight: bold; border-radius: 8px; cursor: pointer; box-shadow: 0 0 20px rgba(255,102,0,0.5); transition: all 0.3s ease; letter-spacing: 2px;">
+                        MAIN MENU
+                    </button>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Game Over Screen -->
+        <div id="game-over-screen" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); display: none; flex-direction: column; justify-content: center; align-items: center; z-index: 10000; font-family: 'Courier New', monospace;">
+            <div style="text-align: center; color: #ff0000; text-shadow: 0 0 20px #ff0000;">
+                <h1 style="font-size: 3rem; margin: 0; letter-spacing: 4px;">GAME OVER</h1>
+                <p id="game-over-text" style="font-size: 1.5rem; margin: 20px 0; opacity: 0.8;">You reached Level 1</p>
+                <div style="margin: 40px 0;">
+                    <button id="restart-game-btn" style="background: linear-gradient(45deg, #ff0000, #ff6600); border: none; padding: 15px 40px; font-size: 1.2rem; font-family: 'Courier New', monospace; color: #fff; font-weight: bold; border-radius: 8px; cursor: pointer; box-shadow: 0 0 20px rgba(255,0,0,0.5); transition: all 0.3s ease; letter-spacing: 2px; margin-right: 20px;">
+                        RESTART
+                    </button>
+                    <button id="game-over-menu-btn" style="background: linear-gradient(45deg, #666, #999); border: none; padding: 15px 40px; font-size: 1.2rem; font-family: 'Courier New', monospace; color: #fff; font-weight: bold; border-radius: 8px; cursor: pointer; box-shadow: 0 0 20px rgba(102,102,102,0.5); transition: all 0.3s ease; letter-spacing: 2px;">
+                        MAIN MENU
+                    </button>
+                </div>
+            </div>
+        </div>
+        
         <!-- Game Settings Modal -->
         <div id="settings-modal" class="modal">
             <div class="modal-content">
