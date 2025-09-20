@@ -49,8 +49,17 @@ class Game3D {
             quaternion: new THREE.Quaternion(),
             heightSpeed: 20 // Speed for height changes
         };
+        
+        // Bird's eye view camera (free-flying)
+        this.birdsEyeCamera = {
+            position: new THREE.Vector3(0, 50, 0),
+            rotation: { x: -Math.PI/2, y: 0 }, // Look straight down
+            speed: 25,
+            mouseSensitivity: 0.002,
+            quaternion: new THREE.Quaternion(),
+            heightSpeed: 30 // Speed for height changes
+        };
         this.showControlsUI = true; // Toggle for control panel visibility
-        this.showMapOverlay = false; // Toggle for map overlay visibility
         
         // Game state management
         this.gameState = 'menu'; // 'menu', 'playing', 'levelComplete', 'gameOver'
@@ -913,6 +922,19 @@ class Game3D {
             const quatY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), this.ghostCamera.rotation.y);
             const quatX = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), this.ghostCamera.rotation.x);
             this.ghostCamera.quaternion.multiplyQuaternions(quatY, quatX);
+        }
+        
+        // Initialize bird's eye camera position when entering bird's eye mode
+        if (mode === 'birds-eye') {
+            this.birdsEyeCamera.position.copy(this.player.position);
+            this.birdsEyeCamera.position.y += 50; // Start 50 units above player
+            this.birdsEyeCamera.rotation.x = -Math.PI/2; // Look straight down
+            this.birdsEyeCamera.rotation.y = 0; // Face forward
+            
+            // Initialize quaternion from Euler angles
+            const quatY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), this.birdsEyeCamera.rotation.y);
+            const quatX = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), this.birdsEyeCamera.rotation.x);
+            this.birdsEyeCamera.quaternion.multiplyQuaternions(quatY, quatX);
         }
         // Hide player model in FPV to avoid clipping into the camera
         if (this.player && this.player.model) {
@@ -3861,11 +3883,10 @@ class Game3D {
         document.addEventListener('keydown', (event) => {
             this.keys[event.code] = true;
             
-            // Debug: Log game state for ø key
-            if (event.code === 'KeyO' && event.shiftKey) {
-                console.log('ø key detected, gameState:', this.gameState, 'gameMode:', this.gameMode);
+            // Debug: Log all key presses
+            if (event.code === 'KeyV') {
+                console.log('V key detected in keydown handler');
             }
-            
             
             // Comprehensive input blocking system
             if (this.shouldBlockInput(event)) {
@@ -3918,13 +3939,6 @@ class Game3D {
                 this.showControlsUI = !this.showControlsUI;
                 this.updateControlsUI();
                 this.showMessage(this.showControlsUI ? 'Control panel shown' : 'Control panel hidden');
-            }
-            
-            // Toggle map overlay with ø key
-            if (event.code === 'KeyO' && event.shiftKey) {
-                console.log('ø key pressed - toggling map overlay');
-                event.preventDefault(); // Prevent default behavior
-                this.toggleMapOverlay();
             }
             
             // Open toolbox modal with T key (create mode only)
@@ -4137,6 +4151,21 @@ class Game3D {
                         const quatX = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), this.ghostCamera.rotation.x);
                         this.ghostCamera.quaternion.multiplyQuaternions(quatY, quatX);
                     }
+                    
+                    // Bird's eye camera mouse look
+                    if (this.viewMode === 'birds-eye') {
+                        // Update yaw (Y rotation) and pitch (X rotation) separately
+                        this.birdsEyeCamera.rotation.y -= event.movementX * this.birdsEyeCamera.mouseSensitivity;
+                        this.birdsEyeCamera.rotation.x -= event.movementY * this.birdsEyeCamera.mouseSensitivity;
+                        
+                        // Clamp pitch to prevent over-rotation (keep looking down)
+                        this.birdsEyeCamera.rotation.x = Math.max(-Math.PI/2, Math.min(Math.PI/6, this.birdsEyeCamera.rotation.x));
+                        
+                        // Update quaternion from Euler angles (Y first, then X to avoid roll)
+                        const quatY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), this.birdsEyeCamera.rotation.y);
+                        const quatX = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), this.birdsEyeCamera.rotation.x);
+                        this.birdsEyeCamera.quaternion.multiplyQuaternions(quatY, quatX);
+                    }
                 } else {
                     this.playMode.mouseNDC.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
                     this.playMode.mouseNDC.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
@@ -4284,6 +4313,13 @@ class Game3D {
         // Ghost camera movement
         if (this.viewMode === 'ghost') {
             this.updateGhostCamera(deltaTime);
+            this.updateCamera();
+            return;
+        }
+        
+        // Bird's eye camera movement
+        if (this.viewMode === 'birds-eye') {
+            this.updateBirdsEyeCamera(deltaTime);
             this.updateCamera();
             return;
         }
@@ -4805,13 +4841,9 @@ class Game3D {
             }
             
             if (this.viewMode === 'birds-eye') {
-                // Birds-eye view: camera high above player looking down
-                const height = 150; // Height above player
-                const cameraPos = this.player.position.clone();
-                cameraPos.y += height;
-                
-                this.camera.position.set(cameraPos.x, cameraPos.y, cameraPos.z);
-                this.camera.lookAt(this.player.position);
+                // Bird's eye view: free-flying camera looking down
+                this.camera.position.copy(this.birdsEyeCamera.position);
+                this.camera.quaternion.copy(this.birdsEyeCamera.quaternion);
                 return;
             }
             
@@ -5469,7 +5501,6 @@ class Game3D {
         // Game controls
         const gameControls = [
             'H - Toggle Controls',
-            'ø - Map Overlay',
             'P - Settings',
             'T - Toolbox',
             'M - Open Drawer',
@@ -6519,6 +6550,42 @@ class Game3D {
         }
     }
     
+    updateBirdsEyeCamera(deltaTime) {
+        // Bird's eye camera movement controls
+        const speed = this.birdsEyeCamera.speed;
+        const moveSpeed = speed * deltaTime;
+        
+        // Calculate movement direction based on camera quaternion
+        const forward = new THREE.Vector3(0, 0, -1);
+        const right = new THREE.Vector3(1, 0, 0);
+        const up = new THREE.Vector3(0, 1, 0);
+        
+        // Apply camera quaternion to movement vectors
+        forward.applyQuaternion(this.birdsEyeCamera.quaternion);
+        right.applyQuaternion(this.birdsEyeCamera.quaternion);
+        up.applyQuaternion(this.birdsEyeCamera.quaternion);
+        
+        // Movement input
+        const movement = new THREE.Vector3();
+        
+        if (this.keys['KeyW']) movement.add(forward);
+        if (this.keys['KeyS']) movement.sub(forward);
+        if (this.keys['KeyA']) movement.sub(right);
+        if (this.keys['KeyD']) movement.add(right);
+        if (this.keys['KeyQ']) movement.sub(up); // Q = down
+        if (this.keys['KeyE']) movement.add(up); // E = up
+        if (this.keys['Space']) movement.add(up); // Space = up (height increase)
+        
+        // Apply movement
+        movement.multiplyScalar(moveSpeed);
+        this.birdsEyeCamera.position.add(movement);
+        
+        // Mouse look (only when pointer is locked)
+        if (this.isPointerLocked) {
+            // Mouse look is handled in mousemove event
+        }
+    }
+    
     
     updatePowerUps(deltaTime) {
         // Health regeneration
@@ -6846,134 +6913,6 @@ class Game3D {
             }
         }
     }
-    
-    // ===== Map Overlay Functions =====
-    
-    toggleMapOverlay() {
-        console.log('toggleMapOverlay called, gameState:', this.gameState);
-        if (this.gameState !== 'playing') {
-            this.showMessage('Map only available during gameplay');
-            return;
-        }
-        
-        this.showMapOverlay = !this.showMapOverlay;
-        const mapOverlay = document.getElementById('map-overlay');
-        console.log('Map overlay element found:', !!mapOverlay);
-        console.log('showMapOverlay:', this.showMapOverlay);
-        
-        if (mapOverlay) {
-            console.log('Map overlay current display:', mapOverlay.style.display);
-            console.log('Map overlay computed style:', window.getComputedStyle(mapOverlay).display);
-        }
-        
-        if (this.showMapOverlay) {
-            this.updateMapOverlay();
-            if (mapOverlay) {
-                mapOverlay.style.display = 'block';
-                mapOverlay.style.visibility = 'visible';
-                mapOverlay.style.opacity = '1';
-                mapOverlay.style.zIndex = '1000';
-                console.log('Map overlay set to display: block');
-                console.log('Map overlay after setting:', mapOverlay.style.display);
-                console.log('Map overlay visibility:', mapOverlay.style.visibility);
-                console.log('Map overlay z-index:', mapOverlay.style.zIndex);
-            }
-            this.showMessage('Map opened - Press ø to close');
-        } else {
-            if (mapOverlay) {
-                mapOverlay.style.display = 'none';
-                console.log('Map overlay set to display: none');
-            }
-            this.showMessage('Map closed');
-        }
-    }
-    
-    updateMapOverlay() {
-        if (!this.lastMazeInfo || !this.lastMazeInfo.maze) {
-            console.warn('No maze data available for map');
-            return;
-        }
-        
-        const { maze, startX, startZ, cellSize } = this.lastMazeInfo;
-        const rows = maze.length;
-        const cols = maze[0].length;
-        
-        // Calculate player position in maze coordinates
-        const playerMazeX = Math.round((this.player.position.x - startX) / cellSize);
-        const playerMazeZ = Math.round((this.player.position.z - startZ) / cellSize);
-        
-        // Clamp player position to maze bounds
-        const clampedX = Math.max(0, Math.min(cols - 1, playerMazeX));
-        const clampedZ = Math.max(0, Math.min(rows - 1, playerMazeZ));
-        
-        // Create map display
-        let mapDisplay = '';
-        for (let row = 0; row < rows; row++) {
-            for (let col = 0; col < cols; col++) {
-                let char = maze[row][col];
-                let className = '';
-                
-                // Check if this is the player position
-                if (row === clampedZ && col === clampedX) {
-                    char = '@';
-                    className = 'map-player';
-                }
-                // Check if this is the entry point
-                else if (row === Math.floor(rows/2) && col === 0 && maze[row][col] === '.') {
-                    char = 'S';
-                    className = 'map-entry';
-                }
-                // Check if this is the exit point
-                else if (row === Math.floor(rows/2) && col === cols - 1 && maze[row][col] === '.') {
-                    char = 'E';
-                    className = 'map-exit';
-                }
-                // Regular path
-                else if (char === '.') {
-                    char = ' ';
-                    className = 'map-path';
-                }
-                // Wall
-                else if (char === '#') {
-                    char = '#';
-                    className = 'map-wall';
-                }
-                
-                mapDisplay += `<span class="${className}">${char}</span>`;
-            }
-            mapDisplay += '\n';
-        }
-        
-        // Update map content
-        const mapContent = document.getElementById('map-content');
-        const mapLevel = document.getElementById('map-level');
-        const mapPlayerPos = document.getElementById('map-player-pos');
-        
-        if (mapContent) {
-            mapContent.innerHTML = mapDisplay;
-        }
-        if (mapLevel) {
-            mapLevel.textContent = this.currentLevel;
-        }
-        if (mapPlayerPos) {
-            mapPlayerPos.textContent = `${clampedX}, ${clampedZ}`;
-        }
-    }
-    
-    // Debug function to test map overlay
-    testMapOverlay() {
-        console.log('Testing map overlay...');
-        const mapOverlay = document.getElementById('map-overlay');
-        if (mapOverlay) {
-            mapOverlay.style.display = 'block';
-            mapOverlay.style.visibility = 'visible';
-            mapOverlay.style.opacity = '1';
-            mapOverlay.style.zIndex = '1000';
-            console.log('Map overlay forced to show');
-        } else {
-            console.log('Map overlay element not found!');
-        }
-    }
 }
 
 // Start the game
@@ -7037,7 +6976,6 @@ window.addEventListener('load', () => {
         }
     });
 });
-
 
 // Setup screen button event listeners
 function setupScreenButtons(game) {
