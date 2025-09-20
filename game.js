@@ -390,19 +390,7 @@ class Game3D {
         this.materials = { wall: null };
         
         // Game modes
-        this.gameMode = 'play'; // 'play' or 'create'
-        this.createMode = {
-            tool: 'wall', // Current tool: 'wall', 'erase', 'start', 'end'
-            gridSize: 20, // Grid size for create mode
-            customMaze: [], // Custom maze layout
-            highlightObjects: [], // Objects for grid highlighting
-            isPlacing: false, // Whether currently placing objects
-            previewObject: null, // Preview object for current tool
-            isMouseDown: false, // Whether mouse is currently pressed
-            lastGridPos: null, // Last grid position for continuous placement
-            startLinePos: null, // Starting position for straight line
-            isShiftHeld: false // Whether SHIFT key is held down
-        };
+        this.gameMode = 'play'; // Only play mode now
         
         // Play mode (Diablo-style) state
         this.playMode = {
@@ -1297,9 +1285,6 @@ class Game3D {
         // Initialize saved mazes
         this.initializeSavedMazes();
         
-        // Initialize create mode
-        this.initializeCreateMode();
-        
         // Don't create labyrinth here - it will be created when starting a level
         // this.createLabyrinth();
         
@@ -1357,19 +1342,6 @@ class Game3D {
     }
     
     
-    initializeCreateMode() {
-        // Initialize empty custom maze
-        this.createMode.customMaze = [];
-        for (let y = 0; y < this.createMode.gridSize; y++) {
-            this.createMode.customMaze[y] = [];
-            for (let x = 0; x < this.createMode.gridSize; x++) {
-                this.createMode.customMaze[y][x] = '.'; // Empty space
-            }
-        }
-        
-        // Create grid highlighting system
-        this.createGridHighlights();
-    }
     
     createGridHighlights() {
         // Clear existing highlights
