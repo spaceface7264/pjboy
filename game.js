@@ -7,12 +7,15 @@ class Game3D {
         // Add test event listeners for debugging (Phase 1)
         this.setupEventBusListeners();
         
+        // Initialize input manager (Phase 3)
+        this.inputManager = new InputManager(this.eventBus);
+        this.setupInputListeners();
+        
         this.scene = null;
         this.camera = null;
         this.renderer = null;
         this.player = null;
         this.clock = new THREE.Clock();
-        this.keys = {};
         this.mouse = { x: 0, y: 0 };
         this.isPointerLocked = false;
         this.controlScheme = 1; // 1: Mouse controls character, 2: Space orbit, 3: Tank controls, 4: Mouse follow
@@ -446,11 +449,11 @@ class Game3D {
         this.enemySpawnInterval = 30; // seconds between enemy spawns
 
         this.init();
-        this.setupEventListeners();
+        // this.setupEventListeners(); // Commented out for Phase 3 - using InputManager instead
         this.initializeWeapons();
         this.animate();
     }
-
+    
     // Event Bus listeners for testing and debugging (Phase 1)
     setupEventBusListeners() {
         // Test listeners to demonstrate events are working
@@ -473,6 +476,258 @@ class Game3D {
         this.eventBus.on('levelCompleted', (data) => {
             console.log('🏆 Level Completed:', 'Level', data.level, 'in', (data.completionTime / 1000).toFixed(1) + 's');
         });
+    }
+
+    // Input Manager listeners for handling input events (Phase 3)
+    setupInputListeners() {
+        // Movement input
+        this.eventBus.on('input:movement', (data) => {
+            // Update keys object for backward compatibility
+            this.keys['KeyW'] = data.movement.forward;
+            this.keys['KeyS'] = data.movement.backward;
+            this.keys['KeyA'] = data.movement.left;
+            this.keys['KeyD'] = data.movement.right;
+        });
+
+        // Action input
+        this.eventBus.on('input:actions', (data) => {
+            // Update keys object for backward compatibility
+            this.keys['ShiftLeft'] = data.actions.sprinting;
+            this.keys['Space'] = data.actions.jumping;
+        });
+
+        // Specific action handlers
+        this.eventBus.on('input:action', (data) => {
+            if (!data.pressed) return; // Only handle key presses, not releases
+            
+            switch (data.action) {
+                case 'cycleView':
+                    this.handleViewCycle();
+                    break;
+                case 'toggleSettings':
+                    this.toggleSettingsModal();
+                    break;
+                case 'toggleControls':
+                    this.handleToggleControls();
+                    break;
+                case 'interact':
+                    this.handleInteract();
+                    break;
+                case 'toggleDrawer':
+                    this.toggleDrawer();
+                    break;
+                case 'toggleInventory':
+                    this.toggleInventoryUI();
+                    break;
+                case 'resetPosition':
+                    this.handleResetPosition();
+                    break;
+                case 'escape':
+                    this.handleEscape();
+                    break;
+                case 'fire':
+                    if (data.pressed) {
+                        this.isFiring = true;
+                        this.handleFireAction();
+                    } else {
+                        this.isFiring = false;
+                    }
+                    break;
+            }
+        });
+
+        // Mouse movement
+        this.eventBus.on('input:mousemove', (data) => {
+            this.handleMouseMovement(data);
+        });
+
+        // Mouse NDC updates
+        this.eventBus.on('input:mousemove:ndc', (data) => {
+            this.playMode.mouseNDC.x = data.x;
+            this.playMode.mouseNDC.y = data.y;
+        });
+
+        // Wheel events
+        this.eventBus.on('input:wheel', (data) => {
+            this.handleWheelEvent(data);
+        });
+
+        // Pointer lock changes
+        this.eventBus.on('input:pointerlockchange', (data) => {
+            this.isPointerLocked = data.isLocked;
+            this.updateCursorVisibility();
+        });
+
+        // Window events
+        this.eventBus.on('input:windowblur', () => {
+            this.handleWindowBlur();
+        });
+
+        this.eventBus.on('input:resize', (data) => {
+            this.handleWindowResize(data);
+        });
+    }
+
+    // Input handler methods (Phase 3)
+    handleViewCycle() {
+        // Cycle through view modes: iso -> fpv -> birds-eye -> ghost -> iso
+        if (this.viewMode === 'iso') {
+            this.setViewMode('fpv');
+        } else if (this.viewMode === 'fpv') {
+            this.setViewMode('birds-eye');
+        } else if (this.viewMode === 'birds-eye') {
+            this.setViewMode('ghost');
+        } else if (this.viewMode === 'ghost') {
+            this.setViewMode('iso');
+        }
+    }
+
+    handleToggleControls() {
+        this.showControlsUI = !this.showControlsUI;
+        this.updateControlsUI();
+        this.showMessage(this.showControlsUI ? 'Control panel shown' : 'Control panel hidden');
+    }
+
+    handleInteract() {
+        // Handle flag placement or other interactions
+        if (this.gameMode === 'play') {
+            const flagPos = this.player.position.clone();
+            this.placeFlag(flagPos.x, flagPos.z);
+        }
+    }
+
+    handleResetPosition() {
+        console.log('Resetting camera and player position');
+        if (document.pointerLockElement) document.exitPointerLock();
+        this.setViewMode('iso');
+        this.currentCameraAngle = 0;
+        this.playMode.mouseNDC.set(0, 0);
+        
+        // Prefer labyrinth start if available
+        const cur = this.savedMazes[this.currentMazeIndex];
+        if (cur && cur.type === 'labyrinth' && this.levelStartWorld) {
+            this.player.position.copy(this.levelStartWorld);
+        } else {
+            this.player.position.set(0, 0, 0);
+        }
+        this.characterRotation = 0;
+        this.updateCamera();
+    }
+
+    handleEscape() {
+        if (this.modalOpen) {
+            this.toggleSettingsModal();
+        } else if (this.isDrawerOpen) {
+            this.toggleDrawer();
+        } else if (document.pointerLockElement) {
+            document.exitPointerLock();
+        }
+    }
+
+    handleFireAction() {
+        // Ensure pointer lock; first click acquires lock instead of shooting
+        if (!this.isPointerLocked) {
+            this.inputManager.requestPointerLock();
+            return;
+        }
+        
+        if (this.gameMode === 'play' && !this.modalOpen && !this.isDrawerOpen) {
+            this.handlePlayClick();
+        }
+    }
+
+    handleMouseMovement(data) {
+        if (this.gameMode !== 'play' || this.modalOpen || this.isDrawerOpen) return;
+        
+        if (data.isPointerLocked) {
+            // Handle pointer-locked mouse movement
+            const scaleX = 2 / window.innerWidth;
+            const scaleY = 2 / window.innerHeight;
+            
+            this.playMode.mouseNDC.x = THREE.MathUtils.clamp(
+                this.playMode.mouseNDC.x + data.deltaX * scaleX,
+                -1, 1
+            );
+            this.playMode.mouseNDC.y = THREE.MathUtils.clamp(
+                this.playMode.mouseNDC.y - data.deltaY * scaleY,
+                -1, 1
+            );
+            
+            // Handle view-specific mouse movement
+            if (this.viewMode === 'fpv' && !this.playMode.orbitEnabled) {
+                this.fpvPitch = (this.fpvPitch || 0) - data.deltaY * 0.0025;
+                this.characterRotation -= data.deltaX * this.fpvYawSensitivity;
+                const limit = Math.PI / 3;
+                this.fpvPitch = Math.max(-limit, Math.min(limit, this.fpvPitch));
+            }
+            
+            if (this.playMode.orbitEnabled && this.viewMode !== 'fpv') {
+                this.currentCameraAngle = (this.currentCameraAngle + data.deltaX * 0.2) % 360;
+            }
+            
+            // Handle ghost camera movement
+            if (this.viewMode === 'ghost') {
+                this.ghostCamera.rotation.y -= data.deltaX * this.ghostCamera.mouseSensitivity;
+                this.ghostCamera.rotation.x -= data.deltaY * this.ghostCamera.mouseSensitivity;
+                this.ghostCamera.rotation.x = Math.max(-Math.PI/2, Math.min(Math.PI/2, this.ghostCamera.rotation.x));
+                
+                const quatY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), this.ghostCamera.rotation.y);
+                const quatX = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), this.ghostCamera.rotation.x);
+                this.ghostCamera.quaternion.multiplyQuaternions(quatY, quatX);
+            }
+            
+            // Handle bird's eye camera movement
+            if (this.viewMode === 'birds-eye') {
+                this.birdsEyeCamera.rotation.y -= data.deltaX * this.birdsEyeCamera.mouseSensitivity;
+                this.birdsEyeCamera.rotation.x -= data.deltaY * this.birdsEyeCamera.mouseSensitivity;
+                this.birdsEyeCamera.rotation.x = Math.max(-Math.PI/2, Math.min(Math.PI/6, this.birdsEyeCamera.rotation.x));
+                
+                const quatY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), this.birdsEyeCamera.rotation.y);
+                const quatX = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), this.birdsEyeCamera.rotation.x);
+                this.birdsEyeCamera.quaternion.multiplyQuaternions(quatY, quatX);
+            }
+        }
+    }
+
+    handleWheelEvent(data) {
+        // Bird's eye camera elevation
+        if (this.gameMode === 'play' && this.viewMode === 'birds-eye') {
+            const elevationSpeed = 5;
+            this.birdsEyeCamera.position.y += data.direction * elevationSpeed;
+            this.birdsEyeCamera.position.y = Math.max(10, Math.min(200, this.birdsEyeCamera.position.y));
+            return;
+        }
+        
+        // Weapon switching
+        if (this.gameMode === 'play' && !this.modalOpen && !this.isDrawerOpen) {
+            this.switchWeapon(data.direction);
+        }
+    }
+
+    handleWindowBlur() {
+        // Clear movement state when window loses focus
+        this.keys = {};
+    }
+
+    handleWindowResize(data) {
+        this.camera.aspect = data.width / data.height;
+        this.camera.updateProjectionMatrix();
+        this.renderer.setSize(data.width, data.height);
+    }
+
+    updateCursorVisibility() {
+        if (this.isPointerLocked && this.gameMode === 'play') {
+            document.body.style.cursor = 'none';
+        } else if (this.gameMode === 'create') {
+            document.body.style.cursor = 'crosshair';
+        } else {
+            document.body.style.cursor = 'default';
+        }
+    }
+
+    // Backward compatibility getter for this.keys (Phase 3)
+    get keys() {
+        return this.inputManager ? this.inputManager.keys : {};
     }
     
     initializeWeapons() {
@@ -685,9 +940,9 @@ class Game3D {
             this.player.currentWeaponIndex = this.weaponManager.getCurrentWeaponIndex();
             
             this.showMessage(`${this.t('switchWeapon')}: ${currentWeapon.name}`);
-            
-            // Emit UI update event
-            this.emit('ui:update', this.buildHUDModel());
+        
+        // Emit UI update event
+        this.emit('ui:update', this.buildHUDModel());
         }
     }
     
@@ -2264,25 +2519,25 @@ class Game3D {
         let cellSize, wallHeight, startX, startZ;
         
         // Only ASCII mazes for gameplay progression
-        // Generate perfect ASCII maze based on difficulty
-        maze = this.generateAsciiPerfectMazeByDifficulty(this.mazeDifficulty || 5);
-        cellSize = 3;
-        wallHeight = 8;
-        const cols = maze[0].length;
-        const rows = maze.length;
-        startX = -((cols - 1) * cellSize) / 2;
-        startZ = -((rows - 1) * cellSize) / 2;
-        this.updateGroundAndFog((cols - 1) * cellSize, (rows - 1) * cellSize);
-        
-        // Store maze info for enemy spawning
-        this.lastMazeInfo = { maze, startX, startZ, cellSize };
+            // Generate perfect ASCII maze based on difficulty
+            maze = this.generateAsciiPerfectMazeByDifficulty(this.mazeDifficulty || 5);
+            cellSize = 3;
+            wallHeight = 8;
+            const cols = maze[0].length;
+            const rows = maze.length;
+            startX = -((cols - 1) * cellSize) / 2;
+            startZ = -((rows - 1) * cellSize) / 2;
+            this.updateGroundAndFog((cols - 1) * cellSize, (rows - 1) * cellSize);
+            
+            // Store maze info for enemy spawning
+            this.lastMazeInfo = { maze, startX, startZ, cellSize };
         
         // Create walls based on layout
         for (let row = 0; row < maze.length; row++) {
             for (let col = 0; col < maze[row].length; col++) {
                 const tile = maze[row][col];
                 if (tile === '#') {
-                    // Vary wall height for visual interest
+                     // Vary wall height for visual interest
                     const h = wallHeight * THREE.MathUtils.lerp(0.7, 1.6, Math.random());
                     const wallGeometry = new THREE.BoxGeometry(cellSize, h, cellSize);
                     const wall = new THREE.Mesh(wallGeometry, wallMaterial);
@@ -2311,7 +2566,7 @@ class Game3D {
         this.lastMazeInfo = { maze, startX, startZ, cellSize };
 
         // Add entrance and exit markers for ASCII mazes
-        this.addLabyrinthMarkers(maze, { startX, startZ, cellSize });
+            this.addLabyrinthMarkers(maze, { startX, startZ, cellSize });
     }
     
     addLabyrinthMarkers(maze, info) {
@@ -2406,22 +2661,22 @@ class Game3D {
     generateAsciiPerfectMaze(width, height) {
         let w = (width % 2 === 0) ? width - 1 : width;
         let h = (height % 2 === 0) ? height - 1 : height;
-    
+
         const grid = Array.from({ length: h }, () => Array.from({ length: w }, () => '#'));
         
         // Fixed bounds check - allow cells up to but not including the border
         const inBounds = (x, y) => x >= 1 && x <= w - 2 && y >= 1 && y <= h - 2;
         
         const carve = (x, y) => { grid[y][x] = '.'; };
-    
+
         // Start at random odd cell
         let sx = 1 + 2 * Math.floor(Math.random() * ((w - 1) / 2));
         let sy = 1 + 2 * Math.floor(Math.random() * ((h - 1) / 2));
         carve(sx, sy);
-    
+
         const stack = [{ x: sx, y: sy }];
         const dirs = [[0, -2], [2, 0], [0, 2], [-2, 0]];
-    
+
         while (stack.length) {
             const cur = stack[stack.length - 1];
             const neighbors = dirs
@@ -2440,13 +2695,13 @@ class Game3D {
                 stack.pop(); 
                 continue; 
             }
-    
+
             const pick = neighbors[Math.floor(Math.random() * neighbors.length)];
             grid[pick.by][pick.bx] = '.'; // Carve the wall between
             grid[pick.ny][pick.nx] = '.'; // Carve the destination cell
             stack.push({ x: pick.nx, y: pick.ny });
         }
-    
+
         // Create entrance and exit
         let entY = 1; 
         for (let y = 1; y < h - 1; y++) { 
