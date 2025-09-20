@@ -59,6 +59,7 @@ class Game3D {
         this.levelCompleteTime = 0;
         this.playerLives = 3;
         this.totalScore = 0;
+        this.levelEndWorld = null; // Position of the red exit marker
         
         this.crosshair3D = null;
         this.groundTargetIndicator = null; // 3D crosshair object
@@ -972,15 +973,6 @@ class Game3D {
         
         // Show opening screen instead of starting immediately
         this.showOpeningScreen();
-    }
-    
-    showOpeningScreen() {
-        this.gameState = 'menu';
-        this.hideAllScreens();
-        const openingScreen = document.getElementById('opening-screen');
-        if (openingScreen) {
-            openingScreen.style.display = 'flex';
-        }
     }
     
     createPlayer() {
@@ -2975,9 +2967,8 @@ class Game3D {
         // Check for death
         if (this.player.hp <= 0) {
             this.showMessage(this.t('playerDeath'));
-            // Reset player position or respawn
-            this.player.position.set(0, 1, 0);
-            this.player.hp = this.player.maxHp;
+            // Trigger game over
+            this.gameOver();
         }
     }
     
@@ -6876,6 +6867,15 @@ class Game3D {
     }
     
     // Game state management methods
+    showOpeningScreen() {
+        this.gameState = 'menu';
+        this.hideAllScreens();
+        const openingScreen = document.getElementById('opening-screen');
+        if (openingScreen) {
+            openingScreen.style.display = 'flex';
+        }
+    }
+    
     startGame() {
         this.gameState = 'playing';
         this.currentLevel = 1;
@@ -6971,7 +6971,13 @@ class Game3D {
         const text = document.getElementById('level-complete-text');
         
         if (screen && text) {
-            text.textContent = `Level ${this.currentLevel} Complete! Score: ${this.totalScore}`;
+            if (this.currentLevel >= this.maxLevel) {
+                text.textContent = `CONGRATULATIONS! All ${this.maxLevel} levels completed! Final Score: ${this.totalScore}`;
+                const nextBtn = document.getElementById('next-level-btn');
+                if (nextBtn) nextBtn.textContent = 'PLAY AGAIN';
+            } else {
+                text.textContent = `Level ${this.currentLevel} Complete! Score: ${this.totalScore}`;
+            }
             screen.style.display = 'flex';
         }
     }
@@ -6992,16 +6998,7 @@ class Game3D {
     }
     
     showGameCompleteScreen() {
-        this.hideAllScreens();
-        const screen = document.getElementById('level-complete-screen');
-        const text = document.getElementById('level-complete-text');
-        const nextBtn = document.getElementById('next-level-btn');
-        
-        if (screen && text && nextBtn) {
-            text.textContent = `CONGRATULATIONS! All ${this.maxLevel} levels completed! Final Score: ${this.totalScore}`;
-            nextBtn.textContent = 'PLAY AGAIN';
-            screen.style.display = 'flex';
-        }
+        this.showLevelCompleteScreen();
     }
     
     updateLevelUI() {
@@ -7055,11 +7052,12 @@ window.addEventListener('load', () => {
     // Expose game instance globally for easy character loading
     window.game = game;
     
-    // Setup screen button event listeners
-    setupScreenButtons(game);
     
     // Setup modal event listeners
     game.setupModalListeners();
+    
+    // Setup screen button event listeners
+    setupScreenButtons(game);
     // Using custom in-code lion archer model (no external GLTF)
 
     // Ensure crosshair element exists

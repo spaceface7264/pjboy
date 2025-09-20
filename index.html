@@ -7,61 +7,55 @@
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
+    <!-- Opening Screen -->
+    <div id="opening-screen" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: linear-gradient(135deg, #000428, #004e92); display: flex; flex-direction: column; justify-content: center; align-items: center; z-index: 10000; color: #00ff00; font-family: 'Courier New', monospace;">
+        <div style="text-align: center; max-width: 600px; padding: 40px;">
+            <h1 style="font-size: 48px; margin-bottom: 20px; text-shadow: 0 0 20px #00ff00; letter-spacing: 3px;">PJBOY</h1>
+            <h2 style="font-size: 24px; margin-bottom: 40px; color: #00aaff; text-shadow: 0 0 10px #00aaff;">3D MAZE ADVENTURE</h2>
+            <p style="font-size: 16px; margin-bottom: 40px; line-height: 1.6; opacity: 0.9;">
+                Navigate through 10 challenging maze levels!<br>
+                Use WASD to move, mouse to look around.<br>
+                Find the red exit marker to complete each level.
+            </p>
+            <button id="start-game-btn" style="background: linear-gradient(45deg, #00ff00, #00aaff); border: none; padding: 15px 40px; font-size: 18px; font-weight: bold; color: #000; border-radius: 8px; cursor: pointer; font-family: 'Courier New', monospace; text-transform: uppercase; letter-spacing: 2px; box-shadow: 0 4px 15px rgba(0,255,0,0.3); transition: all 0.3s ease;">
+                START GAME
+            </button>
+        </div>
+    </div>
+
+    <!-- Level Complete Screen -->
+    <div id="level-complete-screen" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); display: none; flex-direction: column; justify-content: center; align-items: center; z-index: 10000; color: #00ff00; font-family: 'Courier New', monospace;">
+        <div style="text-align: center; max-width: 500px; padding: 40px; background: linear-gradient(135deg, rgba(0,0,0,0.8), rgba(0,20,40,0.8)); border: 2px solid #00ff00; border-radius: 12px;">
+            <h2 style="font-size: 32px; margin-bottom: 20px; text-shadow: 0 0 20px #00ff00;">LEVEL COMPLETE!</h2>
+            <p id="level-complete-text" style="font-size: 18px; margin-bottom: 30px; color: #00aaff;"></p>
+            <button id="next-level-btn" style="background: linear-gradient(45deg, #00ff00, #00aaff); border: none; padding: 12px 30px; font-size: 16px; font-weight: bold; color: #000; border-radius: 8px; cursor: pointer; font-family: 'Courier New', monospace; text-transform: uppercase; letter-spacing: 1px; margin: 5px;">
+                NEXT LEVEL
+            </button>
+            <button id="main-menu-btn" style="background: linear-gradient(45deg, #666, #999); border: none; padding: 12px 30px; font-size: 16px; font-weight: bold; color: #fff; border-radius: 8px; cursor: pointer; font-family: 'Courier New', monospace; text-transform: uppercase; letter-spacing: 1px; margin: 5px;">
+                MAIN MENU
+            </button>
+        </div>
+    </div>
+
+    <!-- Game Over Screen -->
+    <div id="game-over-screen" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); display: none; flex-direction: column; justify-content: center; align-items: center; z-index: 10000; color: #ff0000; font-family: 'Courier New', monospace;">
+        <div style="text-align: center; max-width: 500px; padding: 40px; background: linear-gradient(135deg, rgba(0,0,0,0.8), rgba(40,0,0,0.8)); border: 2px solid #ff0000; border-radius: 12px;">
+            <h2 style="font-size: 32px; margin-bottom: 20px; text-shadow: 0 0 20px #ff0000;">GAME OVER</h2>
+            <p id="game-over-text" style="font-size: 18px; margin-bottom: 30px; color: #ffaa00;"></p>
+            <button id="restart-game-btn" style="background: linear-gradient(45deg, #ff0000, #ff6600); border: none; padding: 12px 30px; font-size: 16px; font-weight: bold; color: #fff; border-radius: 8px; cursor: pointer; font-family: 'Courier New', monospace; text-transform: uppercase; letter-spacing: 1px; margin: 5px;">
+                RESTART LEVEL
+            </button>
+            <button id="game-over-menu-btn" style="background: linear-gradient(45deg, #666, #999); border: none; padding: 12px 30px; font-size: 16px; font-weight: bold; color: #fff; border-radius: 8px; cursor: pointer; font-family: 'Courier New', monospace; text-transform: uppercase; letter-spacing: 1px; margin: 5px;">
+                MAIN MENU
+            </button>
+        </div>
+    </div>
+
     <div id="gameContainer">
         <canvas id="gameCanvas"></canvas>
         <div id="ui">
             <div id="crosshair" style="position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 18px; height: 18px; pointer-events: none; z-index: 999999; display: none;">
                 <div style="position: absolute; top: 50%; left: 50%; width: 8px; height: 8px; background: #00ff00; box-shadow: 0 0 10px #00ff00, 0 0 20px #00ff00; border-radius: 50%; transform: translate(-50%, -50%);"></div>
-            </div>
-        </div>
-        
-        <!-- Opening Screen -->
-        <div id="opening-screen" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: linear-gradient(135deg, #000428, #004e92); display: flex; flex-direction: column; justify-content: center; align-items: center; z-index: 10000; font-family: 'Courier New', monospace;">
-            <div style="text-align: center; color: #00ff00; text-shadow: 0 0 20px #00ff00;">
-                <h1 style="font-size: 4rem; margin: 0; letter-spacing: 8px; animation: glitch 2s infinite;">PJBOY</h1>
-                <p style="font-size: 1.5rem; margin: 20px 0; opacity: 0.8; letter-spacing: 2px;">3D MAZE ADVENTURE</p>
-                <div style="margin: 40px 0;">
-                    <button id="start-game-btn" style="background: linear-gradient(45deg, #00ff00, #00aaff); border: none; padding: 15px 40px; font-size: 1.2rem; font-family: 'Courier New', monospace; color: #000; font-weight: bold; border-radius: 8px; cursor: pointer; box-shadow: 0 0 20px rgba(0,255,0,0.5); transition: all 0.3s ease; letter-spacing: 2px;">
-                        START GAME
-                    </button>
-                </div>
-                <div style="margin-top: 30px; font-size: 0.9rem; opacity: 0.6;">
-                    <p>Navigate through increasingly difficult mazes</p>
-                    <p>Find the exit to progress to the next level</p>
-                    <p>Use WASD to move, Mouse to look around</p>
-                </div>
-            </div>
-        </div>
-        
-        <!-- Level Complete Screen -->
-        <div id="level-complete-screen" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); display: none; flex-direction: column; justify-content: center; align-items: center; z-index: 10000; font-family: 'Courier New', monospace;">
-            <div style="text-align: center; color: #00ff00; text-shadow: 0 0 20px #00ff00;">
-                <h1 style="font-size: 3rem; margin: 0; letter-spacing: 4px;">LEVEL COMPLETE!</h1>
-                <p id="level-complete-text" style="font-size: 1.5rem; margin: 20px 0; opacity: 0.8;">Level 1 Complete</p>
-                <div style="margin: 40px 0;">
-                    <button id="next-level-btn" style="background: linear-gradient(45deg, #00ff00, #00aaff); border: none; padding: 15px 40px; font-size: 1.2rem; font-family: 'Courier New', monospace; color: #000; font-weight: bold; border-radius: 8px; cursor: pointer; box-shadow: 0 0 20px rgba(0,255,0,0.5); transition: all 0.3s ease; letter-spacing: 2px; margin-right: 20px;">
-                        NEXT LEVEL
-                    </button>
-                    <button id="main-menu-btn" style="background: linear-gradient(45deg, #ff6600, #ffaa00); border: none; padding: 15px 40px; font-size: 1.2rem; font-family: 'Courier New', monospace; color: #000; font-weight: bold; border-radius: 8px; cursor: pointer; box-shadow: 0 0 20px rgba(255,102,0,0.5); transition: all 0.3s ease; letter-spacing: 2px;">
-                        MAIN MENU
-                    </button>
-                </div>
-            </div>
-        </div>
-        
-        <!-- Game Over Screen -->
-        <div id="game-over-screen" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); display: none; flex-direction: column; justify-content: center; align-items: center; z-index: 10000; font-family: 'Courier New', monospace;">
-            <div style="text-align: center; color: #ff0000; text-shadow: 0 0 20px #ff0000;">
-                <h1 style="font-size: 3rem; margin: 0; letter-spacing: 4px;">GAME OVER</h1>
-                <p id="game-over-text" style="font-size: 1.5rem; margin: 20px 0; opacity: 0.8;">You reached Level 1</p>
-                <div style="margin: 40px 0;">
-                    <button id="restart-game-btn" style="background: linear-gradient(45deg, #ff0000, #ff6600); border: none; padding: 15px 40px; font-size: 1.2rem; font-family: 'Courier New', monospace; color: #fff; font-weight: bold; border-radius: 8px; cursor: pointer; box-shadow: 0 0 20px rgba(255,0,0,0.5); transition: all 0.3s ease; letter-spacing: 2px; margin-right: 20px;">
-                        RESTART
-                    </button>
-                    <button id="game-over-menu-btn" style="background: linear-gradient(45deg, #666, #999); border: none; padding: 15px 40px; font-size: 1.2rem; font-family: 'Courier New', monospace; color: #fff; font-weight: bold; border-radius: 8px; cursor: pointer; box-shadow: 0 0 20px rgba(102,102,102,0.5); transition: all 0.3s ease; letter-spacing: 2px;">
-                        MAIN MENU
-                    </button>
-                </div>
             </div>
         </div>
         
