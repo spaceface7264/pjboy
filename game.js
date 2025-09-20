@@ -3861,9 +3861,9 @@ class Game3D {
         document.addEventListener('keydown', (event) => {
             this.keys[event.code] = true;
             
-            // Debug: Log game state for TAB key
-            if (event.code === 'Tab') {
-                console.log('TAB key detected, gameState:', this.gameState, 'gameMode:', this.gameMode);
+            // Debug: Log game state for ø key
+            if (event.code === 'KeyO' && event.shiftKey) {
+                console.log('ø key detected, gameState:', this.gameState, 'gameMode:', this.gameMode);
             }
             
             // Debug: Log all key presses
@@ -3924,10 +3924,10 @@ class Game3D {
                 this.showMessage(this.showControlsUI ? 'Control panel shown' : 'Control panel hidden');
             }
             
-            // Toggle map overlay with Tab key
-            if (event.code === 'Tab') {
-                console.log('TAB key pressed - toggling map overlay');
-                event.preventDefault(); // Prevent default tab behavior
+            // Toggle map overlay with ø key
+            if (event.code === 'KeyO' && event.shiftKey) {
+                console.log('ø key pressed - toggling map overlay');
+                event.preventDefault(); // Prevent default behavior
                 this.toggleMapOverlay();
             }
             
@@ -5473,7 +5473,7 @@ class Game3D {
         // Game controls
         const gameControls = [
             'H - Toggle Controls',
-            'TAB - Map Overlay',
+            'ø - Map Overlay',
             'P - Settings',
             'T - Toolbox',
             'M - Open Drawer',
@@ -6868,7 +6868,7 @@ class Game3D {
         if (this.showMapOverlay) {
             this.updateMapOverlay();
             mapOverlay.style.display = 'block';
-            this.showMessage('Map opened - Press Tab to close');
+            this.showMessage('Map opened - Press ø to close');
         } else {
             mapOverlay.style.display = 'none';
             this.showMessage('Map closed');
