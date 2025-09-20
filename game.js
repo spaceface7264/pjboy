@@ -1302,9 +1302,8 @@ class Game3D {
         // Initialize create mode
         this.initializeCreateMode();
         
-        // Create labyrinth
-        this.createLabyrinth();
-        
+        // Don't create labyrinth here - it will be created when starting a level
+        // this.createLabyrinth();
         
         // Create skybox
         this.createSkybox();
