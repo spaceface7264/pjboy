@@ -3861,6 +3861,11 @@ class Game3D {
         document.addEventListener('keydown', (event) => {
             this.keys[event.code] = true;
             
+            // Debug: Log game state for TAB key
+            if (event.code === 'Tab') {
+                console.log('TAB key detected, gameState:', this.gameState, 'gameMode:', this.gameMode);
+            }
+            
             // Debug: Log all key presses
             if (event.code === 'KeyV') {
                 console.log('V key detected in keydown handler');
@@ -3921,6 +3926,7 @@ class Game3D {
             
             // Toggle map overlay with Tab key
             if (event.code === 'Tab') {
+                console.log('TAB key pressed - toggling map overlay');
                 event.preventDefault(); // Prevent default tab behavior
                 this.toggleMapOverlay();
             }
@@ -6848,6 +6854,7 @@ class Game3D {
     // ===== Map Overlay Functions =====
     
     toggleMapOverlay() {
+        console.log('toggleMapOverlay called, gameState:', this.gameState);
         if (this.gameState !== 'playing') {
             this.showMessage('Map only available during gameplay');
             return;
@@ -6855,6 +6862,8 @@ class Game3D {
         
         this.showMapOverlay = !this.showMapOverlay;
         const mapOverlay = document.getElementById('map-overlay');
+        console.log('Map overlay element found:', !!mapOverlay);
+        console.log('showMapOverlay:', this.showMapOverlay);
         
         if (this.showMapOverlay) {
             this.updateMapOverlay();
