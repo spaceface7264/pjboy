@@ -1,6 +1,12 @@
 // 3D Second-Person Game - 128-bit Style
 class Game3D {
     constructor() {
+        // Initialize event system first
+        this.eventBus = new EventBus();
+        
+        // Add test event listeners for debugging (Phase 1)
+        this.setupEventBusListeners();
+        
         this.scene = null;
         this.camera = null;
         this.renderer = null;
@@ -444,6 +450,30 @@ class Game3D {
         this.initializeWeapons();
         this.animate();
     }
+
+    // Event Bus listeners for testing and debugging (Phase 1)
+    setupEventBusListeners() {
+        // Test listeners to demonstrate events are working
+        this.eventBus.on('weaponFired', (data) => {
+            console.log('🔫 Weapon Fired:', data.weaponName, 'at', data.playerPosition);
+        });
+
+        this.eventBus.on('playerDamaged', (data) => {
+            console.log('💥 Player Damaged:', data.damage, 'HP:', data.newHp + '/' + data.maxHp);
+        });
+
+        this.eventBus.on('enemyKilled', (data) => {
+            console.log('☠️ Enemy Killed:', 'by', data.weapon, 'at', data.enemyPosition);
+        });
+
+        this.eventBus.on('weaponSwitched', (data) => {
+            console.log('🔄 Weapon Switched:', data.oldWeaponName, '->', data.newWeaponName);
+        });
+
+        this.eventBus.on('levelCompleted', (data) => {
+            console.log('🏆 Level Completed:', 'Level', data.level, 'in', (data.completionTime / 1000).toFixed(1) + 's');
+        });
+    }
     
     initializeWeapons() {
         // Define available weapons
@@ -694,6 +724,9 @@ class Game3D {
     switchWeapon(direction = 1) {
         if (this.player.weapons.length <= 1) return;
         
+        const oldIndex = this.player.currentWeaponIndex;
+        const oldWeapon = this.getCurrentWeapon();
+        
         this.player.currentWeaponIndex = (this.player.currentWeaponIndex + direction) % this.player.weapons.length;
         if (this.player.currentWeaponIndex < 0) {
             this.player.currentWeaponIndex = this.player.weapons.length - 1;
@@ -702,6 +735,17 @@ class Game3D {
         const currentWeapon = this.getCurrentWeapon();
         if (currentWeapon) {
             this.showMessage(`${this.t('switchWeapon')}: ${currentWeapon.name}`);
+            
+            // Emit weapon switched event
+            this.eventBus.emit('weaponSwitched', {
+                oldWeaponId: oldWeapon?.id || null,
+                oldWeaponName: oldWeapon?.name || null,
+                newWeaponId: currentWeapon.id,
+                newWeaponName: currentWeapon.name,
+                newWeaponIndex: this.player.currentWeaponIndex,
+                oldWeaponIndex: oldIndex,
+                playerPosition: this.player.position.clone()
+            });
         }
         
         // Emit UI update event
@@ -759,6 +803,16 @@ class Game3D {
         // Set cooldown
         this.weaponCooldowns[weaponId] = weapon.cooldown;
         
+        // Emit weapon fired event
+        this.eventBus.emit('weaponFired', {
+            weaponId: weaponId,
+            weaponName: weapon.name,
+            weaponType: weapon.type,
+            damage: weapon.damage,
+            ammoRemaining: this.inventory.ammo,
+            playerPosition: this.player.position.clone()
+        });
+        
         // Emit UI update event
         this.emit('ui:update', this.buildHUDModel());
         
@@ -788,6 +842,14 @@ class Game3D {
             this.spawnImpact(hits[0].point.clone(), 0xff0000);
             
             if (e.userData.hp <= 0) {
+                // Emit enemy killed event
+                this.eventBus.emit('enemyKilled', {
+                    enemyPosition: e.position.clone(),
+                    killedBy: 'ranged',
+                    playerPosition: this.player.position.clone(),
+                    weapon: this.getCurrentWeapon()?.name || 'unknown'
+                });
+                
                 const idx = this.playMode.enemies.indexOf(e);
                 if (idx !== -1) this.playMode.enemies.splice(idx, 1);
                 this.playMode.enemiesGroup.remove(e);
@@ -2696,9 +2758,20 @@ class Game3D {
     damagePlayer(amount) {
         if (this.player.invulnerable) return;
         
+        const oldHp = this.player.hp;
         this.player.hp = Math.max(0, this.player.hp - amount);
         this.player.invulnerable = true;
         this.player.invulnerabilityTimer = 1.0; // 1 second invulnerability
+        
+        // Emit player damaged event
+        this.eventBus.emit('playerDamaged', {
+            damage: amount,
+            oldHp: oldHp,
+            newHp: this.player.hp,
+            maxHp: this.player.maxHp,
+            isDead: this.player.hp <= 0,
+            playerPosition: this.player.position.clone()
+        });
         
         // Visual feedback
         this.showMessage(`${this.t('playerHit')} - ${this.t('health')}: ${this.player.hp}/${this.player.maxHp}`);
@@ -6734,6 +6807,17 @@ class Game3D {
     completeLevel() {
         this.gameState = 'levelComplete';
         this.levelCompleteTime = Date.now();
+        
+        // Emit level completed event
+        this.eventBus.emit('levelCompleted', {
+            level: this.currentLevel,
+            completionTime: this.levelCompleteTime - this.levelStartTime,
+            playerLives: this.playerLives,
+            totalScore: this.totalScore,
+            playerPosition: this.player.position.clone(),
+            playerHp: this.player.hp,
+            maxLevel: this.maxLevel
+        });
         
         // Calculate score for this level
         const levelTime = (this.levelCompleteTime - this.levelStartTime) / 1000;
