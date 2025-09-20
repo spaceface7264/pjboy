@@ -1348,111 +1348,8 @@ class Game3D {
     }
     
     initializeSavedMazes() {
-        // Pre-defined maze layouts
+        // Only ASCII mazes for gameplay progression
         this.savedMazes = [
-            {
-                name: this.t('wideHalls'),
-                size: 100,
-                type: "generated",
-                description: this.t('wideHallsDesc')
-            },
-            {
-                name: this.t('classicSmall'),
-                size: 15,
-                type: "static",
-                layout: [
-                    "###############",
-                    "#.............#",
-                    "#.##.......##.#",
-                    "#.#.........#.#",
-                    "#.#.#######.#.#",
-                    "#.#.........#.#",
-                    "#.##.......##.#",
-                    "#.#.........#.#",
-                    "#.#.#######.#.#",
-                    "#.#.........#.#",
-                    "#.##.......##.#",
-                    "#.#.........#.#",
-                    "#.#.#######.#.#",
-                    "#.............#",
-                    "###############"
-                ],
-                description: this.t('classicSmallDesc')
-            },
-            {
-                name: this.t('openArena'),
-                size: 20,
-                type: "static",
-                layout: [
-                    "####################",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "####################"
-                ],
-                description: this.t('openArenaDesc')
-            },
-            {
-                name: this.t('spiral'),
-                size: 25,
-                type: "static",
-                layout: this.generateSpiralMaze(25),
-                description: this.t('spiralDesc')
-            },
-            {
-                name: this.t('labyrinth'),
-                size: 61,
-                type: "static",
-                layout: [
-                    "#############################################################",
-                    "#############################################################",
-                    "#############################################################",
-                    "##......................................##.......##........##",
-                    "##..######.########.##################..###..######.......###",
-                    "##..##################################..###.#######.##.##..##",
-                    "##..###..######....###.#..#####.....#....##.###.#...#####.###",
-                    "##..##.......##..........................##.##......#####.###",
-                    "##..#..####..##..##########################.###.....###....##",
-                    "##..#..#####.##..##########################..###.##.##.....##",
-                    "##..##....##.##..................................#####..#####",
-                    "##..##....##.##..................................#####.######",
-                    "##..####..##.#########################..###########....##.###",
-                    "##..####..##..########################..###########....##..##",
-                    "#...##....##....##........##.....................##.#####..##",
-                    "#...##...###....##........#.........##...........##..####..##",
-                    "#...##...###....##........#.........##...........##..####..##",
-                    "##..####..##..########################..###########....##..##",
-                    "##..####..##.#########################..###########....##.###",
-                    "##..##....##.##..................................#####.######",
-                    "##..##....##.##..................................#####..#####",
-                    "##..#..#####.##..##########################..###.##.##.....##",
-                    "##..#..####..##..##########################.###.....###....##",
-                    "##..##.......##..........................##.##......#####.###",
-                    "##..###..######....###.#..#####.....#....##.###.#...#####.###",
-                    "##..##################################..###.#######.##.##..##",
-                    "##..######.########.##################..###..######.......###",
-                    "##......................................##.......##........##",
-                    "#############################################################",
-                    "#############################################################",
-                    "#############################################################"
-                ],
-                description: this.t('labyrinthDesc')
-            },
             {
                 name: this.t('asciiMaze'),
                 size: 41,
@@ -1462,36 +1359,6 @@ class Game3D {
         ];
     }
     
-    generateSpiralMaze(size) {
-        const maze = [];
-        for (let y = 0; y < size; y++) {
-            maze[y] = [];
-            for (let x = 0; x < size; x++) {
-                maze[y][x] = '#';
-            }
-        }
-        
-        // Create spiral pattern
-        let x = 1, y = 1;
-        let dx = 1, dy = 0;
-        let steps = 1;
-        
-        while (x < size-1 && y < size-1) {
-            for (let i = 0; i < steps; i++) {
-                if (x >= 0 && x < size && y >= 0 && y < size) {
-                    maze[y][x] = '.';
-                }
-                x += dx;
-                y += dy;
-            }
-            
-            // Turn right
-            [dx, dy] = [-dy, dx];
-            if (dx === 0) steps++;
-        }
-        
-        return maze;
-    }
     
     initializeCreateMode() {
         // Initialize empty custom maze
@@ -2434,68 +2301,27 @@ class Game3D {
         let maze;
         let cellSize, wallHeight, startX, startZ;
         
-        if (currentMaze.type === "labyrinth") {
-            // Perfect maze with clear start/end; wide halls and tall walls
-            const size = currentMaze.size;
-            const result = this.generatePerfectLabyrinth(size);
-            maze = result.grid;
-            this.levelStartCell = result.start; // {x,y}
-            this.levelEndCell = result.end;
-            cellSize = this.labyrinthCorridorWidth; // wide halls (5–10 range recommended)
-            wallHeight = 8; // high walls
-            const cols = maze[0].length;
-            const rows = maze.length;
-            startX = -((cols - 1) * cellSize) / 2;
-            startZ = -((rows - 1) * cellSize) / 2;
-            this.updateGroundAndFog((cols - 1) * cellSize, (rows - 1) * cellSize);
-        } else if (currentMaze.type === "ascii") {
-            // Generate perfect ASCII maze based on difficulty
-            maze = this.generateAsciiPerfectMazeByDifficulty(this.mazeDifficulty || 5);
-            cellSize = 3;
-            wallHeight = 8;
-            const cols = maze[0].length;
-            const rows = maze.length;
-            startX = -((cols - 1) * cellSize) / 2;
-            startZ = -((rows - 1) * cellSize) / 2;
-            this.updateGroundAndFog((cols - 1) * cellSize, (rows - 1) * cellSize);
-            
-            // Store maze info for enemy spawning
-            this.lastMazeInfo = { maze, startX, startZ, cellSize };
-        } else if (currentMaze.type === "generated") {
-            // Generate maze dynamically
-            maze = this.generateMaze(currentMaze.size, currentMaze.size);
-            cellSize = 2;
-            wallHeight = 4;
-            // Center the maze exactly on the ground using cell centers
-            const cols = maze[0].length;
-            const rows = maze.length;
-            startX = -((cols - 1) * cellSize) / 2;
-            startZ = -((rows - 1) * cellSize) / 2;
-            this.updateGroundAndFog((cols - 1) * cellSize, (rows - 1) * cellSize);
-        } else {
-            // Use static layout
-            maze = currentMaze.layout;
-            cellSize = 3;
-            wallHeight = (currentMaze.name === 'Labyrinth') ? 8 : 4;
-            const cols = maze[0].length;
-            const rows = maze.length;
-            startX = -((cols - 1) * cellSize) / 2;
-            startZ = -((rows - 1) * cellSize) / 2;
-            this.updateGroundAndFog((cols - 1) * cellSize, (rows - 1) * cellSize);
-        }
+        // Only ASCII mazes for gameplay progression
+        // Generate perfect ASCII maze based on difficulty
+        maze = this.generateAsciiPerfectMazeByDifficulty(this.mazeDifficulty || 5);
+        cellSize = 3;
+        wallHeight = 8;
+        const cols = maze[0].length;
+        const rows = maze.length;
+        startX = -((cols - 1) * cellSize) / 2;
+        startZ = -((rows - 1) * cellSize) / 2;
+        this.updateGroundAndFog((cols - 1) * cellSize, (rows - 1) * cellSize);
+        
+        // Store maze info for enemy spawning
+        this.lastMazeInfo = { maze, startX, startZ, cellSize };
         
         // Create walls based on layout
         for (let row = 0; row < maze.length; row++) {
             for (let col = 0; col < maze[row].length; col++) {
                 const tile = maze[row][col];
                 if (tile === '#') {
-                    const isBorder = row === 0 || col === 0 || row === maze.length - 1 || col === maze[row].length - 1;
-                    // Only thin interior walls for procedurally generated mazes.
-                    if (currentMaze.type === 'generated' && !isBorder) {
-                        if (Math.random() > this.wallDensity) continue; // skip most interior walls
-                    }
-                     // Vary wall height for visual interest
-                    const h = (currentMaze.type === 'labyrinth') ? wallHeight : (wallHeight * THREE.MathUtils.lerp(0.7, 1.6, Math.random()));
+                    // Vary wall height for visual interest
+                    const h = wallHeight * THREE.MathUtils.lerp(0.7, 1.6, Math.random());
                     const wallGeometry = new THREE.BoxGeometry(cellSize, h, cellSize);
                     const wall = new THREE.Mesh(wallGeometry, wallMaterial);
                     
@@ -2602,87 +2428,7 @@ class Game3D {
         this.labyrinthMarkers.push(s, e);
     }
 
-    generatePerfectLabyrinth(size) {
-        // Ensure odd size for maze
-        const n = (size % 2 === 0) ? size + 1 : size;
-        const grid = Array.from({ length: n }, () => Array.from({ length: n }, () => '#'));
-        // Carve passages at odd coordinates
-        const stack = [];
-        const start = { x: 1, y: 1 };
-        grid[start.y][start.x] = '.';
-        stack.push(start);
-        const dirs = [ {x:0,y:-2}, {x:2,y:0}, {x:0,y:2}, {x:-2,y:0} ];
-        while (stack.length) {
-            const cur = stack[stack.length - 1];
-            // collect unvisited neighbors
-            const neigh = [];
-            for (const d of dirs.sort(()=>Math.random()-0.5)) {
-                const nx = cur.x + d.x, ny = cur.y + d.y;
-                if (nx > 0 && nx < n-1 && ny > 0 && ny < n-1 && grid[ny][nx] === '#') {
-                    neigh.push({ nx, ny, wx: cur.x + d.x/2, wy: cur.y + d.y/2 });
-                }
-            }
-            if (neigh.length === 0) {
-                stack.pop();
-            } else {
-                const pick = neigh[Math.floor(Math.random()*neigh.length)];
-                grid[pick.wy][pick.wx] = '.';
-                grid[pick.ny][pick.nx] = '.';
-                stack.push({ x: pick.nx, y: pick.ny });
-            }
-        }
-        // Define end at opposite corner
-        const end = { x: n-2, y: n-2 };
-        grid[end.y][end.x] = '.';
-        // Openings on border near start and end
-        grid[1][0] = '.'; // entrance
-        grid[n-2][n-1] = '.'; // exit
-        return { grid, start, end };
-    }
 
-    // Build a static ASCII labyrinth with wide corridors and small loops.
-    // baseSize: odd number (e.g., 61); passageScale: width of corridors in cells (e.g., 5)
-    // braidFactor: 0..1 chance to open a wall between parallel passages to create loops
-    generateWideImperfectLabyrinth(baseSize = 61, passageScale = 1, braidFactor = 0.12) {
-        const { grid } = this.generatePerfectLabyrinth(baseSize); // '.' and '#'
-        const H = grid.length, W = grid[0].length;
-        // Upscale: '.' -> passageScale x passageScale block; '#' stays 1x1 to keep walls 1 cell thick
-        const out = [];
-        for (let y = 0; y < H; y++) {
-            const row = grid[y];
-            const expandedRow = [];
-            for (let x = 0; x < W; x++) {
-                if (row[x] === '.') {
-                    for (let k = 0; k < passageScale; k++) expandedRow.push('.');
-                } else {
-                    expandedRow.push('#');
-                }
-            }
-            const vrep = row.some(c => c === '.') ? passageScale : 1;
-            for (let r = 0; r < vrep; r++) out.push(expandedRow.slice());
-        }
-        const H2 = out.length, W2 = out[0].length;
-        // Outer border walls
-        for (let x = 0; x < W2; x++) { out[0][x] = '#'; out[H2-1][x] = '#'; }
-        for (let y = 0; y < H2; y++) { out[y][0] = '#'; out[y][W2-1] = '#'; }
-        // Punch some internal walls to add loops
-        for (let y = 1; y < H2 - 1; y++) {
-            for (let x = 1; x < W2 - 1; x++) {
-                if (out[y][x] !== '#') continue;
-                const left = out[y][x-1] === '.'; const right = out[y][x+1] === '.';
-                const up = out[y-1][x] === '.'; const down = out[y+1][x] === '.';
-                const separatesHoriz = left && right && !(up || down);
-                const separatesVert = up && down && !(left || right);
-                if ((separatesHoriz || separatesVert) && Math.random() < braidFactor) out[y][x] = '.';
-            }
-        }
-        // Entrance on left, exit on right
-        let entY = Math.floor(H2/2), extY = Math.floor(H2/2);
-        for (let y = 1; y < H2 - 1; y++) if (out[y][1] === '.') { entY = y; break; }
-        for (let y = H2 - 2; y >= 1; y--) if (out[y][W2-2] === '.') { extY = y; break; }
-        out[entY][0] = '.'; out[extY][W2-1] = '.';
-        return out.map(r => r.join(''));
-    }
 
     // ===== ASCII perfect maze (strings) with difficulty =====
     generateAsciiPerfectMaze(width, height) {
