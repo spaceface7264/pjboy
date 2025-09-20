@@ -53,9 +53,58 @@
 
     <div id="gameContainer">
         <canvas id="gameCanvas"></canvas>
-        <div id="ui">
-            <div id="crosshair" style="position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 18px; height: 18px; pointer-events: none; z-index: 999999; display: none;">
-                <div style="position: absolute; top: 50%; left: 50%; width: 8px; height: 8px; background: #00ff00; box-shadow: 0 0 10px #00ff00, 0 0 20px #00ff00; border-radius: 50%; transform: translate(-50%, -50%);"></div>
+        
+        <!-- Main UI Overlay -->
+        <div id="ui-overlay" class="ui-overlay">
+            <!-- Crosshair (FPV only) -->
+            <div id="crosshair" class="crosshair">
+                <div class="crosshair-dot"></div>
+            </div>
+            
+            <!-- HUD (Top-left) -->
+            <div id="hud-container" class="hud-container">
+                <div id="level-info" class="level-info"></div>
+                <div id="player-stats" class="player-stats"></div>
+                <div id="weapon-info" class="weapon-info"></div>
+            </div>
+            
+            <!-- Message Box (Center) -->
+            <div id="message-box" class="message-box"></div>
+            
+            <!-- Debug Info (Bottom-left) -->
+            <div id="debug-info" class="debug-info"></div>
+            
+            <!-- Controls Panel (Bottom-right) -->
+            <div id="controls-panel" class="controls-panel"></div>
+            
+            <!-- Inventory UI -->
+            <div id="inventory-ui" class="inventory-ui"></div>
+        </div>
+        
+        <!-- Game Screens -->
+        <div id="opening-screen" class="game-screen">
+            <div class="screen-content">
+                <h1>PJBOY</h1>
+                <p>Navigate through ASCII mazes and complete all levels!</p>
+                <button id="start-button" class="game-button">START GAME</button>
+            </div>
+        </div>
+        
+        <div id="level-complete-screen" class="game-screen">
+            <div class="screen-content">
+                <h2>Level Complete!</h2>
+                <div id="level-complete-stats"></div>
+                <button id="next-level-button" class="game-button">NEXT LEVEL</button>
+                <button id="main-menu-button" class="game-button secondary">MAIN MENU</button>
+            </div>
+        </div>
+        
+        <div id="game-over-screen" class="game-screen">
+            <div class="screen-content">
+                <h2>Game Over</h2>
+                <div id="game-over-stats"></div>
+                <button id="restart-button" class="game-button">RESTART LEVEL</button>
+                <button id="main-menu-button-2" class="game-button secondary">MAIN MENU</button>
             </div>
         </div>
         

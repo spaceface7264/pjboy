@@ -62,10 +62,10 @@ class UIManager {
         this.cacheElement('mainMenuButton', 'main-menu-button');
         this.cacheElement('restartButton', 'restart-button');
         
-        // Create containers for dynamic content
-        this.createContainer('hudContainer', 'position: fixed; top: 20px; left: 20px; z-index: 1000; pointer-events: none; color: white; font-family: monospace;');
-        this.createContainer('messageContainer', 'position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 2000; pointer-events: none;');
-        this.createContainer('debugContainer', 'position: fixed; bottom: 20px; left: 20px; z-index: 1000; pointer-events: none; color: #00ff00; font-family: monospace; font-size: 12px;');
+        // HUD containers (now static HTML elements)
+        this.cacheElement('hudContainer', 'hud-container');
+        this.cacheElement('messageContainer', 'message-box');
+        this.cacheElement('debugContainer', 'debug-info');
         
         console.log('UIManager: Cached', Object.keys(this.elements).length, 'UI elements');
     }
@@ -198,15 +198,32 @@ class UIManager {
      * Update HUD with game stats
      */
     updateHUD(gameState) {
-        const hudContent = `
+        // Update level info section
+        const levelContent = `
             <div>Level: ${gameState.currentLevel || 1}</div>
             <div>Lives: ${gameState.playerLives || 3}</div>
             <div>Score: ${gameState.totalScore || 0}</div>
-            <div>HP: ${gameState.playerHP || 100}</div>
-            <div>Ammo: ${gameState.playerAmmo || 0}</div>
-            ${gameState.currentWeapon ? `<div>Weapon: ${gameState.currentWeapon}</div>` : ''}
         `;
-        this.updateElement('hudContainer', hudContent, 100); // Update HUD at most 10 times per second
+        this.updateElement('levelInfo', levelContent, 100);
+        
+        // Update player stats section
+        const playerContent = `
+            <div>HP: ${gameState.playerHP || 100}</div>
+            <div>Energy: ${gameState.playerEnergy || 0}</div>
+            <div>Shield: ${gameState.playerShield || 0}</div>
+        `;
+        this.updateElement('playerStats', playerContent, 100);
+        
+        // Update weapon info section (if weapon exists)
+        if (gameState.currentWeapon) {
+            const weaponContent = `
+                <div>Weapon: ${gameState.currentWeapon}</div>
+                <div>Ammo: ${gameState.playerAmmo || 0}</div>
+            `;
+            this.updateElement('weaponInfo', weaponContent, 100);
+        } else {
+            this.updateElement('weaponInfo', '<div>No weapon equipped</div>', 100);
+        }
     }
 
     /**
@@ -217,13 +234,15 @@ class UIManager {
         if (messageElement) {
             const messageClass = type === 'error' ? 'error-message' : 'info-message';
             messageElement.innerHTML = `<div class="${messageClass}" style="
-                background: ${type === 'error' ? 'rgba(255,0,0,0.8)' : 'rgba(0,0,0,0.8)'};
+                background: ${type === 'error' ? 'rgba(255,0,0,0.8)' : 'rgba(0,120,0,0.9)'};
                 color: white;
-                padding: 20px;
-                border-radius: 10px;
+                padding: 15px 25px;
+                border-radius: 8px;
                 text-align: center;
-                font-family: monospace;
-                animation: fadeInOut ${duration}ms ease-in-out;
+                font-family: 'Courier New', monospace;
+                font-size: 16px;
+                border: 2px solid ${type === 'error' ? '#ff4444' : '#00ff00'};
+                box-shadow: 0 0 20px ${type === 'error' ? 'rgba(255,0,0,0.5)' : 'rgba(0,255,0,0.3)'};
             ">${text}</div>`;
             
             // Auto-hide after duration
@@ -330,10 +349,12 @@ class UIManager {
                 
             case 'levelComplete':
                 this.show('levelCompleteScreen');
+                this.hide('hudContainer');
                 break;
                 
             case 'gameOver':
                 this.show('gameOverScreen');
+                this.hide('hudContainer');
                 break;
         }
         
