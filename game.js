@@ -2348,20 +2348,8 @@ class Game3D {
         // Stash info for spawners and markers
         this.lastMazeInfo = { maze, startX, startZ, cellSize };
 
-        // Compute and store start/end world positions for labyrinth
-        if (currentMaze.type === 'labyrinth' && this.levelStartCell && this.levelEndCell) {
-            const sx = startX + this.levelStartCell.x * cellSize;
-            const sz = startZ + this.levelStartCell.y * cellSize;
-            const ex = startX + this.levelEndCell.x * cellSize;
-            const ez = startZ + this.levelEndCell.y * cellSize;
-            this.levelStartWorld = new THREE.Vector3(sx, 0, sz);
-            this.levelEndWorld = new THREE.Vector3(ex, 0, ez);
-            // Place markers
-            this.addObjectiveMarkers(this.levelStartWorld, this.levelEndWorld);
-        } else {
-            // Add entrance and exit markers based on maze bounds
-            this.addLabyrinthMarkers(maze, { startX, startZ, cellSize });
-        }
+        // Add entrance and exit markers for ASCII mazes
+        this.addLabyrinthMarkers(maze, { startX, startZ, cellSize });
     }
     
     addLabyrinthMarkers(maze, info) {
@@ -6652,12 +6640,29 @@ class Game3D {
         // Generate ASCII maze for this level
         this.generateAsciiPerfectMazeByDifficulty(level);
         
+        // Create the maze (this sets up levelStartWorld and levelEndWorld)
+        this.createLabyrinth();
+        
         // Set up play mode
         this.setGameMode('play');
         this.setViewMode('iso');
         
         // Reset player
         this.resetPlayer();
+        
+        // Position player at entry point
+        if (this.levelStartWorld) {
+            this.player.position.set(this.levelStartWorld.x, 0, this.levelStartWorld.z);
+            // Face toward the maze interior (toward end)
+            if (this.levelEndWorld) {
+                const dx = this.levelEndWorld.x - this.levelStartWorld.x;
+                const dz = this.levelEndWorld.z - this.levelStartWorld.z;
+                this.characterRotation = Math.atan2(dx, dz);
+            }
+        } else {
+            // Fallback to center if no entry point found
+            this.player.position.set(0, 0, 0);
+        }
         
         // Show level UI
         this.updateLevelUI();
