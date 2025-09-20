@@ -44,7 +44,7 @@ A retro-styled 3D maze game built with Three.js featuring second-person perspect
 ### Installation
 1. Clone the repository:
    ```bash
-   git clone https://github.com/yourusername/pjboy.git
+   git clone https://github.com/spaceface7264/pjboy.git
    cd pjboy
    ```
 

@@ -1,0 +1,203 @@
+# PJBoy 3D Maze Game - Project Configuration
+
+project:
+  name: "PJBoy"
+  version: "1.0.0"
+  description: "3D Second-Person Maze Game with 128-bit Retro Aesthetic"
+  author: "BouldersDK"
+  license: "MIT"
+  
+  # Project URLs
+  repository: "https://github.com/spaceface7264/pjboy"
+  homepage: "https://spaceface7264.github.io/pjboy"
+  issues: "https://github.com/spaceface7264/pjboy/issues"
+  
+  # Technology Stack
+  tech_stack:
+    - "HTML5"
+    - "CSS3"
+    - "JavaScript (ES6+)"
+    - "Three.js (WebGL)"
+    - "WebGL"
+    
+  # Game Features
+  features:
+    core_gameplay:
+      - "3D Second-Person Perspective"
+      - "Multiple Maze Types"
+      - "Dual Game Modes (Play/Create)"
+      - "Progressive Difficulty (10 levels)"
+      - "Multi-language Support (Danish/English)"
+      
+    visual_audio:
+      - "128-bit Retro Aesthetic"
+      - "Multiple Themes (Neon, Forest, Desert, Dungeon)"
+      - "Dynamic Lighting"
+      - "Particle Effects"
+      - "Glitch Effects"
+      
+    controls_interface:
+      - "Multiple Control Schemes"
+      - "Interactive UI"
+      - "Real-time HUD"
+      - "Settings Modal"
+      - "Toolbox for Create Mode"
+      
+    game_mechanics:
+      - "Combat System (Ranged/Melee)"
+      - "Inventory Management"
+      - "Flag System"
+      - "Enemy AI"
+      - "Power-ups and Upgrades"
+
+# Development Configuration
+development:
+  # File Structure
+  source_files:
+    - "index.html"
+    - "game.js"
+    - "style.css"
+    - "instructions.txt"
+    
+  # 3D Assets
+  assets:
+    models:
+      - "3dmodelpjboy.glb"
+      - "chatgpt_avatar.glb"
+      - "cube.glb"
+      - "walker.gltf"
+      - "walker.bin"
+    
+  # Build Configuration
+  build:
+    output_directory: "dist"
+    include_assets: true
+    minify_js: false  # Set to true for production
+    minify_css: false # Set to true for production
+    
+  # Testing
+  testing:
+    browsers:
+      - "Chrome"
+      - "Firefox"
+      - "Safari"
+      - "Edge"
+    webgl_required: true
+    mobile_support: false  # Currently desktop only
+
+# Game Configuration
+game_config:
+  # Default Settings
+  default_difficulty: 5
+  default_language: "danish"
+  default_theme: "neon"
+  default_view_mode: "iso"
+  
+  # Maze Configuration
+  mazes:
+    - name: "Wide Halls"
+      description: "Large maze with wide 5-cell halls"
+      difficulty: 3
+    - name: "Classic Small"
+      description: "Traditional small maze"
+      difficulty: 2
+    - name: "Open Arena"
+      description: "Open area for combat"
+      difficulty: 1
+    - name: "Spiral"
+      description: "Spiral maze pattern"
+      difficulty: 4
+    - name: "Labyrinth"
+      description: "Complex labyrinth"
+      difficulty: 6
+    - name: "ASCII Maze"
+      description: "Procedurally generated maze"
+      difficulty: 5
+      
+  # Control Schemes
+  control_schemes:
+    - id: 1
+      name: "Mouse Character Control"
+      description: "Mouse controls character rotation"
+    - id: 2
+      name: "Space Orbit"
+      description: "Space key controls camera orbit"
+    - id: 3
+      name: "Tank Controls"
+      description: "A/D turn, W/S move forward/back"
+    - id: 4
+      name: "Mouse Follow"
+      description: "Mouse controls character facing"
+      
+  # Themes
+  themes:
+    neon:
+      primary_color: "#00ff00"
+      secondary_color: "#00aaff"
+      background: "dark"
+    forest:
+      primary_color: "#00ff00"
+      secondary_color: "#8B4513"
+      background: "nature"
+    desert:
+      primary_color: "#FFD700"
+      secondary_color: "#CD853F"
+      background: "sand"
+    dungeon:
+      primary_color: "#8B0000"
+      secondary_color: "#696969"
+      background: "stone"
+
+# Deployment Configuration
+deployment:
+  # GitHub Pages
+  github_pages:
+    enabled: true
+    branch: "gh-pages"
+    custom_domain: null
+    
+  # Build Commands
+  build_commands:
+    - "npm install"  # If package.json exists
+    - "cp *.html dist/"
+    - "cp *.js dist/"
+    - "cp *.css dist/"
+    - "cp *.glb dist/"
+    - "cp *.gltf dist/"
+    - "cp *.bin dist/"
+    
+  # Environment Variables
+  environment:
+    NODE_ENV: "production"
+    GAME_VERSION: "1.0.0"
+    
+# Documentation
+documentation:
+  readme: "README.md"
+  changelog: "CHANGELOG.md"
+  contributing: "CONTRIBUTING.md"
+  license: "LICENSE"
+  
+  # API Documentation
+  api_docs:
+    game_class: "Game3D"
+    main_methods:
+      - "init()"
+      - "updatePlayer()"
+      - "updateCamera()"
+      - "generateMaze()"
+      - "createLabyrinth()"
+      
+# Performance
+performance:
+  target_fps: 60
+  max_enemies: 50
+  max_particles: 1000
+  memory_limit: "512MB"
+  
+  # Optimization
+  optimizations:
+    - "Frustum culling"
+    - "LOD (Level of Detail)"
+    - "Texture compression"
+    - "Mesh optimization"
