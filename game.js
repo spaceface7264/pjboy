@@ -15,10 +15,6 @@ class Game3D {
         this.uiManager = new UIManager(this.eventBus);
         this.setupUIListeners();
         
-        // Initialize item manager (Item Refactor)
-        this.itemManager = new ItemManager(this.eventBus, (key) => this.t(key));
-        this.setupItemListeners();
-        
         this.scene = null;
         this.camera = null;
         this.renderer = null;
@@ -547,8 +543,10 @@ class Game3D {
 
         // Mouse NDC updates
         this.eventBus.on('input:mousemove:ndc', (data) => {
-            this.playMode.mouseNDC.x = data.x;
-            this.playMode.mouseNDC.y = data.y;
+            if (this.playMode && this.playMode.mouseNDC) {
+                this.playMode.mouseNDC.x = data.x;
+                this.playMode.mouseNDC.y = data.y;
+            }
         });
 
         // Wheel events
@@ -788,9 +786,13 @@ class Game3D {
     }
 
     handleWindowResize(data) {
-        this.camera.aspect = data.width / data.height;
-        this.camera.updateProjectionMatrix();
-        this.renderer.setSize(data.width, data.height);
+        if (this.camera) {
+            this.camera.aspect = data.width / data.height;
+            this.camera.updateProjectionMatrix();
+        }
+        if (this.renderer) {
+            this.renderer.setSize(data.width, data.height);
+        }
     }
 
     updateCursorVisibility() {
@@ -878,6 +880,10 @@ class Game3D {
         this.weaponManager = new WeaponManager(this.eventBus, (key) => this.t(key));
         // No weapons initialized - system is empty and ready for new weapons
         this.weaponManager.initializePlayerWeapons([]);
+        
+        // Initialize item manager after language system is ready (Item Refactor)
+        this.itemManager = new ItemManager(this.eventBus, (key) => this.t(key));
+        this.setupItemListeners();
         
         // Keep backward compatibility - expose weapons through player object
         this.player.weapons = this.weaponManager.getPlayerWeapons();
