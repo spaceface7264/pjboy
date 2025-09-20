@@ -6844,68 +6844,6 @@ class Game3D {
             }
         }
     }
-}
-
-// Start the game
-window.addEventListener('load', () => {
-    const game = new Game3D();
-    
-    // Expose game instance globally for easy character loading
-    window.game = game;
-    
-    
-    // Setup modal event listeners
-    game.setupModalListeners();
-    
-    // Setup screen button event listeners
-    setupScreenButtons(game);
-    // Using custom in-code lion archer model (no external GLTF)
-
-    // Ensure crosshair element exists
-    const crosshairCheck = document.getElementById('crosshair');
-    if (!crosshairCheck) {
-        console.log('Creating missing crosshair element...');
-        const crosshair = document.createElement('div');
-        crosshair.id = 'crosshair';
-        crosshair.style.cssText = 'position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 18px; height: 18px; pointer-events: none; z-index: 999999; display: none;';
-        crosshair.innerHTML = `
-            <div style="position: absolute; top: 50%; left: 50%; width: 8px; height: 8px; background: #00ff00; box-shadow: 0 0 10px #00ff00, 0 0 20px #00ff00; border-radius: 50%; transform: translate(-50%, -50%);"></div>
-        `;
-        document.body.appendChild(crosshair);
-        console.log('Crosshair element created');
-    } else {
-        console.log('Crosshair element found');
-    }
-
-    // Global inventory hotkeys
-    document.addEventListener('keydown', (event) => {
-        if (event.code === 'KeyI') {
-            game.toggleInventory();
-        }
-        const inv = document.getElementById('inventory-ui');
-        if (game.modalOpen && inv && inv.style.display === 'block') {
-            if (event.code === 'ArrowRight') {
-                game.selectInventory(1);
-                event.preventDefault();
-            }
-            if (event.code === 'ArrowLeft') {
-                game.selectInventory(-1);
-                event.preventDefault();
-            }
-            if (event.code === 'Tab') {
-                game.selectInventory(event.shiftKey ? -1 : 1);
-                event.preventDefault();
-            }
-            if (event.code === 'Enter') {
-                game.activateSelectedItem();
-                event.preventDefault();
-            }
-            if (event.code === 'Escape') {
-                game.toggleInventory();
-                event.preventDefault();
-            }
-        }
-    });
     
     // ===== Map Overlay Functions =====
     
@@ -7000,6 +6938,67 @@ window.addEventListener('load', () => {
         }
     }
 }
+
+// Start the game
+window.addEventListener('load', () => {
+    const game = new Game3D();
+    
+    // Expose game instance globally for easy character loading
+    window.game = game;
+    
+    
+    // Setup modal event listeners
+    game.setupModalListeners();
+    
+    // Setup screen button event listeners
+    setupScreenButtons(game);
+    // Using custom in-code lion archer model (no external GLTF)
+
+    // Ensure crosshair element exists
+    const crosshairCheck = document.getElementById('crosshair');
+    if (!crosshairCheck) {
+        console.log('Creating missing crosshair element...');
+        const crosshair = document.createElement('div');
+        crosshair.id = 'crosshair';
+        crosshair.style.cssText = 'position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 18px; height: 18px; pointer-events: none; z-index: 999999; display: none;';
+        crosshair.innerHTML = `
+            <div style="position: absolute; top: 50%; left: 50%; width: 8px; height: 8px; background: #00ff00; box-shadow: 0 0 10px #00ff00, 0 0 20px #00ff00; border-radius: 50%; transform: translate(-50%, -50%);"></div>
+        `;
+        document.body.appendChild(crosshair);
+        console.log('Crosshair element created');
+    } else {
+        console.log('Crosshair element found');
+    }
+
+    // Global inventory hotkeys
+    document.addEventListener('keydown', (event) => {
+        if (event.code === 'KeyI') {
+            game.toggleInventory();
+        }
+        const inv = document.getElementById('inventory-ui');
+        if (game.modalOpen && inv && inv.style.display === 'block') {
+            if (event.code === 'ArrowRight') {
+                game.selectInventory(1);
+                event.preventDefault();
+            }
+            if (event.code === 'ArrowLeft') {
+                game.selectInventory(-1);
+                event.preventDefault();
+            }
+            if (event.code === 'Tab') {
+                game.selectInventory(event.shiftKey ? -1 : 1);
+                event.preventDefault();
+            }
+            if (event.code === 'Enter') {
+                game.activateSelectedItem();
+                event.preventDefault();
+            }
+            if (event.code === 'Escape') {
+                game.toggleInventory();
+                event.preventDefault();
+            }
+        }
+    });
 
 // Start the game
 window.addEventListener('load', () => {
