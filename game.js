@@ -4040,10 +4040,7 @@ class Game3D {
                 const testCrosshair = document.getElementById('crosshair');
                 if (testCrosshair) {
                     testCrosshair.style.display = 'block';
-                    testCrosshair.style.visibility = 'visible';
-                    testCrosshair.style.opacity = '1';
                     console.log('Crosshair forced visible for testing');
-                    console.log('Current viewMode:', this.viewMode, 'gameMode:', this.gameMode);
                 }
             }
             
@@ -6405,24 +6402,29 @@ class Game3D {
         const shouldShow = (this.gameMode === 'play' && this.viewMode === 'fpv');
         const htmlCrosshair = document.getElementById('crosshair');
         
+        console.log(`Crosshair: gameMode=${this.gameMode}, viewMode=${this.viewMode}, shouldShow=${shouldShow}`);
+        
         if (htmlCrosshair) {
             // Check if the dot element exists, recreate if missing
             let dot = htmlCrosshair.querySelector('div');
             if (!dot) {
+                console.log('Dot element missing, recreating...');
                 htmlCrosshair.innerHTML = `
                     <div style="position: absolute; top: 50%; left: 50%; width: 8px; height: 8px; background: #00ff00; box-shadow: 0 0 10px #00ff00, 0 0 20px #00ff00; border-radius: 50%; transform: translate(-50%, -50%);"></div>
                 `;
                 dot = htmlCrosshair.querySelector('div');
+                console.log('Dot element recreated');
             }
             
-            // Force visibility update
-            if (shouldShow) {
-                htmlCrosshair.style.display = 'block';
-                htmlCrosshair.style.visibility = 'visible';
-                htmlCrosshair.style.opacity = '1';
-            } else {
-                htmlCrosshair.style.display = 'none';
+            htmlCrosshair.style.display = shouldShow ? 'block' : 'none';
+            console.log(`Crosshair display set to: ${htmlCrosshair.style.display}`);
+            
+            if (dot) {
+                console.log('Dot element found, size:', dot.style.width, 'x', dot.style.height);
+                console.log('Dot background:', dot.style.background);
             }
+        } else {
+            console.log('Crosshair element not found!');
         }
     }
     
