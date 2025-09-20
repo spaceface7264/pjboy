@@ -11,6 +11,10 @@ class Game3D {
         this.inputManager = new InputManager(this.eventBus);
         this.setupInputListeners();
         
+        // Initialize UI manager (Phase 4)
+        this.uiManager = new UIManager(this.eventBus);
+        this.setupUIListeners();
+        
         this.scene = null;
         this.camera = null;
         this.renderer = null;
@@ -564,6 +568,48 @@ class Game3D {
         });
     }
 
+    // UI Manager listeners for handling UI events (Phase 4)
+    setupUIListeners() {
+        // Listen for UI updates triggered by game events
+        this.eventBus.on('weaponFired', (data) => {
+            // Update weapon display when weapon is fired
+            if (this.weaponManager) {
+                const currentWeapon = this.weaponManager.getCurrentWeapon();
+                if (currentWeapon) {
+                    this.uiManager.updateWeaponDisplay({
+                        ...currentWeapon,
+                        cooldown: this.weaponManager.getCooldown(currentWeapon.id),
+                        maxCooldown: currentWeapon.cooldown
+                    });
+                }
+            }
+        });
+
+        this.eventBus.on('weaponSwitched', (data) => {
+            // Update weapon display when weapon is switched
+            if (this.weaponManager) {
+                const currentWeapon = this.weaponManager.getCurrentWeapon();
+                if (currentWeapon) {
+                    this.uiManager.updateWeaponDisplay({
+                        ...currentWeapon,
+                        cooldown: this.weaponManager.getCooldown(currentWeapon.id),
+                        maxCooldown: currentWeapon.cooldown
+                    });
+                }
+            }
+        });
+
+        this.eventBus.on('playerDamaged', (data) => {
+            // Update HUD when player takes damage
+            this.updateHUDViaUIManager();
+        });
+
+        this.eventBus.on('levelCompleted', (data) => {
+            // Update UI for level completion
+            this.updateHUDViaUIManager();
+        });
+    }
+
     // Input handler methods (Phase 3)
     handleViewCycle() {
         // Cycle through view modes: iso -> fpv -> birds-eye -> ghost -> iso
@@ -725,6 +771,71 @@ class Game3D {
     // Backward compatibility getter for this.keys (Phase 3)
     get keys() {
         return this.inputManager ? this.inputManager.keys : {};
+    }
+
+    // UI Manager helper methods (Phase 4)
+    updateHUDViaUIManager() {
+        if (this.uiManager) {
+            const gameState = {
+                currentLevel: this.currentLevel,
+                playerLives: this.playerLives,
+                totalScore: this.totalScore,
+                playerHP: this.player?.hp || 100,
+                playerAmmo: this.player?.ammo || 0,
+                currentWeapon: this.weaponManager?.getCurrentWeapon()?.name || 'None'
+            };
+            this.uiManager.updateHUD(gameState);
+        }
+    }
+
+    showMessageViaUIManager(text, duration = 3000, type = 'info') {
+        if (this.uiManager) {
+            this.uiManager.showMessage(text, duration, type);
+        }
+    }
+
+    updateDebugInfoViaUIManager() {
+        if (this.uiManager && this.player) {
+            const debugData = {
+                position: this.player.position,
+                viewMode: this.viewMode,
+                fps: Math.round(1 / this.clock.getDelta()),
+                enemies: this.enemies?.length || 0
+            };
+            this.uiManager.updateDebugInfo(debugData);
+        }
+    }
+
+    // Central message display method (Phase 4)
+    showMessage(text, duration = 3000, type = 'info') {
+        // Use UI manager if available, fallback to legacy method
+        if (this.uiManager) {
+            this.uiManager.showMessage(text, duration, type);
+        } else {
+            // Fallback for compatibility - create a simple message display
+            const messageDiv = document.createElement('div');
+            messageDiv.style.cssText = `
+                position: fixed;
+                top: 50%;
+                left: 50%;
+                transform: translate(-50%, -50%);
+                background: ${type === 'error' ? 'rgba(255,0,0,0.8)' : 'rgba(0,0,0,0.8)'};
+                color: white;
+                padding: 20px;
+                border-radius: 10px;
+                z-index: 2000;
+                font-family: monospace;
+                pointer-events: none;
+            `;
+            messageDiv.textContent = text;
+            document.body.appendChild(messageDiv);
+            
+            setTimeout(() => {
+                if (messageDiv.parentNode) {
+                    messageDiv.parentNode.removeChild(messageDiv);
+                }
+            }, duration);
+        }
     }
     
     initializeWeapons() {
@@ -1155,6 +1266,11 @@ class Game3D {
         }
         // Update crosshair visibility immediately when switching view modes
         this.updateCrosshairUI();
+        
+        // Also update via UI manager if available (Phase 4)
+        if (this.uiManager) {
+            this.uiManager.updateCrosshairVisibility(mode);
+        }
     }
     
     init() {
@@ -6918,7 +7034,17 @@ class Game3D {
     
     // Game state management methods
     showOpeningScreen() {
+        const oldState = this.gameState;
         this.gameState = 'menu';
+        
+        // Emit state change for UI manager (Phase 4)
+        if (this.eventBus) {
+            this.eventBus.emit('gameStateChanged', { 
+                newState: this.gameState, 
+                oldState: oldState 
+            });
+        }
+        
         this.hideAllScreens();
         const openingScreen = document.getElementById('opening-screen');
         if (openingScreen) {
@@ -6928,10 +7054,20 @@ class Game3D {
     
     startGame() {
         console.log('Starting new game from opening screen');
+        const oldState = this.gameState;
         this.gameState = 'playing';
         this.currentLevel = 1;
         this.playerLives = 3;
         this.totalScore = 0;
+        
+        // Emit state change for UI manager (Phase 4)
+        if (this.eventBus) {
+            this.eventBus.emit('gameStateChanged', { 
+                newState: this.gameState, 
+                oldState: oldState 
+            });
+        }
+        
         this.hideAllScreens();
         console.log(`Starting Level ${this.currentLevel}`);
         this.startLevel(this.currentLevel);
@@ -7091,7 +7227,13 @@ class Game3D {
     }
     
     updateLevelUI() {
-        // Create or update level display
+        // Use UI manager if available (Phase 4)
+        if (this.uiManager) {
+            this.updateHUDViaUIManager();
+            return;
+        }
+        
+        // Legacy method - Create or update level display
         let levelUI = document.getElementById('level-ui');
         if (!levelUI) {
             levelUI = document.createElement('div');
