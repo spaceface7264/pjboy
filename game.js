@@ -15,6 +15,10 @@ class Game3D {
         this.uiManager = new UIManager(this.eventBus);
         this.setupUIListeners();
         
+        // Initialize item manager (Item Refactor)
+        this.itemManager = new ItemManager(this.eventBus, (key) => this.t(key));
+        this.setupItemListeners();
+        
         this.scene = null;
         this.camera = null;
         this.renderer = null;
@@ -607,6 +611,37 @@ class Game3D {
         this.eventBus.on('levelCompleted', (data) => {
             // Update UI for level completion
             this.updateHUDViaUIManager();
+        });
+    }
+
+    // Item Manager listeners for handling item events (Item Refactor)
+    setupItemListeners() {
+        // Listen for item usage events
+        this.eventBus.on('itemUsed', (data) => {
+            console.log('🎒 Item Used:', data.itemName, '-', data.result.message);
+            if (this.uiManager) {
+                this.uiManager.showMessage(data.result.message, 2000, 'info');
+            }
+            this.updateHUDViaUIManager();
+        });
+
+        this.eventBus.on('itemCollected', (data) => {
+            console.log('📦 Item Collected:', data.itemName);
+            if (this.uiManager) {
+                this.uiManager.showMessage(`Picked up: ${data.itemName}`, 1500, 'info');
+            }
+        });
+
+        this.eventBus.on('buffApplied', (data) => {
+            console.log('⚡ Buff Applied:', data.type, `+${data.amount} for ${data.duration}s`);
+        });
+
+        this.eventBus.on('permanentBuffApplied', (data) => {
+            console.log('💪 Permanent Buff:', data.type, `+${data.amount} (total: ${data.totalStacks})`);
+        });
+
+        this.eventBus.on('allEffectsCleared', () => {
+            console.log('🧹 All item effects cleared');
         });
     }
 
@@ -3451,13 +3486,15 @@ class Game3D {
 
     // ================= Pickups =================
     spawnPickup(x, z) {
-        // Randomize item type
+        // Randomize item type - removed weapon-related items (ammo, weaponBuff)
         const types = [
             { type: 'health', label: 'Health +25', color: 0x66ff66 },
             { type: 'speed',  label: 'Speed Boost', color: 0x66ccff },
-            { type: 'ammo',   label: 'Ammo +25',   color: 0xffff66 },
             { type: 'jetpack',label: 'Jetpack',    color: 0xffaa66 },
-            { type: 'flag',   label: 'Flag Token', color: 0xff66aa }
+            { type: 'healthRegen', label: 'Health Regen', color: 0x00ff66 },
+            { type: 'flag',   label: 'Flag Token', color: 0xff66aa },
+            { type: 'energy', label: 'Energy Crystal', color: 0x00ffff },
+            { type: 'shield', label: 'Shield Boost', color: 0x4169e1 }
         ];
         const pick = types[Math.floor(Math.random() * types.length)];
         const geo = new THREE.IcosahedronGeometry(0.35, 0);
@@ -3485,9 +3522,21 @@ class Game3D {
                 this.pickupsGroup.remove(p);
                 this.pickups.splice(i, 1);
                 if (p.userData.item) {
-                    this.inventory.items.push(p.userData.item);
+                    // Use ItemManager to collect item if available
+                    if (this.itemManager) {
+                        const collectedItem = this.itemManager.collectItem(p.userData.item.type);
+                        if (collectedItem) {
+                            this.inventory.items.push(collectedItem);
+                        } else {
+                            // Fallback to original item if ItemManager doesn't recognize it
+                            this.inventory.items.push(p.userData.item);
+                        }
+                    } else {
+                        // Legacy collection
+                        this.inventory.items.push(p.userData.item);
+                    }
+                    
                     this.spawnImpact(p.position.clone(), 0x66ffcc);
-                    this.showMessage(`Picked up: ${p.userData.item.label}`);
                     this.updateInventoryUI();
                     
                     // Show toast notification for pickup
@@ -3846,7 +3895,42 @@ class Game3D {
         const items = this.inventory.items;
         const idx = this.inventory.selectedIndex;
         if (!items.length || idx < 0 || idx >= items.length) return;
-        const it = items[idx];
+        
+        const item = items[idx];
+        
+        // Use ItemManager to handle item usage
+        if (this.itemManager) {
+            const result = this.itemManager.useItem(item, this.player, this.inventory);
+            
+            if (result.success) {
+                // Remove used item from inventory
+                items.splice(idx, 1);
+                if (this.inventory.selectedIndex >= items.length) {
+                    this.inventory.selectedIndex = Math.max(0, items.length - 1);
+                }
+                this.updateInventoryUI();
+                
+                // Show toast for successful usage
+                const itemDef = this.itemManager.getItem(item.type);
+                if (itemDef) {
+                    this.showToast(`${itemDef.icon} ${itemDef.name}`, 'success');
+                }
+            } else {
+                // Show error message for failed usage
+                this.showMessage(result.error, 2000, 'error');
+            }
+        } else {
+            // Fallback to old system if ItemManager not available
+            console.warn('ItemManager not available, using legacy item system');
+            this.activateSelectedItemLegacy(item);
+        }
+    }
+
+    // Legacy item activation for backward compatibility
+    activateSelectedItemLegacy(it) {
+        const items = this.inventory.items;
+        const idx = this.inventory.selectedIndex;
+        
         switch (it.type) {
             case 'health':
                 this.inventory.health = Math.min(this.inventory.maxHealth, this.inventory.health + 25);
@@ -3855,31 +3939,19 @@ class Game3D {
                 this.showToast(`❤️ ${this.t('health')} +25`, 'success');
                 break;
             case 'speed':
-                this.powerUps.speedBoost += 1; // Stack speed boost
+                this.powerUps.speedBoost += 1;
                 this.showMessage(`${this.t('speedBoost')} +1 (${this.powerUps.speedBoost} ${this.t('stacks')})`);
                 this.showToast(`⚡ ${this.t('speedBoost')} +1`, 'success');
                 break;
-            case 'ammo':
-                this.inventory.ammo += 25;
-                this.showMessage(`${this.t('ammoCount')}: ${this.inventory.ammo}`);
-                // Immediately update HUD to show new ammo count
-                this.updateWeaponPowerUpUI();
-                this.showToast(`🔸 ${this.t('ammo')} +25`, 'success');
-                break;
             case 'jetpack':
-                this.powerUps.jetpackFuel += 50; // Stack jetpack fuel
+                this.powerUps.jetpackFuel += 50;
                 this.showMessage(`${this.t('jetpackFuel')} +50 (${this.powerUps.jetpackFuel} total)`);
                 this.showToast(`🚀 ${this.t('jetpackFuel')} +50`, 'success');
                 break;
             case 'healthRegen':
-                this.powerUps.healthRegen += 1; // Stack health regeneration
+                this.powerUps.healthRegen += 1;
                 this.showMessage(`${this.t('healthRegen')} +1 (${this.powerUps.healthRegen} ${this.t('stacks')})`);
                 this.showToast(`💚 ${this.t('healthRegen')} +1`, 'success');
-                break;
-            case 'weaponBuff':
-                this.powerUps.weaponBuff += 1; // Stack weapon buff
-                this.showMessage(`${this.t('weaponBuff')} +1 (${this.powerUps.weaponBuff} ${this.t('stacks')})`);
-                this.showToast(`⚔️ ${this.t('weaponBuff')} +1`, 'success');
                 break;
             case 'flag':
                 this.inventory.flags += 1;
@@ -3887,6 +3959,8 @@ class Game3D {
                 this.showToast(`🏁 ${this.t('flag')} +1`, 'success');
                 this.updateControlsUI();
                 break;
+            default:
+                this.showMessage(`Unknown item type: ${it.type}`, 2000, 'error');
         }
         // Remove used item
         items.splice(idx, 1);
@@ -5283,6 +5357,14 @@ class Game3D {
         
         // All game logic goes here - runs at fixed 60 FPS
         this.updatePlayer(deltaTime);
+        
+        // Update managers (Item Refactor)
+        if (this.itemManager) {
+            this.itemManager.update(deltaTime);
+        }
+        if (this.weaponManager) {
+            this.weaponManager.updateCooldowns(deltaTime);
+        }
         
         // Update projectiles and other play-mode systems
         if (this.gameMode === 'play') {
