@@ -7,9 +7,6 @@ class Game3D {
         // Add test event listeners for debugging (Phase 1)
         this.setupEventBusListeners();
         
-        // Initialize weapon manager (Phase 2)
-        this.weaponManager = new WeaponManager(this.eventBus, (key) => this.t(key));
-        
         this.scene = null;
         this.camera = null;
         this.renderer = null;
@@ -479,7 +476,8 @@ class Game3D {
     }
     
     initializeWeapons() {
-        // Initialize weapon manager with player weapons (Phase 2)
+        // Initialize weapon manager after language system is ready (Phase 2)
+        this.weaponManager = new WeaponManager(this.eventBus, (key) => this.t(key));
         this.weaponManager.initializePlayerWeapons(['diamondSword', 'gun', 'machineGun']);
         
         // Keep backward compatibility - expose weapons through player object
@@ -575,6 +573,7 @@ class Game3D {
         // Use WeaponManager for fire validation (Phase 2)
         if (this.gameMode !== 'play') return false;
         if (this.isDrawerOpen) return false;
+        if (!this.weaponManager) return false; // Not initialized yet
         
         return this.weaponManager.canFire(this.inventory.ammo);
     }
@@ -671,11 +670,14 @@ class Game3D {
     
     getCurrentWeapon() {
         // Use WeaponManager to get current weapon (Phase 2)
+        if (!this.weaponManager) return null; // Not initialized yet
         return this.weaponManager.getCurrentWeapon();
     }
     
     switchWeapon(direction = 1) {
         // Use WeaponManager for weapon switching (Phase 2)
+        if (!this.weaponManager) return; // Not initialized yet
+        
         const currentWeapon = this.weaponManager.switchWeapon(direction);
         
         if (currentWeapon) {
@@ -730,6 +732,8 @@ class Game3D {
         }
         
         // Use WeaponManager to fire weapon (Phase 2)
+        if (!this.weaponManager) return; // Not initialized yet
+        
         const fireResult = this.weaponManager.fireWeapon(this.inventory.ammo, this.player.position);
         
         if (!fireResult) return; // Should not happen since canFire() already checked
@@ -6561,6 +6565,8 @@ class Game3D {
     
     updateWeaponCooldowns(deltaTime) {
         // Use WeaponManager for cooldown updates (Phase 2)
+        if (!this.weaponManager) return; // Not initialized yet
+        
         this.weaponManager.updateCooldowns(deltaTime);
         
         // Update isReloading state for backward compatibility
