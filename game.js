@@ -7,6 +7,9 @@ class Game3D {
         // Add test event listeners for debugging (Phase 1)
         this.setupEventBusListeners();
         
+        // Initialize weapon manager (Phase 2)
+        this.weaponManager = new WeaponManager(this.eventBus, (key) => this.t(key));
+        
         this.scene = null;
         this.camera = null;
         this.renderer = null;
@@ -476,47 +479,15 @@ class Game3D {
     }
     
     initializeWeapons() {
-        // Define available weapons
-        this.weaponDefinitions = {
-            diamondSword: {
-                name: this.t('diamondSword'),
-                damage: 15,
-                range: 2.5,
-                cooldown: 0.8,
-                type: 'melee',
-                icon: '⚔️',
-                color: 0x00aaff,
-                description: this.t('diamondSwordDesc'),
-                ammoCost: 0
-            },
-            gun: {
-                name: this.t('gun'),
-                damage: 25,
-                range: 15,
-                cooldown: 1.2,
-                type: 'ranged',
-                icon: '🔫',
-                color: 0x8B4513,
-                description: this.t('gunDesc'),
-                ammoCost: 1
-            },
-            machineGun: {
-                name: this.t('machineGun'),
-                damage: 8,
-                range: 12,
-                cooldown: 0.1,
-                type: 'ranged',
-                icon: '🔫',
-                color: 0x696969,
-                description: this.t('machineGunDesc'),
-                ammoCost: 1,
-                isContinuous: true
-            }
-        };
+        // Initialize weapon manager with player weapons (Phase 2)
+        this.weaponManager.initializePlayerWeapons(['diamondSword', 'gun', 'machineGun']);
         
-        // Initialize player weapons
-        this.player.weapons = ['diamondSword', 'gun', 'machineGun'];
-        this.player.currentWeaponIndex = 0;
+        // Keep backward compatibility - expose weapons through player object
+        this.player.weapons = this.weaponManager.getPlayerWeapons();
+        this.player.currentWeaponIndex = this.weaponManager.getCurrentWeaponIndex();
+        
+        // Keep weapon definitions accessible for backward compatibility
+        this.weaponDefinitions = this.weaponManager.getAllWeapons();
         
         // Initialize power-ups
         this.powerUps = {
@@ -526,7 +497,7 @@ class Game3D {
             weaponBuff: 0
         };
         
-        // Weapon cooldown tracking
+        // Keep weapon cooldowns accessible for backward compatibility
         this.weaponCooldowns = {};
         
         // Firing state
@@ -601,28 +572,11 @@ class Game3D {
     }
     
     canFire() {
-        // Shared validation function for gameplay and HUD
+        // Use WeaponManager for fire validation (Phase 2)
         if (this.gameMode !== 'play') return false;
         if (this.isDrawerOpen) return false;
-        if (this.isReloading) return false;
         
-        const currentWeapon = this.getCurrentWeapon();
-        if (!currentWeapon) return false;
-        
-        // Check cooldown
-        const weaponId = this.player.weapons[this.player.currentWeaponIndex];
-        if (this.weaponCooldowns[weaponId] && this.weaponCooldowns[weaponId] > 0) {
-            return false;
-        }
-        
-        // Check ammo for ranged weapons
-        if (currentWeapon.type === 'ranged' && currentWeapon.ammoCost > 0) {
-            if (this.inventory.ammo < currentWeapon.ammoCost) {
-                return false;
-            }
-        }
-        
-        return true;
+        return this.weaponManager.canFire(this.inventory.ammo);
     }
     
     // ===== Event Bus System =====
@@ -716,40 +670,23 @@ class Game3D {
     }
     
     getCurrentWeapon() {
-        if (this.player.weapons.length === 0) return null;
-        const weaponId = this.player.weapons[this.player.currentWeaponIndex];
-        return this.weaponDefinitions[weaponId];
+        // Use WeaponManager to get current weapon (Phase 2)
+        return this.weaponManager.getCurrentWeapon();
     }
     
     switchWeapon(direction = 1) {
-        if (this.player.weapons.length <= 1) return;
+        // Use WeaponManager for weapon switching (Phase 2)
+        const currentWeapon = this.weaponManager.switchWeapon(direction);
         
-        const oldIndex = this.player.currentWeaponIndex;
-        const oldWeapon = this.getCurrentWeapon();
-        
-        this.player.currentWeaponIndex = (this.player.currentWeaponIndex + direction) % this.player.weapons.length;
-        if (this.player.currentWeaponIndex < 0) {
-            this.player.currentWeaponIndex = this.player.weapons.length - 1;
-        }
-        
-        const currentWeapon = this.getCurrentWeapon();
         if (currentWeapon) {
+            // Update player object for backward compatibility
+            this.player.currentWeaponIndex = this.weaponManager.getCurrentWeaponIndex();
+            
             this.showMessage(`${this.t('switchWeapon')}: ${currentWeapon.name}`);
             
-            // Emit weapon switched event
-            this.eventBus.emit('weaponSwitched', {
-                oldWeaponId: oldWeapon?.id || null,
-                oldWeaponName: oldWeapon?.name || null,
-                newWeaponId: currentWeapon.id,
-                newWeaponName: currentWeapon.name,
-                newWeaponIndex: this.player.currentWeaponIndex,
-                oldWeaponIndex: oldIndex,
-                playerPosition: this.player.position.clone()
-            });
+            // Emit UI update event
+            this.emit('ui:update', this.buildHUDModel());
         }
-        
-        // Emit UI update event
-        this.emit('ui:update', this.buildHUDModel());
     }
     
     reloadWeapon() {
@@ -792,38 +729,25 @@ class Game3D {
             return;
         }
         
-        const weapon = this.getCurrentWeapon();
-        const weaponId = this.player.weapons[this.player.currentWeaponIndex];
+        // Use WeaponManager to fire weapon (Phase 2)
+        const fireResult = this.weaponManager.fireWeapon(this.inventory.ammo, this.player.position);
         
-        // Consume ammo for ranged weapons
-        if (weapon.type === 'ranged' && weapon.ammoCost > 0) {
-            this.inventory.ammo -= weapon.ammoCost;
-        }
+        if (!fireResult) return; // Should not happen since canFire() already checked
         
-        // Set cooldown
-        this.weaponCooldowns[weaponId] = weapon.cooldown;
-        
-        // Emit weapon fired event
-        this.eventBus.emit('weaponFired', {
-            weaponId: weaponId,
-            weaponName: weapon.name,
-            weaponType: weapon.type,
-            damage: weapon.damage,
-            ammoRemaining: this.inventory.ammo,
-            playerPosition: this.player.position.clone()
-        });
+        // Consume ammo
+        this.inventory.ammo -= fireResult.ammoConsumed;
         
         // Emit UI update event
         this.emit('ui:update', this.buildHUDModel());
         
         // Apply weapon buff damage multiplier
         const damageMultiplier = 1 + (this.powerUps.weaponBuff * 0.2); // 20% per stack
-        const finalDamage = Math.floor(weapon.damage * damageMultiplier);
+        const finalDamage = Math.floor(fireResult.damage * damageMultiplier);
         
-        if (weapon.type === 'melee') {
+        if (fireResult.type === 'melee') {
             this.performMeleeAttack(finalDamage);
-        } else if (weapon.type === 'ranged') {
-            this.performRangedAttack(finalDamage, weapon.range);
+        } else if (fireResult.type === 'ranged') {
+            this.performRangedAttack(finalDamage, fireResult.range);
         }
     }
     
@@ -6636,20 +6560,21 @@ class Game3D {
     }
     
     updateWeaponCooldowns(deltaTime) {
-        let hudNeedsUpdate = false;
-        for (const weaponId in this.weaponCooldowns) {
-            if (this.weaponCooldowns[weaponId] > 0) {
-                this.weaponCooldowns[weaponId] -= deltaTime;
-                if (this.weaponCooldowns[weaponId] <= 0) {
-                    this.weaponCooldowns[weaponId] = 0;
-                    hudNeedsUpdate = true; // HUD needs update when cooldown finishes
-                }
-            }
+        // Use WeaponManager for cooldown updates (Phase 2)
+        this.weaponManager.updateCooldowns(deltaTime);
+        
+        // Update isReloading state for backward compatibility
+        this.isReloading = this.weaponManager.isReloading;
+        
+        // Update weaponCooldowns object for backward compatibility
+        const playerWeapons = this.weaponManager.getPlayerWeapons();
+        for (const weaponId of playerWeapons) {
+            this.weaponCooldowns[weaponId] = this.weaponManager.getCooldown(weaponId);
         }
         
         // Throttled UI updates for cooldowns (≤10 Hz)
         const now = Date.now();
-        if (hudNeedsUpdate || (now - this.lastCooldownUpdate) >= this.cooldownUpdateInterval) {
+        if ((now - this.lastCooldownUpdate) >= this.cooldownUpdateInterval) {
             this.emit('ui:update', this.buildHUDModel());
             this.lastCooldownUpdate = now;
         }
