@@ -62,10 +62,10 @@ class UIManager {
         this.cacheElement('mainMenuButton', 'main-menu-button');
         this.cacheElement('restartButton', 'restart-button');
         
-        // HUD containers (now static HTML elements)
-        this.cacheElement('hudContainer', 'hud-container');
-        this.cacheElement('messageContainer', 'message-box');
-        this.cacheElement('debugContainer', 'debug-info');
+        // Create containers for dynamic content
+        this.createContainer('hudContainer', 'position: fixed; top: 20px; left: 20px; z-index: 1000; pointer-events: none; color: white; font-family: monospace;');
+        this.createContainer('messageContainer', 'position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 2000; pointer-events: none;');
+        this.createContainer('debugContainer', 'position: fixed; bottom: 20px; left: 20px; z-index: 1000; pointer-events: none; color: #00ff00; font-family: monospace; font-size: 12px;');
         
         console.log('UIManager: Cached', Object.keys(this.elements).length, 'UI elements');
     }
@@ -198,32 +198,15 @@ class UIManager {
      * Update HUD with game stats
      */
     updateHUD(gameState) {
-        // Update level info section
-        const levelContent = `
+        const hudContent = `
             <div>Level: ${gameState.currentLevel || 1}</div>
             <div>Lives: ${gameState.playerLives || 3}</div>
             <div>Score: ${gameState.totalScore || 0}</div>
-        `;
-        this.updateElement('levelInfo', levelContent, 100);
-        
-        // Update player stats section
-        const playerContent = `
             <div>HP: ${gameState.playerHP || 100}</div>
-            <div>Energy: ${gameState.playerEnergy || 0}</div>
-            <div>Shield: ${gameState.playerShield || 0}</div>
+            <div>Ammo: ${gameState.playerAmmo || 0}</div>
+            ${gameState.currentWeapon ? `<div>Weapon: ${gameState.currentWeapon}</div>` : ''}
         `;
-        this.updateElement('playerStats', playerContent, 100);
-        
-        // Update weapon info section (if weapon exists)
-        if (gameState.currentWeapon) {
-            const weaponContent = `
-                <div>Weapon: ${gameState.currentWeapon}</div>
-                <div>Ammo: ${gameState.playerAmmo || 0}</div>
-            `;
-            this.updateElement('weaponInfo', weaponContent, 100);
-        } else {
-            this.updateElement('weaponInfo', '<div>No weapon equipped</div>', 100);
-        }
+        this.updateElement('hudContainer', hudContent, 100); // Update HUD at most 10 times per second
     }
 
     /**
@@ -234,15 +217,13 @@ class UIManager {
         if (messageElement) {
             const messageClass = type === 'error' ? 'error-message' : 'info-message';
             messageElement.innerHTML = `<div class="${messageClass}" style="
-                background: ${type === 'error' ? 'rgba(255,0,0,0.8)' : 'rgba(0,120,0,0.9)'};
+                background: ${type === 'error' ? 'rgba(255,0,0,0.8)' : 'rgba(0,0,0,0.8)'};
                 color: white;
-                padding: 15px 25px;
-                border-radius: 8px;
+                padding: 20px;
+                border-radius: 10px;
                 text-align: center;
-                font-family: 'Courier New', monospace;
-                font-size: 16px;
-                border: 2px solid ${type === 'error' ? '#ff4444' : '#00ff00'};
-                box-shadow: 0 0 20px ${type === 'error' ? 'rgba(255,0,0,0.5)' : 'rgba(0,255,0,0.3)'};
+                font-family: monospace;
+                animation: fadeInOut ${duration}ms ease-in-out;
             ">${text}</div>`;
             
             // Auto-hide after duration
@@ -321,10 +302,6 @@ class UIManager {
             this.updateHUD(data);
         });
         
-        this.eventBus.on('ui:update', (data) => {
-            this.updateHUD(data);
-        });
-        
         this.eventBus.on('ui:updateWeapon', (data) => {
             this.updateWeaponDisplay(data);
         });
@@ -349,17 +326,14 @@ class UIManager {
             case 'playing':
                 this.hideAll(['openingScreen', 'levelCompleteScreen', 'gameOverScreen']);
                 this.show('hudContainer');
-                this.show('uiOverlay');
                 break;
                 
             case 'levelComplete':
                 this.show('levelCompleteScreen');
-                this.hide('hudContainer');
                 break;
                 
             case 'gameOver':
                 this.show('gameOverScreen');
-                this.hide('hudContainer');
                 break;
         }
         
