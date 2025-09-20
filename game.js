@@ -2361,22 +2361,40 @@ class Game3D {
         const { startX, startZ, cellSize } = info;
         const rows = maze.length;
         const cols = maze[0].length;
-        // Find entrance near left side and exit near right side (handling solid borders)
-        let entRow = Math.floor(rows / 2), entCol = 1;
-        let exitRow = Math.floor(rows / 2), exitCol = cols - 2;
-        // Scan a band from the edge inward to locate the closest open cell
-        for (let r = 1; r < rows - 1; r++) {
-            for (let c = 0; c < Math.min(10, cols); c++) {
-                if (maze[r][c] === '.') { entRow = r; entCol = Math.max(1, c); break; }
+        
+        // Find the actual entry and exit points created by generateAsciiPerfectMaze
+        // Entry is at column 0, exit is at column width-1
+        let entRow = 3; // Default to row 3 (middle of the 5-row entrance)
+        let exitRow = rows - 4; // Default to row height-4 (middle of the 5-row exit)
+        
+        // Find the center of the entrance opening (column 0)
+        let entranceCount = 0;
+        let entranceSum = 0;
+        for (let r = 0; r < rows; r++) {
+            if (maze[r][0] === '.') {
+                entranceCount++;
+                entranceSum += r;
             }
-            if (entCol !== 1 || maze[entRow][1] === '.') break;
         }
-        for (let r = rows - 2; r >= 1; r--) {
-            for (let c = cols - 1; c >= Math.max(cols - 10, 0); c--) {
-                if (maze[r][c] === '.') { exitRow = r; exitCol = Math.min(cols - 2, c); break; }
+        if (entranceCount > 0) {
+            entRow = Math.floor(entranceSum / entranceCount); // Center of entrance
+        }
+        
+        // Find the center of the exit opening (column width-1)
+        let exitCount = 0;
+        let exitSum = 0;
+        for (let r = 0; r < rows; r++) {
+            if (maze[r][cols - 1] === '.') {
+                exitCount++;
+                exitSum += r;
             }
-            if (exitCol !== cols - 2 || maze[exitRow][cols - 2] === '.') break;
         }
+        if (exitCount > 0) {
+            exitRow = Math.floor(exitSum / exitCount); // Center of exit
+        }
+        
+        const entCol = 0; // Entry is always at column 0
+        const exitCol = cols - 1; // Exit is always at column width-1
         // Create markers slightly above ground at cell centers
         const entranceGeometry = new THREE.ConeGeometry(0.5, 2, 8);
         const entranceMaterial = new THREE.MeshLambertMaterial({ color: 0x00ff00, emissive: 0x004400 });
