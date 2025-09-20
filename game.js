@@ -841,7 +841,8 @@ class Game3D {
     initializeWeapons() {
         // Initialize weapon manager after language system is ready (Phase 2)
         this.weaponManager = new WeaponManager(this.eventBus, (key) => this.t(key));
-        this.weaponManager.initializePlayerWeapons(['diamondSword', 'gun', 'machineGun']);
+        // No weapons initialized - system is empty and ready for new weapons
+        this.weaponManager.initializePlayerWeapons([]);
         
         // Keep backward compatibility - expose weapons through player object
         this.player.weapons = this.weaponManager.getPlayerWeapons();

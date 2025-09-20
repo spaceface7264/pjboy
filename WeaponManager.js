@@ -20,52 +20,15 @@ class WeaponManager {
     }
 
     initializeWeaponDefinitions() {
-        this.weaponDefinitions = {
-            diamondSword: {
-                id: 'diamondSword',
-                name: this.t('diamondSword'),
-                type: 'melee',
-                damage: 15,
-                range: 2.5,
-                cooldown: 0.8,
-                ammoCost: 0,
-                icon: '⚔️',
-                color: 0x00aaff,
-                description: this.t('diamondSwordDesc')
-            },
-            gun: {
-                id: 'gun',
-                name: this.t('gun'),
-                type: 'ranged',
-                damage: 25,
-                range: 15,
-                cooldown: 1.2,
-                ammoCost: 1,
-                icon: '🔫',
-                color: 0x8B4513,
-                description: this.t('gunDesc')
-            },
-            machineGun: {
-                id: 'machineGun',
-                name: this.t('machineGun'),
-                type: 'ranged',
-                damage: 8,
-                range: 12,
-                cooldown: 0.1,
-                ammoCost: 1,
-                icon: '🔫',
-                color: 0x696969,
-                description: this.t('machineGunDesc'),
-                isContinuous: true
-            }
-        };
+        // All weapons removed - empty weapon system ready for new additions
+        this.weaponDefinitions = {};
     }
 
     /**
      * Initialize player weapons
      * @param {string[]} weaponIds - Array of weapon IDs for the player
      */
-    initializePlayerWeapons(weaponIds = ['diamondSword']) {
+    initializePlayerWeapons(weaponIds = []) {
         this.playerWeapons = [...weaponIds];
         this.currentWeaponIndex = 0;
         
