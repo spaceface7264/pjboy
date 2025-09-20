@@ -4282,10 +4282,10 @@ class Game3D {
             } else {
                 document.body.style.cursor = 'default';
             }
-            // Crosshair visibility: only in FPV during play
+            // Crosshair visibility: in FPV and bird's eye during play
             const ch = document.getElementById('crosshair');
             if (ch) {
-                ch.style.display = (this.gameMode === 'play' && this.viewMode === 'fpv') ? 'block' : 'none';
+                ch.style.display = (this.gameMode === 'play' && (this.viewMode === 'fpv' || this.viewMode === 'birds-eye')) ? 'block' : 'none';
             }
         });
         
@@ -6397,8 +6397,8 @@ class Game3D {
     }
     
     updateCrosshairUI() {
-        // Only show crosshair in FPV play mode
-        const shouldShow = (this.gameMode === 'play' && this.viewMode === 'fpv');
+        // Show crosshair in FPV and bird's eye play modes
+        const shouldShow = (this.gameMode === 'play' && (this.viewMode === 'fpv' || this.viewMode === 'birds-eye'));
         const htmlCrosshair = document.getElementById('crosshair');
         
         console.log(`Crosshair: gameMode=${this.gameMode}, viewMode=${this.viewMode}, shouldShow=${shouldShow}`);
