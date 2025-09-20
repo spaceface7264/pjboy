@@ -48,26 +48,6 @@ class ItemManager {
                 canUseInCombat: true
             },
             
-            speed: {
-                id: 'speed',
-                name: this.t('speedBoost'),
-                type: 'consumable',
-                category: 'enhancement',
-                effect: {
-                    type: 'buff',
-                    stat: 'speed',
-                    amount: 1,
-                    duration: 30, // 30 seconds
-                    stackable: true
-                },
-                icon: '⚡',
-                color: 0xffff00,
-                description: this.t('speedBoostDesc') || 'Increases movement speed for 30 seconds',
-                rarity: 'common',
-                stackable: true,
-                useCooldown: 1, // 1 second cooldown
-                canUseInCombat: true
-            },
             
             jetpack: {
                 id: 'jetpack',
@@ -88,25 +68,6 @@ class ItemManager {
                 canUseInCombat: true
             },
             
-            healthRegen: {
-                id: 'healthRegen',
-                name: this.t('healthRegen'),
-                type: 'consumable',
-                category: 'enhancement',
-                effect: {
-                    type: 'permanent_buff',
-                    stat: 'healthRegen',
-                    amount: 1,
-                    regenRate: 2 // HP per second
-                },
-                icon: '💚',
-                color: 0x00ff66,
-                description: this.t('healthRegenDesc') || 'Permanently increases health regeneration by 2 HP/sec',
-                rarity: 'rare',
-                stackable: true,
-                useCooldown: 0,
-                canUseInCombat: true
-            },
             
             flag: {
                 id: 'flag',

@@ -434,7 +434,6 @@ class Game3D {
             flags: 9999,
             health: 100,
             maxHealth: 100,
-            speedBoostTimer: 0,
             jetpackTimer: 0,
             jetpackFuel: 0,
             maxJetpackFuel: 100
@@ -895,8 +894,6 @@ class Game3D {
         // Initialize power-ups
         this.powerUps = {
             jetpackFuel: 0,
-            speedBoost: 0,
-            healthRegen: 0,
             weaponBuff: 0
         };
         
@@ -962,8 +959,6 @@ class Game3D {
             
             // Power-ups
             powerUps: {
-                speedBoost: this.powerUps.speedBoost,
-                healthRegen: this.powerUps.healthRegen,
                 weaponBuff: this.powerUps.weaponBuff,
                 jetpackFuel: Math.floor(this.powerUps.jetpackFuel)
             },
@@ -3492,12 +3487,10 @@ class Game3D {
 
     // ================= Pickups =================
     spawnPickup(x, z) {
-        // Randomize item type - removed weapon-related items (ammo, weaponBuff)
+        // Randomize item type - cleaned up item pool
         const types = [
             { type: 'health', label: 'Health +25', color: 0x66ff66 },
-            { type: 'speed',  label: 'Speed Boost', color: 0x66ccff },
             { type: 'jetpack',label: 'Jetpack',    color: 0xffaa66 },
-            { type: 'healthRegen', label: 'Health Regen', color: 0x00ff66 },
             { type: 'flag',   label: 'Flag Token', color: 0xff66aa },
             { type: 'energy', label: 'Energy Crystal', color: 0x00ffff },
             { type: 'shield', label: 'Shield Boost', color: 0x4169e1 }
@@ -3554,10 +3547,6 @@ class Game3D {
                         case 'health':
                             emoji = '❤️';
                             toastMessage = `${emoji} ${this.t('health')} +25`;
-                            break;
-                        case 'speed':
-                            emoji = '⚡';
-                            toastMessage = `${emoji} ${this.t('speedBoost')} +1`;
                             break;
                         case 'ammo':
                             emoji = '🔸';
@@ -3944,20 +3933,10 @@ class Game3D {
                 this.showMessage(`${this.t('healedTo')} ${this.inventory.health} | ${this.t('playerHp')}: ${this.player.hp}`);
                 this.showToast(`❤️ ${this.t('health')} +25`, 'success');
                 break;
-            case 'speed':
-                this.powerUps.speedBoost += 1;
-                this.showMessage(`${this.t('speedBoost')} +1 (${this.powerUps.speedBoost} ${this.t('stacks')})`);
-                this.showToast(`⚡ ${this.t('speedBoost')} +1`, 'success');
-                break;
             case 'jetpack':
                 this.powerUps.jetpackFuel += 50;
                 this.showMessage(`${this.t('jetpackFuel')} +50 (${this.powerUps.jetpackFuel} total)`);
                 this.showToast(`🚀 ${this.t('jetpackFuel')} +50`, 'success');
-                break;
-            case 'healthRegen':
-                this.powerUps.healthRegen += 1;
-                this.showMessage(`${this.t('healthRegen')} +1 (${this.powerUps.healthRegen} ${this.t('stacks')})`);
-                this.showToast(`💚 ${this.t('healthRegen')} +1`, 'success');
                 break;
             case 'flag':
                 this.inventory.flags += 1;
@@ -4734,9 +4713,8 @@ class Game3D {
             return;
         }
         
-        // Apply speed boost
-        const speedMultiplier = 1 + (this.powerUps.speedBoost * 0.3); // 30% per stack
-        const speed = 10 * speedMultiplier;
+        // Base movement speed
+        const speed = 10;
         const jumpForce = 15;
         const gravity = -30;
         
