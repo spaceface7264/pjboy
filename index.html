@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Second-Person Game - 128-bit Style</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="gameContainer">
+        <canvas id="gameCanvas"></canvas>
+        <div id="ui">
+            <div id="crosshair" style="position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 18px; height: 18px; pointer-events: none; z-index: 999999; display: none;">
+                <div style="position: absolute; top: 50%; left: 50%; width: 8px; height: 8px; background: #00ff00; box-shadow: 0 0 10px #00ff00, 0 0 20px #00ff00; border-radius: 50%; transform: translate(-50%, -50%);"></div>
+            </div>
+        </div>
+        
+        <!-- Game Settings Modal -->
+        <div id="settings-modal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2 id="settings-title">Game Settings & Map Control</h2>
+                    <span class="close">&times;</span>
+                </div>
+                <div class="modal-body">
+                    <div class="settings-section">
+                        <h3 id="maze-selection-title">Maze Selection</h3>
+                        <div class="maze-buttons">
+                            <button class="maze-btn" data-maze="0">Wide Halls</button>
+                            <button class="maze-btn" data-maze="1">Classic Small</button>
+                            <button class="maze-btn" data-maze="2">Open Arena</button>
+                            <button class="maze-btn" data-maze="3">Spiral</button>
+                            <button class="maze-btn" data-maze="4">Labyrinth</button>
+                            <button class="maze-btn" data-maze="5">ASCII Maze</button>
+                        </div>
+                        <div class="maze-description">
+                            <p id="maze-desc">Large maze with wide 5-cell halls</p>
+                        </div>
+                    </div>
+                    
+                    <div class="settings-section">
+                        <h3 id="difficulty-title">Difficulty</h3>
+                        <div>
+                            <input id="maze-difficulty" type="range" min="1" max="10" value="5" style="width:100%" />
+                            <div style="text-align:right; font-size:12px; opacity:0.8;">Level: <span id="maze-difficulty-value">5</span></div>
+                        </div>
+                    </div>
+
+                    <div class="settings-section">
+                        <h3 id="view-title">View</h3>
+                        <div class="view-buttons">
+                            <button class="view-btn" data-view="iso">Isometric</button>
+                            <button class="view-btn" data-view="fpv">First Person</button>
+                        </div>
+                    </div>
+
+                    <div class="settings-section">
+                        <h3 id="theme-title">Theme</h3>
+                        <div class="theme-buttons">
+                            <button class="maze-btn theme-btn" data-theme="neon">Neon</button>
+                            <button class="maze-btn theme-btn" data-theme="forest">Forest</button>
+                            <button class="maze-btn theme-btn" data-theme="desert">Desert</button>
+                            <button class="maze-btn theme-btn" data-theme="dungeon">Dungeon</button>
+                        </div>
+                    </div>
+
+                    <div class="settings-section">
+                        <h3 id="language-title">Language</h3>
+                        <div class="language-buttons">
+                            <button class="language-btn active" data-language="danish">Dansk</button>
+                            <button class="language-btn" data-language="english">English</button>
+                        </div>
+                    </div>
+
+                    <div class="settings-section">
+                        <h3 id="game-mode-title">Game Mode</h3>
+                        <div class="mode-buttons">
+                            <button class="mode-btn" data-mode="play">Play Mode</button>
+                            <button class="mode-btn" data-mode="create">Create Mode</button>
+                        </div>
+                    </div>
+                    
+                    <div class="settings-section">
+                        <h3 id="game-info-title">Game Info</h3>
+                        <div class="info-grid">
+                            <div class="info-item">
+                                <span class="info-label">Current Position:</span>
+                                <span id="player-pos">(0, 0, 0)</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">Facing Direction:</span>
+                                <span id="player-facing">North (0°)</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">Camera Angle:</span>
+                                <span id="camera-info">0°</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Toolbox Modal for Create Mode -->
+        <div id="toolbox-modal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>Build Toolbox</h2>
+                    <span class="close-toolbox">&times;</span>
+                </div>
+                <div class="modal-body">
+                    <div class="toolbox-section">
+                        <h3>Tools</h3>
+                        <div class="tool-buttons">
+                            <button class="tool-btn active" data-tool="wall">Wall</button>
+                            <button class="tool-btn" data-tool="erase">Erase</button>
+                            <button class="tool-btn" data-tool="start">Start Point</button>
+                            <button class="tool-btn" data-tool="end">End Point</button>
+                        </div>
+                    </div>
+                    
+                    <div class="toolbox-section">
+                        <h3>Instructions</h3>
+                        <div class="toolbox-info">
+                            <p id="tool-instructions">Click on highlighted grid squares to place walls</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+    <script src="game.js"></script>
+</body>
+</html>

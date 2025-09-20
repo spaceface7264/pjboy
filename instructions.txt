@@ -1,0 +1,24 @@
+3D Second-Person Gameplay Environment - Initial Tasks:
+
+1. Set up 3D project structure with HTML, CSS, and JavaScript files
+2. Implement basic 3D rendering engine using WebGL/Three.js
+3. Create second-person camera system (camera follows behind player)
+4. Create 3D environment with terrain, objects, and lighting
+5. Add player movement and camera controls
+6. Implement 128-bit aesthetic with retro graphics and effects
+7. Document initial tasks in instructions.txt
+
+Project Goals:
+- 3D gameplay environment
+- Second-person perspective (camera behind player)
+- 128-bit retro aesthetic
+- Interactive controls and movement
+
+Features (Fayek)
+- stun enemies on hit 5sec
+- start spil -> level 1 -> 2 -> 3 -> ----- 10
+- timer start/slut
+- levels bliver sværere og sværere
+- enemies bliver gradvist flere og stærkere
+- welcome + loading screen
+- gå, skyde, blive ramt, starte, slutte, samle ting op, stille flag, samle flag op
