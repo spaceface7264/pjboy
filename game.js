@@ -6643,18 +6643,22 @@ class Game3D {
     }
     
     startGame() {
+        console.log('Starting new game from opening screen');
         this.gameState = 'playing';
         this.currentLevel = 1;
         this.playerLives = 3;
         this.totalScore = 0;
         this.hideAllScreens();
+        console.log(`Starting Level ${this.currentLevel}`);
         this.startLevel(this.currentLevel);
     }
     
     startLevel(level) {
+        console.log(`startLevel called with level: ${level}`);
         this.currentLevel = level;
         this.levelStartTime = Date.now();
         this.gameState = 'playing';
+        console.log(`Game state set to: ${this.gameState}, Current level: ${this.currentLevel}`);
         
         // Set maze difficulty based on level (1-10)
         this.mazeDifficulty = Math.min(level, 10);
