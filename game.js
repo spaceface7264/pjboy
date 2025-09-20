@@ -81,7 +81,6 @@ class Game3D {
             danish: {
                 // Game modes
                 playMode: 'Spil Tilstand',
-                createMode: 'Opret Tilstand',
                 
                 // Controls
                 controls: 'Kontroller',
@@ -93,11 +92,7 @@ class Game3D {
                 spaceCamera: 'Mellemrum - Skift Kamera',
                 jJump: 'J - Hop',
                 pSettings: 'P - Indstillinger',
-                tToolbox: 'T - Værktøjskasse',
                 iInventory: 'I - Inventar',
-                qWall: 'Q - Væg',
-                eErase: 'E - Slet',
-                shiftLine: 'SHIFT - Lige Linje',
                 
                 // Settings
                 settings: 'Indstillinger',
@@ -227,7 +222,6 @@ class Game3D {
             english: {
                 // Game modes
                 playMode: 'Play Mode',
-                createMode: 'Create Mode',
                 
                 // Controls
                 controls: 'Controls',
@@ -239,11 +233,7 @@ class Game3D {
                 spaceCamera: 'Space - Change Camera',
                 jJump: 'J - Jump',
                 pSettings: 'P - Settings',
-                tToolbox: 'T - Toolbox',
                 iInventory: 'I - Inventory',
-                qWall: 'Q - Wall',
-                eErase: 'E - Erase',
-                shiftLine: 'SHIFT - Straight Line',
                 
                 // Settings
                 settings: 'Settings',
