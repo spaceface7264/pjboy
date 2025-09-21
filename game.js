@@ -5139,7 +5139,10 @@ class Game3D {
     }
     
     render() {
-        // Only render game UI when in playing state
+        // Update crosshair regardless of game state (depends on gameMode, not gameState)
+        this.updateCrosshairUI();
+        
+        // Only render other game UI when in playing state
         if (this.gameState !== 'playing') {
             return;
         }
@@ -5150,7 +5153,6 @@ class Game3D {
         this.updateHealthUI();
         this.updateCompassUI();
         // this.updateWeaponPowerUpUI(); // Replaced by new HUD system
-        this.updateCrosshairUI();
         this.updateGroundTargetIndicator();
         this.updateTimerUI();
         // this.updateInventoryGridUI(); // Hidden for now
@@ -6756,33 +6758,57 @@ class Game3D {
     }
     
     updateCrosshairUI() {
-        // Only show crosshair in FPV play mode
-        const shouldShow = (this.gameMode === 'play' && this.viewMode === 'fpv');
-        const htmlCrosshair = document.getElementById('crosshair');
+        // Create a brand new crosshair system
+        this.createNewCrosshair();
+    }
+    
+    createNewCrosshair() {
+        // Remove any existing crosshair elements
+        const existingCrosshairs = document.querySelectorAll('#crosshair, #new-crosshair');
+        existingCrosshairs.forEach(el => el.remove());
         
-        console.log(`Crosshair: gameMode=${this.gameMode}, viewMode=${this.viewMode}, shouldShow=${shouldShow}`);
+        // Only show crosshair in FPV play mode AND when actually playing
+        const shouldShow = (this.gameMode === 'play' && this.viewMode === 'fpv' && this.gameState === 'playing');
+        console.log(`New Crosshair: gameMode=${this.gameMode}, viewMode=${this.viewMode}, gameState=${this.gameState}, shouldShow=${shouldShow}`);
         
-        if (htmlCrosshair) {
-            // Check if the dot element exists, recreate if missing
-            let dot = htmlCrosshair.querySelector('div');
-            if (!dot) {
-                console.log('Dot element missing, recreating...');
-                htmlCrosshair.innerHTML = `
-                    <div style="position: absolute; top: 50%; left: 50%; width: 8px; height: 8px; background: #00ff00; box-shadow: 0 0 10px #00ff00, 0 0 20px #00ff00; border-radius: 50%; transform: translate(-50%, -50%);"></div>
-                `;
-                dot = htmlCrosshair.querySelector('div');
-                console.log('Dot element recreated');
-            }
+        if (shouldShow) {
+            // Create completely new crosshair element
+            const newCrosshair = document.createElement('div');
+            newCrosshair.id = 'new-crosshair';
+            newCrosshair.style.cssText = `
+                position: fixed !important;
+                top: 50% !important;
+                left: 50% !important;
+                width: 16px !important;
+                height: 16px !important;
+                transform: translate(-50%, -50%) !important;
+                pointer-events: none !important;
+                z-index: 100 !important;
+                display: block !important;
+                background: transparent !important;
+                border: none !important;
+            `;
             
-            htmlCrosshair.style.display = shouldShow ? 'block' : 'none';
-            console.log(`Crosshair display set to: ${htmlCrosshair.style.display}`);
+            // Add inner dot - clean green crosshair
+            const innerDot = document.createElement('div');
+            innerDot.style.cssText = `
+                position: absolute !important;
+                top: 50% !important;
+                left: 50% !important;
+                width: 4px !important;
+                height: 4px !important;
+                background: #00ff00 !important;
+                border-radius: 50% !important;
+                transform: translate(-50%, -50%) !important;
+                box-shadow: 0 0 8px #00ff00, 0 0 16px #00ff00 !important;
+            `;
             
-            if (dot) {
-                console.log('Dot element found, size:', dot.style.width, 'x', dot.style.height);
-                console.log('Dot background:', dot.style.background);
-            }
+            newCrosshair.appendChild(innerDot);
+            document.body.appendChild(newCrosshair);
+            
+            console.log('✅ New crosshair created and added to body');
         } else {
-            console.log('Crosshair element not found!');
+            console.log('❌ Not showing crosshair - conditions not met');
         }
     }
     
@@ -7378,21 +7404,7 @@ window.addEventListener('load', () => {
     setupScreenButtons(game);
     // Using custom in-code lion archer model (no external GLTF)
 
-    // Ensure crosshair element exists
-    const crosshairCheck = document.getElementById('crosshair');
-    if (!crosshairCheck) {
-        console.log('Creating missing crosshair element...');
-        const crosshair = document.createElement('div');
-        crosshair.id = 'crosshair';
-        crosshair.style.cssText = 'position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 18px; height: 18px; pointer-events: none; z-index: 999999; display: none;';
-        crosshair.innerHTML = `
-            <div style="position: absolute; top: 50%; left: 50%; width: 8px; height: 8px; background: #00ff00; box-shadow: 0 0 10px #00ff00, 0 0 20px #00ff00; border-radius: 50%; transform: translate(-50%, -50%);"></div>
-        `;
-        document.body.appendChild(crosshair);
-        console.log('Crosshair element created');
-    } else {
-        console.log('Crosshair element found');
-    }
+    // Legacy crosshair code removed - now using new crosshair system
 
     // Global inventory hotkeys
     document.addEventListener('keydown', (event) => {
