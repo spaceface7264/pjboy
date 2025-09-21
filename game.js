@@ -7110,12 +7110,18 @@ class Game3D {
         if (openingScreen) {
             openingScreen.style.display = 'flex';
         }
-        // Ensure cursor is visible on start screen
+        // Ensure cursor is always visible on welcome screen
         document.body.style.cursor = 'default';
+        document.body.style.pointerEvents = 'auto';
         // Exit pointer lock if active
         if (document.pointerLockElement) {
             document.exitPointerLock();
         }
+        
+        // Force cursor visibility with a slight delay to ensure it takes effect
+        setTimeout(() => {
+            document.body.style.cursor = 'default';
+        }, 100);
     }
     
     startGame() {
@@ -7291,6 +7297,14 @@ class Game3D {
         const screen = document.getElementById('level-complete-screen');
         const text = document.getElementById('level-complete-text');
         
+        // Ensure cursor is always visible on complete screen
+        document.body.style.cursor = 'default';
+        document.body.style.pointerEvents = 'auto';
+        // Exit pointer lock if active
+        if (document.pointerLockElement) {
+            document.exitPointerLock();
+        }
+        
         if (screen && text) {
             const stats = this.lastLevelStats || {};
             const mazeTime = stats.mazeTime || 0;
@@ -7330,6 +7344,14 @@ class Game3D {
         this.hideAllScreens();
         const screen = document.getElementById('game-over-screen');
         const text = document.getElementById('game-over-text');
+        
+        // Ensure cursor is always visible on game over screen
+        document.body.style.cursor = 'default';
+        document.body.style.pointerEvents = 'auto';
+        // Exit pointer lock if active
+        if (document.pointerLockElement) {
+            document.exitPointerLock();
+        }
         
         if (screen && text) {
             if (isFinal) {
