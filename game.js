@@ -1443,8 +1443,10 @@ class Game3D {
             }
             // Restore normal cursor behavior
             document.body.style.cursor = 'default';
-            // Rebuild current maze
-            this.createLabyrinth();
+            // Only rebuild maze if switching from create mode, not when starting new levels
+            if (this.gameMode === 'create') {
+                this.createLabyrinth();
+            }
             // Setup play mode camera/controls and enemies
             this.setupPlayMode();
         }
@@ -2542,23 +2544,35 @@ class Game3D {
     
         // Create entrance and exit
         let entY = 1; 
+        let foundEntrance = false;
         for (let y = 1; y < h - 1; y++) { 
             if (grid[y][1] === '.') { 
                 entY = y; 
+                foundEntrance = true;
                 break; 
             }
         }
         
         let extY = h - 2; 
+        let foundExit = false;
         for (let y = h - 2; y >= 1; y--) { 
             if (grid[y][w - 2] === '.') { 
                 extY = y; 
+                foundExit = true;
                 break; 
             }
         }
         
         grid[entY][0] = '.'; 
         grid[extY][w - 1] = '.';
+        
+        // Ensure entrance/exit connect to paths
+        if (grid[entY][1] !== '.') {
+            grid[entY][1] = '.';
+        }
+        if (grid[extY][w - 2] !== '.') {
+            grid[extY][w-2] = '.';
+        }
     
         return grid.map(row => row.join(''));
     }
@@ -2566,7 +2580,75 @@ class Game3D {
         const d = Math.max(1, Math.min(10, parseInt(level) || 5));
         const size = 25 + (d - 1) * 8; // 25..97
         const odd = (size % 2 === 1) ? size : size - 1;
-        return this.generateAsciiPerfectMaze(odd, odd);
+        const maze = this.generateAsciiPerfectMaze(odd, odd);
+        
+        // For small mazes (difficulty 1-2), verify connectivity and regenerate if needed
+        if (d <= 2) {
+            const isConnected = this.testMazeConnectivity(maze, d);
+            if (!isConnected) {
+                return this.generateAsciiPerfectMazeByDifficulty(level); // Recursive call to regenerate
+            }
+        }
+        
+        return maze;
+    }
+
+    testMazeConnectivity(maze, level) {
+        const h = maze.length;
+        const w = maze[0].length;
+        
+        // Find entrance and exit positions
+        let entrancePos = null;
+        let exitPos = null;
+        
+        for (let y = 0; y < h; y++) {
+            if (maze[y][0] === '.') {
+                entrancePos = { x: 0, y: y };
+                break;
+            }
+        }
+        
+        for (let y = 0; y < h; y++) {
+            if (maze[y][w-1] === '.') {
+                exitPos = { x: w-1, y: y };
+                break;
+            }
+        }
+        
+        if (!entrancePos || !exitPos) {
+            return false;
+        }
+        
+        // Simple BFS to test connectivity
+        const visited = new Set();
+        const queue = [entrancePos];
+        visited.add(`${entrancePos.x},${entrancePos.y}`);
+        
+        const directions = [[0, 1], [1, 0], [0, -1], [-1, 0]];
+        
+        while (queue.length > 0) {
+            const current = queue.shift();
+            
+            // Check if we reached the exit
+            if (current.x === exitPos.x && current.y === exitPos.y) {
+                return true;
+            }
+            
+            // Explore neighbors
+            for (const [dx, dy] of directions) {
+                const nx = current.x + dx;
+                const ny = current.y + dy;
+                const key = `${nx},${ny}`;
+                
+                if (nx >= 0 && nx < w && ny >= 0 && ny < h && 
+                    maze[ny][nx] === '.' && !visited.has(key)) {
+                    visited.add(key);
+                    queue.push({ x: nx, y: ny });
+                }
+            }
+        }
+        
+        return false;
     }
 
     // ===== Static Labyrinth Editing Helpers =====
@@ -7030,10 +7112,6 @@ class Game3D {
         
         // Set maze difficulty based on level (1-10)
         this.mazeDifficulty = Math.min(level, 10);
-        
-        // Generate ASCII maze for this level
-        this.generateAsciiPerfectMazeByDifficulty(level);
-        
         // Create the maze (this sets up levelStartWorld and levelEndWorld)
         this.createLabyrinth();
         
