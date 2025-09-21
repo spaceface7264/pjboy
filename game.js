@@ -71,6 +71,22 @@ class Game3D {
         this.totalScore = 0;
         this.levelEndWorld = null; // Position of the red exit marker
         
+        // Timer system for maze solving
+        this.mazeTimer = {
+            isActive: false,
+            startTime: 0,
+            currentTime: 0,
+            bestTime: null,
+            hasStarted: false,
+            hasFinished: false
+        };
+        
+        // Scoring tracking
+        this.levelStats = {
+            enemiesNeutralized: 0,
+            flagsUsed: 0
+        };
+        
         this.crosshair3D = null;
         this.groundTargetIndicator = null; // 3D crosshair object
         this.mazeDifficulty = 5; // 1..10 for ASCII maze generator
@@ -789,7 +805,10 @@ class Game3D {
             
             if (e.userData.hp <= 0) {
                 const idx = this.playMode.enemies.indexOf(e);
-                if (idx !== -1) this.playMode.enemies.splice(idx, 1);
+                if (idx !== -1) {
+                    this.playMode.enemies.splice(idx, 1);
+                    this.levelStats.enemiesNeutralized++; // Track enemy kill
+                }
                 this.playMode.enemiesGroup.remove(e);
             } else {
                 // Brief flash
@@ -823,7 +842,10 @@ class Game3D {
             
             if (e.userData.hp <= 0) {
                 const idx = this.playMode.enemies.indexOf(e);
-                if (idx !== -1) this.playMode.enemies.splice(idx, 1);
+                if (idx !== -1) {
+                    this.playMode.enemies.splice(idx, 1);
+                    this.levelStats.enemiesNeutralized++; // Track enemy kill
+                }
                 this.playMode.enemiesGroup.remove(e);
             } else {
                 // Brief flash
@@ -1908,6 +1930,7 @@ class Game3D {
     switchMaze(index) {
         if (index >= 0 && index < this.savedMazes.length) {
             this.currentMazeIndex = index;
+            this.resetMazeTimer(); // Reset timer when switching mazes
             this.rebuildMaze();
             console.log(`Switched to maze: ${this.savedMazes[index].name}`);
             if (this.gameMode === 'play') {
@@ -1923,6 +1946,9 @@ class Game3D {
             this.scene.remove(wall.mesh);
         });
         this.walls = [];
+        
+        // Reset timer when maze is rebuilt
+        this.resetMazeTimer();
         
         // Create new maze
         this.createLabyrinth();
@@ -2388,17 +2414,57 @@ class Game3D {
         console.log(`Entry point: row=${entRow}, col=${entCol}, world=(${startX + entCol * cellSize}, ${startZ + entRow * cellSize})`);
         console.log(`Exit point: row=${exitRow}, col=${exitCol}, world=(${startX + exitCol * cellSize}, ${startZ + exitRow * cellSize})`);
         
-        // Create markers slightly above ground at cell centers
+        // Create start marker with visual content inside
         const entranceGeometry = new THREE.ConeGeometry(0.5, 2, 8);
         const entranceMaterial = new THREE.MeshLambertMaterial({ color: 0x00ff00, emissive: 0x004400 });
         const entrance = new THREE.Mesh(entranceGeometry, entranceMaterial);
         entrance.position.set(startX + entCol * cellSize, 1, startZ + entRow * cellSize);
+        
+        // Add visual content inside the start marker
+        const startContentGroup = new THREE.Group();
+        
+        // Add a glowing sphere inside the cone
+        const sphereGeometry = new THREE.SphereGeometry(0.3, 8, 8);
+        const sphereMaterial = new THREE.MeshLambertMaterial({ 
+            color: 0xffffff, 
+            emissive: 0x00ff00,
+            transparent: true,
+            opacity: 0.8
+        });
+        const startSphere = new THREE.Mesh(sphereGeometry, sphereMaterial);
+        startSphere.position.set(0, 0.5, 0);
+        startContentGroup.add(startSphere);
+        
+        // Add a pulsing ring around the sphere
+        const ringGeometry = new THREE.RingGeometry(0.2, 0.4, 16);
+        const ringMaterial = new THREE.MeshLambertMaterial({ 
+            color: 0x00ff00, 
+            emissive: 0x00ff00,
+            transparent: true,
+            opacity: 0.6,
+            side: THREE.DoubleSide
+        });
+        const startRing = new THREE.Mesh(ringGeometry, ringMaterial);
+        startRing.rotation.x = -Math.PI / 2; // Lay flat
+        startRing.position.set(0, 0.1, 0);
+        startContentGroup.add(startRing);
+        
+        // Add the content group to the entrance
+        entrance.add(startContentGroup);
+        entrance.userData = { 
+            type: 'start',
+            content: startContentGroup,
+            sphere: startSphere,
+            ring: startRing
+        };
+        
         this.scene.add(entrance);
         
         const exitGeometry = new THREE.ConeGeometry(0.5, 2, 8);
         const exitMaterial = new THREE.MeshLambertMaterial({ color: 0xff0000, emissive: 0x440000 });
         const exit = new THREE.Mesh(exitGeometry, exitMaterial);
         exit.position.set(startX + exitCol * cellSize, 1, startZ + exitRow * cellSize);
+        exit.userData = { type: 'end' };
         this.scene.add(exit);
         this.labyrinthMarkers = [entrance, exit];
         // Save for spawn logic
@@ -3050,6 +3116,7 @@ class Game3D {
                         const deathPos = e.position.clone();
                         this.playMode.enemiesGroup.remove(e);
                         this.playMode.enemies.splice(j, 1);
+                        this.levelStats.enemiesNeutralized++; // Track enemy kill
                         if (Math.random() < this.dropChance) {
                             this.spawnPickup(deathPos.x, deathPos.z);
                         }
@@ -3600,6 +3667,7 @@ class Game3D {
         this.placedFlags.push(flagGroup);
 
         this.inventory.flags = Math.max(0, this.inventory.flags - 1);
+        this.levelStats.flagsUsed++; // Track flag usage
         this.updateInventoryUI();
         this.updateControlsUI();
         this.showToast('🏁 Flag placed', 'success');
@@ -3786,6 +3854,7 @@ class Game3D {
         });
         // Rebuild walls if already present to apply new material
         if (this.walls && this.walls.length) {
+            this.resetMazeTimer(); // Reset timer when changing theme
             this.rebuildMaze();
         }
         // Reflect active button state in modal if open
@@ -4069,7 +4138,7 @@ class Game3D {
                     this.characterRotation = Math.atan2(directionToStart.x, directionToStart.z);
                 } else {
                     this.player.position.set(0, 0, 0);
-                    this.characterRotation = 0;
+                this.characterRotation = 0;
                 }
                 // Nudge camera immediately
                 this.updateCamera();
@@ -5001,6 +5070,7 @@ class Game3D {
         // this.updateWeaponPowerUpUI(); // Replaced by new HUD system
         this.updateCrosshairUI();
         this.updateGroundTargetIndicator();
+        this.updateTimerUI();
         // this.updateInventoryGridUI(); // Hidden for now
         this.updateToasts();
         
@@ -5013,17 +5083,238 @@ class Game3D {
 
     updateObjectives() {
         const cur = this.savedMazes[this.currentMazeIndex];
-        if (!cur || cur.type !== 'labyrinth') return;
+        if (!cur || (cur.type !== 'labyrinth' && cur.type !== 'ascii')) return;
         if (!this.levelStartWorld || !this.levelEndWorld) return;
         const p = this.player.position;
         const atStart = p.distanceToSquared(this.levelStartWorld) < 2.0;
         const atEnd = p.distanceToSquared(this.levelEndWorld) < 2.0;
+        
+        // Debug logging
+        if (atStart && !this.mazeTimer.hasStarted) {
+            console.log('Player near start marker, distance:', Math.sqrt(p.distanceToSquared(this.levelStartWorld)));
+        }
+        
+        // Handle start marker collision
+        if (atStart && !this.mazeTimer.hasStarted) {
+            console.log('Player touched start marker - starting timer!');
+            this.startMazeTimer();
+        }
+        
+        // Handle end marker collision
+        if (atEnd && this.mazeTimer.hasStarted && !this.mazeTimer.hasFinished) {
+            this.finishMazeTimer();
+        }
+        
+        // Legacy messages
         if (atEnd) this.showMessage('Exit reached!');
         if (atStart && (this.hasLeftStartOnce || false)) this.showMessage('Back at start');
         if (!atStart) this.hasLeftStartOnce = true;
     }
     
+    startMazeTimer() {
+        this.mazeTimer.isActive = true;
+        this.mazeTimer.startTime = Date.now();
+        this.mazeTimer.hasStarted = true;
+        this.mazeTimer.hasFinished = false;
+        this.mazeTimer.currentTime = 0;
+        
+        console.log('Maze timer started!');
+        this.showMessage('Timer started! Find the red exit marker.');
+        this.showToast('⏱️ Timer Started!', 'info');
+        
+        // Force timer UI to show immediately
+        this.updateTimerUI();
+        
+        // Add screen flash effect
+        this.addScreenFlash(0x00ff00, 0.3);
+        
+        // Animate the start marker
+        this.animateStartMarker();
+    }
     
+    finishMazeTimer() {
+        if (!this.mazeTimer.isActive || this.mazeTimer.hasFinished) return;
+        
+        this.mazeTimer.isActive = false;
+        this.mazeTimer.hasFinished = true;
+        this.mazeTimer.currentTime = (Date.now() - this.mazeTimer.startTime) / 1000;
+        
+        // Check for best time
+        if (!this.mazeTimer.bestTime || this.mazeTimer.currentTime < this.mazeTimer.bestTime) {
+            this.mazeTimer.bestTime = this.mazeTimer.currentTime;
+            this.showMessage(`New best time: ${this.mazeTimer.currentTime.toFixed(0)}s!`);
+            this.showToast(`🏆 New Best Time: ${this.mazeTimer.currentTime.toFixed(0)}s!`, 'success');
+        } else {
+            this.showMessage(`Time: ${this.mazeTimer.currentTime.toFixed(0)}s (Best: ${this.mazeTimer.bestTime.toFixed(0)}s)`);
+            this.showToast(`⏱️ Time: ${this.mazeTimer.currentTime.toFixed(0)}s`, 'info');
+        }
+        
+        console.log(`Maze completed in ${this.mazeTimer.currentTime.toFixed(0)} seconds`);
+        
+        // Add screen flash effect
+        this.addScreenFlash(0xff0000, 0.2);
+        
+        // Animate the end marker
+        this.animateEndMarker();
+    }
+    
+    animateStartMarker() {
+        // Find the start marker and animate it
+        const startMarker = this.scene.children.find(child => 
+            child.userData && child.userData.type === 'start'
+        );
+        
+        if (startMarker && startMarker.userData.content) {
+            const content = startMarker.userData.content;
+            const sphere = startMarker.userData.sphere;
+            const ring = startMarker.userData.ring;
+            
+            // Animate the sphere pulsing
+            const animate = () => {
+                if (!this.mazeTimer.isActive) return;
+                
+                const time = Date.now() * 0.005;
+                const scale = 1 + Math.sin(time) * 0.2;
+                sphere.scale.setScalar(scale);
+                
+                // Rotate the ring
+                ring.rotation.z += 0.02;
+                
+                requestAnimationFrame(animate);
+            };
+            animate();
+        }
+    }
+    
+    animateEndMarker() {
+        // Find the end marker and animate it
+        const endMarker = this.scene.children.find(child => 
+            child.userData && child.userData.type === 'end'
+        );
+        
+        if (endMarker) {
+            // Flash the end marker
+            const originalColor = endMarker.material.color.getHex();
+            let flashCount = 0;
+            const flash = () => {
+                if (flashCount >= 6) {
+                    endMarker.material.color.setHex(originalColor);
+                    return;
+                }
+                
+                endMarker.material.color.setHex(flashCount % 2 === 0 ? 0xffffff : originalColor);
+                flashCount++;
+                setTimeout(flash, 200);
+            };
+            flash();
+        }
+    }
+    
+    resetMazeTimer() {
+        // Stop any active timer
+        this.mazeTimer.isActive = false;
+        this.mazeTimer.hasStarted = false;
+        this.mazeTimer.hasFinished = false;
+        this.mazeTimer.startTime = 0;
+        this.mazeTimer.currentTime = 0;
+        
+        // Hide timer UI
+        const timerUI = document.getElementById('timer-ui');
+        if (timerUI) {
+            timerUI.style.display = 'none';
+        }
+        
+        console.log('Maze timer reset');
+    }
+    
+    addScreenFlash(color, intensity) {
+        // Create a temporary overlay for screen flash effect
+        const flashOverlay = document.createElement('div');
+        flashOverlay.style.position = 'fixed';
+        flashOverlay.style.top = '0';
+        flashOverlay.style.left = '0';
+        flashOverlay.style.width = '100%';
+        flashOverlay.style.height = '100%';
+        flashOverlay.style.backgroundColor = `#${color.toString(16).padStart(6, '0')}`;
+        flashOverlay.style.opacity = intensity;
+        flashOverlay.style.pointerEvents = 'none';
+        flashOverlay.style.zIndex = '9999';
+        flashOverlay.style.transition = 'opacity 0.3s ease-out';
+        
+        document.body.appendChild(flashOverlay);
+        
+        // Fade out and remove
+        setTimeout(() => {
+            flashOverlay.style.opacity = '0';
+            setTimeout(() => {
+                if (flashOverlay.parentNode) {
+                    flashOverlay.parentNode.removeChild(flashOverlay);
+                }
+            }, 300);
+        }, 100);
+    }
+    
+    updateTimerUI() {
+        // Only show timer in play mode
+        if (this.gameMode !== 'play') {
+            return;
+        }
+        
+        // Create or update timer UI (bottom left)
+        let timerUI = document.getElementById('timer-ui');
+        if (!timerUI) {
+            timerUI = document.createElement('div');
+            timerUI.id = 'timer-ui';
+            timerUI.style.position = 'absolute';
+            timerUI.style.bottom = '20px';
+            timerUI.style.left = '20px';
+            timerUI.style.background = 'linear-gradient(135deg, rgba(0,0,0,0.9), rgba(0,20,40,0.9))';
+            timerUI.style.border = '2px solid #00ff00';
+            timerUI.style.borderRadius = '12px';
+            timerUI.style.padding = '15px 20px';
+            timerUI.style.fontFamily = "'Courier New', monospace";
+            timerUI.style.fontSize = '16px';
+            timerUI.style.color = '#00ff00';
+            timerUI.style.textShadow = '0 0 10px #00ff00';
+            timerUI.style.zIndex = '1000';
+            timerUI.style.minWidth = '200px';
+            timerUI.style.textAlign = 'center';
+            document.body.appendChild(timerUI);
+        }
+        
+        if (this.mazeTimer.isActive) {
+            // Update current time
+            this.mazeTimer.currentTime = (Date.now() - this.mazeTimer.startTime) / 1000;
+            
+            timerUI.innerHTML = `
+                <div style="font-size: 12px; margin-bottom: 3px; opacity: 0.6;">LEVEL ${this.currentLevel}</div>
+                <div style="font-size: 14px; margin-bottom: 5px; opacity: 0.8;">MAZE TIMER</div>
+                <div style="font-size: 24px; font-weight: bold; color: #00ff00;">
+                    ${this.mazeTimer.currentTime.toFixed(0)}s
+                </div>
+                <div style="font-size: 12px; margin-top: 5px; opacity: 0.7;">
+                    Best: ${this.mazeTimer.bestTime ? this.mazeTimer.bestTime.toFixed(0) + 's' : '--'}
+                </div>
+            `;
+            timerUI.style.display = 'block';
+        } else if (this.mazeTimer.hasFinished) {
+            // Show final time
+            timerUI.innerHTML = `
+                <div style="font-size: 12px; margin-bottom: 3px; opacity: 0.6;">LEVEL ${this.currentLevel}</div>
+                <div style="font-size: 14px; margin-bottom: 5px; opacity: 0.8;">COMPLETED</div>
+                <div style="font-size: 20px; font-weight: bold; color: #00ff00;">
+                    ${this.mazeTimer.currentTime.toFixed(0)}s
+                </div>
+                <div style="font-size: 12px; margin-top: 5px; opacity: 0.7;">
+                    Best: ${this.mazeTimer.bestTime ? this.mazeTimer.bestTime.toFixed(0) + 's' : '--'}
+                </div>
+            `;
+            timerUI.style.display = 'block';
+        } else {
+            // Hide timer when not active
+            timerUI.style.display = 'none';
+        }
+    }
     
     clearAllUI() {
         // Remove ALL possible UI elements (except modals, inventory, and crosshair)
@@ -5034,7 +5325,7 @@ class Game3D {
             'player-pos', 'player-facing', 'camera-info',
             // Any other possible UI elements
             'objective-msg', 'facing-indicator',
-            'control-ui', 'maze-ui'
+            'control-ui', 'maze-ui', 'timer-ui'
         ];
         
         allUIElements.forEach(id => {
@@ -6757,6 +7048,17 @@ class Game3D {
             this.player.invulnerable = false;
         }
         
+        // Reset maze timer (keep best time across levels)
+        const currentBestTime = this.mazeTimer.bestTime;
+        this.resetMazeTimer();
+        this.mazeTimer.bestTime = currentBestTime; // Preserve best time
+        
+        // Reset level statistics
+        this.levelStats = {
+            enemiesNeutralized: 0,
+            flagsUsed: 0
+        };
+        
         // Position player outside maze entry, facing the green start marker
         if (this.levelStartWorld) {
             console.log(`Spawning player outside maze entry:`, this.levelStartWorld);
@@ -6804,15 +7106,39 @@ class Game3D {
         this.gameState = 'levelComplete';
         this.levelCompleteTime = Date.now();
         
-        // Calculate score for this level
-        const levelTime = (this.levelCompleteTime - this.levelStartTime) / 1000;
-        const levelScore = Math.max(0, 1000 - Math.floor(levelTime * 10));
-        this.totalScore += levelScore;
+        // Calculate detailed score breakdown
+        const mazeTime = this.mazeTimer.hasFinished ? this.mazeTimer.currentTime : 
+                        this.mazeTimer.isActive ? (Date.now() - this.mazeTimer.startTime) / 1000 : 
+                        (this.levelCompleteTime - this.levelStartTime) / 1000;
+        const enemiesKilled = this.levelStats ? this.levelStats.enemiesNeutralized : 0;
+        const flagsUsed = this.levelStats ? this.levelStats.flagsUsed : 0;
+        
+        // Enhanced scoring system
+        const baseScore = 1000;
+        const timeBonus = Math.max(0, (120 - mazeTime) * 50); // 50 points per second under 2 minutes
+        const enemyBonus = enemiesKilled * 50;
+        const flagPenalty = flagsUsed * 25;
+        const levelScore = Math.round(Math.max(0, baseScore + timeBonus + enemyBonus - flagPenalty));
+        
+        // Store score breakdown for display
+        this.lastLevelStats = {
+            mazeTime: mazeTime,
+            baseScore: baseScore,
+            timeBonus: timeBonus,
+            enemyBonus: enemyBonus,
+            flagPenalty: flagPenalty,
+            levelScore: levelScore,
+            enemiesKilled: enemiesKilled,
+            flagsUsed: flagsUsed
+        };
+        
+        this.totalScore = Math.round(this.totalScore + levelScore);
         
         // Show level complete screen
         this.showLevelCompleteScreen();
         
-        console.log(`Level ${this.currentLevel} completed in ${levelTime.toFixed(1)}s, Score: ${levelScore}`);
+        console.log(`Level ${this.currentLevel} completed! Time: ${mazeTime.toFixed(1)}s, Score: ${levelScore}`);
+        console.log(`Breakdown - Base: ${baseScore}, Time: +${timeBonus}, Enemies: +${enemyBonus}, Flags: -${flagPenalty}`);
     }
     
     nextLevel() {
@@ -6862,12 +7188,35 @@ class Game3D {
         const text = document.getElementById('level-complete-text');
         
         if (screen && text) {
+            const stats = this.lastLevelStats || {};
+            const mazeTime = stats.mazeTime || 0;
+            const levelScore = stats.levelScore || 0;
+            
             if (this.currentLevel >= this.maxLevel) {
-                text.textContent = `CONGRATULATIONS! All ${this.maxLevel} levels completed! Final Score: ${this.totalScore}`;
+                text.innerHTML = `
+                    <div style="font-size: 24px; margin-bottom: 20px; color: #00ff00;">
+                        🏆 CONGRATULATIONS!
+                    </div>
+                    <div style="margin-bottom: 15px;">All ${this.maxLevel} levels completed!</div>
+                    <div style="margin-bottom: 20px; font-size: 18px;">Final Score: ${this.totalScore}</div>
+                    <div style="font-size: 14px; opacity: 0.8;">
+                        Final Level Time: ${mazeTime.toFixed(0)}s
+                    </div>
+                `;
                 const nextBtn = document.getElementById('next-level-btn');
                 if (nextBtn) nextBtn.textContent = 'PLAY AGAIN';
             } else {
-                text.textContent = `Level ${this.currentLevel} Complete! Score: ${this.totalScore}`;
+                text.innerHTML = `
+                    <div style="font-size: 22px; margin-bottom: 20px; color: #00ff00;">
+                        Level ${this.currentLevel} Complete!
+                    </div>
+                    <div style="font-size: 20px; margin-bottom: 20px;">
+                        Time: ${mazeTime.toFixed(0)}s
+                    </div>
+                    <div style="font-size: 16px;">
+                        Total Score: ${this.totalScore}
+                    </div>
+                `;
             }
             screen.style.display = 'flex';
         }
@@ -7018,6 +7367,14 @@ function setupScreenButtons(game) {
                 // Play again
                 game.startGame();
             }
+        });
+    }
+    
+    // Retry level button
+    const retryLevelBtn = document.getElementById('retry-level-btn');
+    if (retryLevelBtn) {
+        retryLevelBtn.addEventListener('click', () => {
+            game.startLevel(game.currentLevel);
         });
     }
     
