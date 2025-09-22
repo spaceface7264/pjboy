@@ -92,13 +92,29 @@ export class MobileControls {
             e.preventDefault();
             joystick.active = true;
             joystick.container.style.opacity = '1';
+            
+            // Store the touch ID for this joystick
+            const touch = e.touches[0];
+            joystick.touchId = touch.identifier;
         };
         
         const handleMove = (e) => {
             if (!joystick.active) return;
             e.preventDefault();
             
-            const touch = e.touches[0];
+            // Find the touch with matching ID
+            let joystickTouch = null;
+            for (let i = 0; i < e.touches.length; i++) {
+                const touch = e.touches[i];
+                if (touch.identifier === joystick.touchId) {
+                    joystickTouch = touch;
+                    break;
+                }
+            }
+            
+            if (!joystickTouch) return;
+            
+            const touch = joystickTouch;
             const rect = joystick.container.getBoundingClientRect();
             const centerX = rect.left + rect.width / 2;
             const centerY = rect.top + rect.height / 2;
@@ -119,7 +135,7 @@ export class MobileControls {
             
             // Normalize movement values
             this.movement.x = x / joystick.radius;
-            this.movement.y = -y / joystick.radius; // Invert Y for forward/backward
+            this.movement.y = y / joystick.radius; // Fixed: removed inversion for natural movement
             
             if (this.onMovement) {
                 this.onMovement(this.movement);
@@ -190,28 +206,56 @@ export class MobileControls {
         const handleStart = (e) => {
             e.preventDefault();
             this.looking = true;
-            this.lastLookTouch = {
-                x: e.touches[0].clientX,
-                y: e.touches[0].clientY
-            };
+            
+            // Find the touch that's in the look area
+            let lookTouch = null;
+            for (let i = 0; i < e.touches.length; i++) {
+                const touch = e.touches[i];
+                const rect = this.lookArea.getBoundingClientRect();
+                if (touch.clientX >= rect.left && touch.clientX <= rect.right &&
+                    touch.clientY >= rect.top && touch.clientY <= rect.bottom) {
+                    lookTouch = touch;
+                    break;
+                }
+            }
+            
+            if (lookTouch) {
+                this.lastLookTouch = {
+                    x: lookTouch.clientX,
+                    y: lookTouch.clientY,
+                    id: lookTouch.identifier
+                };
+            }
         };
         
         const handleMove = (e) => {
             if (!this.looking || !this.lastLookTouch) return;
             e.preventDefault();
             
-            const touch = e.touches[0];
-            const deltaX = touch.clientX - this.lastLookTouch.x;
-            const deltaY = touch.clientY - this.lastLookTouch.y;
-            
-            if (this.onLook) {
-                this.onLook(deltaX * 0.003, deltaY * 0.003); // Scale sensitivity
+            // Find the touch with matching ID
+            let lookTouch = null;
+            for (let i = 0; i < e.touches.length; i++) {
+                const touch = e.touches[i];
+                if (touch.identifier === this.lastLookTouch.id) {
+                    lookTouch = touch;
+                    break;
+                }
             }
             
-            this.lastLookTouch = {
-                x: touch.clientX,
-                y: touch.clientY
-            };
+            if (lookTouch) {
+                const deltaX = lookTouch.clientX - this.lastLookTouch.x;
+                const deltaY = lookTouch.clientY - this.lastLookTouch.y;
+                
+                if (this.onLook) {
+                    this.onLook(deltaX * 0.003, deltaY * 0.003); // Scale sensitivity
+                }
+                
+                this.lastLookTouch = {
+                    x: lookTouch.clientX,
+                    y: lookTouch.clientY,
+                    id: lookTouch.identifier
+                };
+            }
         };
         
         const handleEnd = (e) => {
