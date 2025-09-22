@@ -1,5 +1,6 @@
 // Core Game Class - Refactored for Mobile
 import * as THREE from 'https://unpkg.com/three@0.161.0/build/three.module.js';
+console.log('🔧 THREE.js loaded:', THREE.REVISION);
 import { MazeGenerator } from '../maze/MazeGenerator.js';
 import { Player } from '../systems/Player.js';
 import { UIManager } from '../ui/UIManager.js';
@@ -116,10 +117,7 @@ export class Game {
         
         // Generate ASCII maze
         const maze = this.mazeGenerator.generateByDifficulty(level);
-        console.log('🎯 Generated maze:', maze.length + 'x' + maze[0].length);
-        
         this.sceneManager.createMaze(maze, this.themes[this.themeName]);
-        console.log('🏗️ Maze created, walls count:', this.sceneManager.walls.length);
         
         // Position player outside maze entrance
         this.player.spawnAtMazeEntrance(this.sceneManager.mazeInfo);
@@ -231,6 +229,9 @@ export class Game {
             this.player.update(deltaTime);
             this.inputManager.update(deltaTime);
             this.uiManager.update(deltaTime);
+            
+            // Check objectives (maze markers)
+            this.checkObjectives();
             
             // Update timer UI if active
             if (this.mazeTimer.isActive) {

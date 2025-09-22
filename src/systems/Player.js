@@ -88,6 +88,12 @@ export class Player {
         
         const camera = this.game.sceneManager.camera;
         
+        // TEMP: Force camera to look at test cube
+        camera.position.set(0, 5, 10);
+        camera.lookAt(0, 1, 0); // Look at test cube position
+        
+        // Original code commented out for debugging
+        /*
         if (this.viewMode === 'fpv') {
             // First person view
             const eyePosition = this.position.clone();
@@ -113,6 +119,7 @@ export class Player {
             camera.position.copy(this.position.clone().add(offset));
             camera.lookAt(this.position);
         }
+        */
     }
     
     update(deltaTime) {
@@ -234,27 +241,25 @@ export class Player {
     }
     
     spawnAtMazeEntrance(mazeInfo) {
-        console.log('🎯 Player spawn - mazeInfo:', mazeInfo);
-        
         if (!mazeInfo || !mazeInfo.entranceWorld) {
             console.warn('❌ No maze info or entrance found');
             return;
         }
         
-        // Position player outside maze entrance, facing inward
-        const entrance = mazeInfo.entranceWorld;
-        const spawnPos = new THREE.Vector3(
-            entrance.x - mazeInfo.cellSize, // One cell outside
-            this.groundY,
-            entrance.z
-        );
+        // Position player to see the test cube and maze
+        const spawnPos = new THREE.Vector3(0, 5, 10); // Fixed position to see origin
         
         this.position.copy(spawnPos);
-        console.log('🚀 Player spawned at:', spawnPos);
+        console.log('🎯 Player position set to:', this.position);
         
-        // Face toward entrance
-        this.fpvYaw = 0; // Facing east (toward entrance)
-        this.fpvPitch = 0;
+        // Face toward origin where test cube should be
+        this.fpvYaw = Math.PI; // Facing toward origin
+        this.fpvPitch = -0.3; // Look slightly down
+        
+        // Force immediate camera update
+        this.updateCameraPosition();
+        console.log('📷 Camera position:', this.game.sceneManager.camera.position);
+        console.log('📷 Camera rotation:', this.game.sceneManager.camera.rotation);
         
         // Reset movement state
         this.velocity.set(0, 0, 0);

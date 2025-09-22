@@ -5,8 +5,6 @@ export class MazeGenerator {
     }
     
     generateByDifficulty(level) {
-        console.log('🎲 Generating maze for level:', level);
-        
         // Scale difficulty: level 1 = 11x11, level 10 = 31x31
         const minSize = 11;
         const maxSize = 31;
@@ -14,10 +12,8 @@ export class MazeGenerator {
         
         // Ensure odd dimensions for perfect maze generation
         const odd = size % 2 === 0 ? size + 1 : size;
-        console.log('📐 Maze size:', odd + 'x' + odd);
         
         let maze = this.generatePerfectMaze(odd, odd);
-        console.log('🏗️ Generated maze grid:', maze);
         
         // For small mazes (level 1-2), verify connectivity
         if (level <= 2) {

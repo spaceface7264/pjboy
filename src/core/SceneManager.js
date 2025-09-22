@@ -41,14 +41,36 @@ export class SceneManager {
         );
         
         // Create renderer
-        this.renderer = new THREE.WebGLRenderer({ 
-            canvas: canvas,
-            antialias: true 
-        });
-        this.renderer.setSize(window.innerWidth, window.innerHeight);
-        this.renderer.shadowMap.enabled = true;
-        this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-        this.renderer.setClearColor(0x87CEEB); // Sky blue
+        console.log('🖼️ Canvas element:', canvas);
+        
+        try {
+            this.renderer = new THREE.WebGLRenderer({ 
+                canvas: canvas,
+                antialias: true,
+                alpha: false,
+                preserveDrawingBuffer: true
+            });
+            
+            // Check if WebGL context was created
+            const gl = this.renderer.getContext();
+            console.log('🔧 WebGL context:', gl);
+            console.log('🔧 WebGL version:', gl.getParameter(gl.VERSION));
+            
+            this.renderer.setSize(window.innerWidth, window.innerHeight, false);
+            this.renderer.setPixelRatio(window.devicePixelRatio);
+            this.renderer.shadowMap.enabled = true;
+            this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            this.renderer.setClearColor(0x87CEEB, 1.0); // Sky blue with full alpha
+            
+            // Force initial clear
+            this.renderer.clear();
+            
+            console.log('🎨 Renderer created, size:', window.innerWidth, 'x', window.innerHeight);
+            console.log('🎨 Forced red clear - should override CSS background');
+            
+        } catch (error) {
+            console.error('❌ Failed to create WebGL renderer:', error);
+        }
         
         // Handle window resize
         window.addEventListener('resize', () => this.handleResize());
@@ -151,11 +173,8 @@ export class SceneManager {
         
         // Create walls
         const wallHeight = 8;
-        const wallMaterial = new THREE.MeshLambertMaterial({
-            color: theme.wall || 0xa68a5b,
-            emissive: theme.wallEmissive || 0x3b2c14,
-            transparent: true,
-            opacity: 0.95
+        const wallMaterial = new THREE.MeshBasicMaterial({
+            color: 0xffff00, // Bright yellow for visibility
         });
         
         for (let row = 0; row < maze.length; row++) {
@@ -187,6 +206,15 @@ export class SceneManager {
         
         // Store maze info
         this.mazeInfo = mazeInfo;
+        
+        // Add a test cube at origin for debugging
+        const testGeometry = new THREE.BoxGeometry(2, 2, 2);
+        const testMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+        const testCube = new THREE.Mesh(testGeometry, testMaterial);
+        testCube.position.set(0, 1, 0);
+        this.scene.add(testCube);
+        console.log('🔴 Test cube added to scene at:', testCube.position);
+        console.log('📦 Scene children count:', this.scene.children.length);
         
         console.log(`🏗️ Created maze: ${maze[0].length}x${maze.length}`);
     }
@@ -354,7 +382,17 @@ export class SceneManager {
     
     render() {
         if (this.renderer && this.scene && this.camera) {
+            // Force clear color and viewport
+            this.renderer.setClearColor(0x87CEEB, 1.0); // Sky blue with full alpha
+            this.renderer.setViewport(0, 0, this.renderer.domElement.width, this.renderer.domElement.height);
+            this.renderer.clear();
             this.renderer.render(this.scene, this.camera);
+        } else {
+            console.warn('❌ Render failed - missing:', {
+                renderer: !!this.renderer,
+                scene: !!this.scene,
+                camera: !!this.camera
+            });
         }
     }
 }

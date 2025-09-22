@@ -340,7 +340,8 @@ export class InputManager {
     }
     
     showMobileControls() {
-        if (!this.isMobile) return;
+        // Always show controls for testing (remove this.isMobile check)
+        console.log('📱 Showing mobile controls, isMobile:', this.isMobile);
         
         if (this.touchControls.joystick) {
             this.touchControls.joystick.container.style.display = 'block';

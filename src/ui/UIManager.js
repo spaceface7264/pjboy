@@ -160,10 +160,9 @@ export class UIManager {
         this.updateCrosshair();
         this.updateInventoryUI();
         
-        // Show mobile controls if on mobile
-        if (this.game.inputManager.isMobile) {
-            this.game.inputManager.showMobileControls();
-        }
+        // Always show mobile controls for testing
+        this.game.inputManager.showMobileControls();
+        console.log('📱 Mobile controls should be visible now');
     }
     
     showLevelCompleteScreen(data) {
