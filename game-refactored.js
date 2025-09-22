@@ -408,9 +408,9 @@ class Game3D extends EventEmitter {
             .subVectors(startPos, endPos)
             .normalize();
         
-        // Position player one cell size away from start, facing the start
-        const cellSize = 5; // Match the maze cell size
-        const spawnPos = startPos.clone().add(dirToStart.multiplyScalar(cellSize));
+        // Position player 10 units away from start, facing the start
+        const spawnDistance = 10; // 10 units distance from maze opening
+        const spawnPos = startPos.clone().add(dirToStart.multiplyScalar(spawnDistance));
         
         this.player.position.copy(spawnPos);
         this.player.position.y = 1; // Keep above ground
