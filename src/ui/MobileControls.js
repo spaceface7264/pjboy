@@ -248,7 +248,7 @@ export class MobileControls {
                 
                 if (this.onLook) {
                     // Higher sensitivity and correct directions for mobile touch
-                    this.onLook(deltaX * 0.01, -deltaY * 0.01); // Natural touch: swipe right=turn right, swipe up=look up
+                    this.onLook(-deltaX * 0.01, -deltaY * 0.01); // Fixed X-axis: swipe right=turn right, swipe up=look up
                 }
                 
                 this.lastLookTouch = {
