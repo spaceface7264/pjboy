@@ -1,4 +1,6 @@
-// 3D Second-Person Game - 128-bit Style
+// LEGACY: 3D Second-Person Game - 128-bit Style
+// This file has been refactored into modular structure in src/
+// Keeping for reference during migration
 class Game3D {
     constructor() {
         this.scene = null;
