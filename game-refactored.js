@@ -415,9 +415,12 @@ class Game3D extends EventEmitter {
         this.player.position.copy(spawnPos);
         this.player.position.y = 1; // Keep above ground
         
-        // Face the player towards the start marker
-        const angleToStart = Math.atan2(dirToStart.x, dirToStart.z);
-        this.player.rotation.y = angleToStart + Math.PI; // Add PI to face towards start
+        // Face the player towards the start marker (direction from player to start)
+        const dirToStartFromPlayer = new THREE.Vector3()
+            .subVectors(startPos, spawnPos)
+            .normalize();
+        const angleToStart = Math.atan2(dirToStartFromPlayer.x, dirToStartFromPlayer.z);
+        this.player.rotation.y = angleToStart;
         
         // Update model position if exists
         if (this.player.model) {

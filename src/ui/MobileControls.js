@@ -101,6 +101,7 @@ export class MobileControls {
         const handleMove = (e) => {
             if (!joystick.active) return;
             e.preventDefault();
+            e.stopPropagation();
             
             // Find the touch with matching ID
             let joystickTouch = null;
@@ -131,11 +132,12 @@ export class MobileControls {
                 y = (deltaY / distance) * joystick.radius;
             }
             
-            joystick.knob.style.transform = `translate(${x}px, ${y}px)`;
+            // Position knob relative to center (not translate from center)
+            joystick.knob.style.transform = `translate(calc(-50% + ${x}px), calc(-50% + ${y}px))`;
             
-            // Normalize movement values
-            this.movement.x = x / joystick.radius;
-            this.movement.y = y / joystick.radius; // Fixed: removed inversion for natural movement
+            // Normalize movement values with better precision
+            this.movement.x = Math.max(-1, Math.min(1, x / joystick.radius));
+            this.movement.y = Math.max(-1, Math.min(1, y / joystick.radius));
             
             if (this.onMovement) {
                 this.onMovement(this.movement);
@@ -144,9 +146,18 @@ export class MobileControls {
         
         const handleEnd = (e) => {
             e.preventDefault();
+            e.stopPropagation();
             joystick.active = false;
+            
+            // Reset knob to center with smooth transition
+            joystick.knob.style.transition = 'transform 0.2s ease-out';
             joystick.knob.style.transform = 'translate(-50%, -50%)';
             joystick.container.style.opacity = '0.7';
+            
+            // Remove transition after animation completes
+            setTimeout(() => {
+                joystick.knob.style.transition = 'none';
+            }, 200);
             
             this.movement = { x: 0, y: 0 };
             if (this.onMovement) {
@@ -173,25 +184,12 @@ export class MobileControls {
             height: 70%;
             z-index: 999;
             display: none;
-            background: rgba(0, 0, 0, 0.1);
-            border: 2px dashed rgba(0, 255, 0, 0.3);
-            border-radius: 10px;
-            margin: 10px;
+            background: transparent;
+            border: none;
+            pointer-events: auto;
         `;
         
-        // Add instructions
-        const instructions = document.createElement('div');
-        instructions.style.cssText = `
-            position: absolute;
-            top: 10px;
-            left: 10px;
-            color: rgba(0, 255, 0, 0.7);
-            font-family: 'Courier New', monospace;
-            font-size: 12px;
-            pointer-events: none;
-        `;
-        instructions.textContent = 'LOOK AREA';
-        lookArea.appendChild(instructions);
+        // Look area is now invisible - no instructions needed
         
         document.body.appendChild(lookArea);
         this.lookArea = lookArea;
@@ -248,7 +246,7 @@ export class MobileControls {
                 
                 if (this.onLook) {
                     // Classic FPS mobile: swipe right=look right, swipe up=look up  
-                    this.onLook(deltaX * 0.01, -deltaY * 0.01);
+                    this.onLook(deltaX * 0.005, -deltaY * 0.005);
                 }
                 
                 this.lastLookTouch = {
