@@ -247,7 +247,8 @@ export class MobileControls {
                 const deltaY = lookTouch.clientY - this.lastLookTouch.y;
                 
                 if (this.onLook) {
-                    this.onLook(-deltaX * 0.003, deltaY * 0.003); // Inverted X-axis for natural look controls
+                    // Higher sensitivity and correct directions for mobile touch
+                    this.onLook(deltaX * 0.01, -deltaY * 0.01); // Natural touch: swipe right=turn right, swipe up=look up
                 }
                 
                 this.lastLookTouch = {
