@@ -31,16 +31,27 @@ export class UI {
             timerUI.style.position = 'absolute';
             timerUI.style.bottom = window.innerWidth <= 768 ? '160px' : '20px'; // Above mobile controls
             timerUI.style.left = '20px';
-            timerUI.style.background = 'linear-gradient(135deg, rgba(0,0,0,0.9), rgba(0,20,40,0.9))';
-            timerUI.style.border = '2px solid #00ff00';
-            timerUI.style.borderRadius = '12px';
-            timerUI.style.padding = window.innerWidth <= 768 ? '10px 15px' : '15px 20px';
+            
+            // Mobile gets minimal styling with low opacity
+            if (window.innerWidth <= 768) {
+                timerUI.style.background = 'rgba(0,0,0,0.1)'; // 10% opacity background
+                timerUI.style.border = '1px solid rgba(0,255,0,0.1)'; // 10% opacity border
+                timerUI.style.borderRadius = '6px';
+                timerUI.style.padding = '6px 10px';
+                timerUI.style.fontSize = '12px';
+            } else {
+                timerUI.style.background = 'linear-gradient(135deg, rgba(0,0,0,0.9), rgba(0,20,40,0.9))';
+                timerUI.style.border = '2px solid #00ff00';
+                timerUI.style.borderRadius = '12px';
+                timerUI.style.padding = '15px 20px';
+                timerUI.style.fontSize = '16px';
+            }
+            
             timerUI.style.fontFamily = "'Courier New', monospace";
-            timerUI.style.fontSize = window.innerWidth <= 768 ? '14px' : '16px';
             timerUI.style.color = '#00ff00';
             timerUI.style.textShadow = '0 0 10px #00ff00';
             timerUI.style.zIndex = '1000';
-            timerUI.style.minWidth = window.innerWidth <= 768 ? '150px' : '200px';
+            timerUI.style.minWidth = window.innerWidth <= 768 ? '80px' : '200px';
             timerUI.style.textAlign = 'center';
             document.body.appendChild(timerUI);
         }
@@ -49,29 +60,45 @@ export class UI {
             // Update current time
             const currentTime = (Date.now() - mazeTimer.startTime) / 1000;
             
-            timerUI.innerHTML = `
-                <div style="font-size: 12px; margin-bottom: 3px; opacity: 0.6;">LEVEL ${currentLevel}</div>
-                <div style="font-size: 14px; margin-bottom: 5px; opacity: 0.8;">MAZE TIMER</div>
-                <div style="font-size: 24px; font-weight: bold; color: #00ff00;">
-                    ${currentTime.toFixed(0)}s
-                </div>
-                <div style="font-size: 12px; margin-top: 5px; opacity: 0.7;">
-                    Best: ${mazeTimer.bestTime ? mazeTimer.bestTime.toFixed(0) + 's' : '--'}
-                </div>
-            `;
+            // Mobile gets minimal UI, desktop gets full UI
+            if (window.innerWidth <= 768) {
+                timerUI.innerHTML = `
+                    <div style="font-size: 10px; opacity: 0.8;">L${currentLevel}</div>
+                    <div style="font-size: 14px; font-weight: bold;">
+                        ${currentTime.toFixed(0)}s
+                    </div>
+                `;
+            } else {
+                timerUI.innerHTML = `
+                    <div style="font-size: 12px; margin-bottom: 3px; opacity: 0.6;">LEVEL ${currentLevel}</div>
+                    <div style="font-size: 14px; margin-bottom: 5px; opacity: 0.8;">MAZE TIMER</div>
+                    <div style="font-size: 24px; font-weight: bold; color: #00ff00;">
+                        ${currentTime.toFixed(0)}s
+                    </div>
+                    <div style="font-size: 12px; margin-top: 5px; opacity: 0.7;">
+                        Best: ${mazeTimer.bestTime ? mazeTimer.bestTime.toFixed(0) + 's' : '--'}
+                    </div>
+                `;
+            }
             timerUI.style.display = 'block';
         } else if (mazeTimer.hasFinished) {
             // Show final time
-            timerUI.innerHTML = `
-                <div style="font-size: 12px; margin-bottom: 3px; opacity: 0.6;">LEVEL ${currentLevel}</div>
-                <div style="font-size: 14px; margin-bottom: 5px; opacity: 0.8;">COMPLETED</div>
-                <div style="font-size: 20px; font-weight: bold; color: #00ff00;">
-                    ${mazeTimer.currentTime.toFixed(0)}s
-                </div>
-                <div style="font-size: 12px; margin-top: 5px; opacity: 0.7;">
-                    Best: ${mazeTimer.bestTime ? mazeTimer.bestTime.toFixed(0) + 's' : '--'}
-                </div>
-            `;
+            if (window.innerWidth <= 768) {
+                timerUI.innerHTML = `
+                    <div style="font-size: 10px; opacity: 0.8;">L${currentLevel}</div>
+                    <div style="font-size: 14px; font-weight: bold;">
+                        ${mazeTimer.currentTime.toFixed(0)}s
+                    </div>
+                `;
+            } else {
+                timerUI.innerHTML = `
+                    <div style="font-size: 12px; margin-bottom: 3px; opacity: 0.6;">LEVEL ${currentLevel}</div>
+                    <div style="font-size: 14px; margin-bottom: 5px; opacity: 0.8;">COMPLETED</div>
+                    <div style="font-size: 20px; font-weight: bold; color: #00ff00;">
+                        ${mazeTimer.currentTime.toFixed(0)}s
+                    </div>
+                `;
+            }
             timerUI.style.display = 'block';
         } else {
             // Hide timer when not active

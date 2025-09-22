@@ -289,14 +289,6 @@ export class MobileControls {
         const flagButton = this.createActionButton('F', '🚩', 'Place Flag');
         buttonContainer.appendChild(flagButton);
         
-        // View button
-        const viewButton = this.createActionButton('V', '👁️', 'Change View');
-        buttonContainer.appendChild(viewButton);
-        
-        // Reset button
-        const resetButton = this.createActionButton('T', '🔄', 'Reset Position');
-        buttonContainer.appendChild(resetButton);
-        
         document.body.appendChild(buttonContainer);
         this.actionButtons = buttonContainer;
     }
