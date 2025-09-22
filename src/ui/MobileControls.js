@@ -247,7 +247,7 @@ export class MobileControls {
                 const deltaY = lookTouch.clientY - this.lastLookTouch.y;
                 
                 if (this.onLook) {
-                    this.onLook(deltaX * 0.003, deltaY * 0.003); // Fixed: removed Y inversion for natural look
+                    this.onLook(-deltaX * 0.003, deltaY * 0.003); // Inverted X-axis for natural look controls
                 }
                 
                 this.lastLookTouch = {
