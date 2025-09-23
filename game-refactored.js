@@ -42,6 +42,10 @@ class Game3D extends EventEmitter {
         this.ui = null;
         this.mobileControls = null;
         
+        // Shooting system
+        this.projectiles = [];
+        this.enemies = [];
+        
         // Theme and localization
         this.themeName = defaultTheme;
         this.themes = themes;
@@ -344,6 +348,11 @@ class Game3D extends EventEmitter {
         this.gameState.resetLives();
         this.gameState.totalScore = 0;
         
+        // Clean up projectiles, enemies, and effects
+        this.clearProjectiles();
+        this.clearEnemies();
+        this.clearEffects();
+        
         // Generate new maze
         this.generateNewMaze();
         
@@ -567,6 +576,15 @@ class Game3D extends EventEmitter {
         // Handle input
         this.handleInput(deltaTime);
         
+        // Update projectiles
+        this.updateProjectiles(deltaTime);
+        
+        // Update enemies
+        this.updateEnemies(deltaTime);
+        
+        // Update effects
+        this.updateEffects(deltaTime);
+        
         // Check objectives
         this.checkObjectives();
     }
@@ -660,6 +678,400 @@ class Game3D extends EventEmitter {
                 }
             }
         }
+        
+        // Handle shooting
+        if (this.keys[' '] || this.keys['Space'] || this.keys['SPACE'] || this.keys['space']) {
+            this.shoot();
+            this.keys[' '] = false; // Prevent rapid fire
+            this.keys['Space'] = false;
+            this.keys['SPACE'] = false;
+            this.keys['space'] = false;
+        }
+    }
+    
+    /**
+     * Shoot a projectile forward
+     */
+    shoot() {
+        if (!this.gameState.isPlaying()) return;
+        
+        // Create projectile (magenta orb like original)
+        const projGeo = new THREE.SphereGeometry(0.2, 8, 8);
+        const projMat = new THREE.MeshBasicMaterial({ color: 0xff00ff });
+        const proj = new THREE.Mesh(projGeo, projMat);
+        
+        // Calculate spawn position and direction
+        let spawn, dir;
+        if (this.viewMode === 'fpv') {
+            // FPV: spawn from camera position
+            spawn = this.camera.position.clone();
+            
+            // Calculate direction from camera rotation
+            const direction = new THREE.Vector3();
+            this.camera.getWorldDirection(direction);
+            dir = direction.normalize();
+            
+            // Offset spawn position slightly forward
+            spawn.add(dir.clone().multiplyScalar(0.5));
+        } else {
+            // Other view modes: spawn from player position facing forward
+            const forward = new THREE.Vector3(
+                Math.sin(this.player.rotation.y), 
+                0, 
+                Math.cos(this.player.rotation.y)
+            );
+            spawn = this.player.position.clone()
+                .add(forward.multiplyScalar(1.0))
+                .add(new THREE.Vector3(0, 0.6, 0));
+            dir = forward.clone().normalize();
+        }
+        
+        proj.position.copy(spawn);
+        proj.userData = { 
+            dir: dir.clone(), 
+            ttl: 3, 
+            radius: 0.2, 
+            speed: 12 // Reduced from 15 for better collision detection
+        };
+        
+        this.scene.add(proj);
+        this.projectiles.push(proj);
+    }
+    
+    /**
+     * Update projectiles
+     */
+    updateProjectiles(deltaTime) {
+        if (this.projectiles.length === 0) return;
+        
+        // Debug: Log projectile count occasionally
+        if (Math.random() < 0.01) { // 1% chance per frame
+            console.log(`🚀 Updating ${this.projectiles.length} projectiles`);
+        }
+        
+        for (let i = this.projectiles.length - 1; i >= 0; i--) {
+            const proj = this.projectiles[i];
+            const userData = proj.userData;
+            
+            // Calculate next position
+            const movement = userData.dir.clone().multiplyScalar(userData.speed * deltaTime);
+            const nextPosition = proj.position.clone().add(movement);
+            
+            // For very fast movement, check intermediate positions
+            const movementLength = movement.length();
+            const checkPoints = Math.max(1, Math.ceil(movementLength / 0.5)); // Check every 0.5 units
+            
+            // Check for collisions along the path
+            let hitTarget = false;
+            let hitType = null;
+            
+            // Get walls once for efficiency
+            const walls = this.maze.getWalls();
+            
+            // Debug: Check if walls exist
+            if (walls.length === 0) {
+                console.log('⚠️ No walls found for collision detection!');
+            } else if (Math.random() < 0.1) { // 10% chance to log wall info
+                console.log(`🧱 Found ${walls.length} walls. First wall:`, walls[0]?.position);
+            }
+            
+            // Check multiple points along the movement path for fast projectiles
+            for (let step = 0; step <= checkPoints && !hitTarget; step++) {
+                const t = step / checkPoints;
+                const checkPosition = proj.position.clone().add(movement.clone().multiplyScalar(t));
+                
+                // Check wall collision with proper AABB (Axis-Aligned Bounding Box) detection
+                for (const wall of walls) {
+                if (wall && wall.position) {
+                    // Wall dimensions (assuming standard 1x1x1 cubes)
+                    const wallSize = 1.0; // Half-size since walls are typically 2x2x2 or 1x1x1
+                    const wallHalfSize = wallSize;
+                    
+                    // Check if projectile sphere intersects with wall cube
+                    const wallMin = {
+                        x: wall.position.x - wallHalfSize,
+                        y: wall.position.y - wallHalfSize,
+                        z: wall.position.z - wallHalfSize
+                    };
+                    const wallMax = {
+                        x: wall.position.x + wallHalfSize,
+                        y: wall.position.y + wallHalfSize,
+                        z: wall.position.z + wallHalfSize
+                    };
+                    
+                    // Find closest point on wall to projectile
+                    const closestPoint = {
+                        x: Math.max(wallMin.x, Math.min(checkPosition.x, wallMax.x)),
+                        y: Math.max(wallMin.y, Math.min(checkPosition.y, wallMax.y)),
+                        z: Math.max(wallMin.z, Math.min(checkPosition.z, wallMax.z))
+                    };
+                    
+                    // Check if distance to closest point is less than projectile radius
+                    const dx = checkPosition.x - closestPoint.x;
+                    const dy = checkPosition.y - closestPoint.y;
+                    const dz = checkPosition.z - closestPoint.z;
+                    const distanceSquared = dx * dx + dy * dy + dz * dz;
+                    
+                    if (distanceSquared < (userData.radius * userData.radius)) {
+                        hitTarget = true;
+                        hitType = 'wall';
+                        console.log('💥 Wall collision detected!', {
+                            projPos: checkPosition,
+                            wallPos: wall.position,
+                            distance: Math.sqrt(distanceSquared),
+                            radius: userData.radius
+                        });
+                        // Create collision effect at impact point
+                        this.createCollisionEffect(proj.position, 'wall');
+                        break;
+                    }
+                }
+                
+                if (hitTarget) break; // Break out of wall check loop if hit
+            }
+            
+            } // End of multi-point check loop
+            
+            // Only move if no collision detected
+            if (!hitTarget) {
+                proj.position.copy(nextPosition);
+            }
+            
+            // Decrease TTL
+            userData.ttl -= deltaTime;
+            
+            // Check enemy collision (use current projectile position)
+            if (!hitTarget) {
+                for (let j = this.enemies.length - 1; j >= 0; j--) {
+                    const enemy = this.enemies[j];
+                    if (enemy && enemy.position) {
+                        const distance = proj.position.distanceTo(enemy.position);
+                        if (distance < (userData.radius + 0.8)) { // Enemy collision (enemies are smaller)
+                            hitTarget = true;
+                            hitType = 'enemy';
+                            
+                            // Create collision effect at enemy position
+                            this.createCollisionEffect(enemy.position, 'enemy');
+                            
+                            // Remove enemy
+                            this.scene.remove(enemy);
+                            if (enemy.geometry) enemy.geometry.dispose();
+                            if (enemy.material) enemy.material.dispose();
+                            this.enemies.splice(j, 1);
+                            
+                            // Add score/stats
+                            this.gameState.addEnemyKill();
+                            
+                            console.log('🎯 Enemy hit!');
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            // Remove projectile if hit target or TTL expired
+            if (hitTarget || userData.ttl <= 0) {
+                this.scene.remove(proj);
+                proj.geometry.dispose();
+                proj.material.dispose();
+                this.projectiles.splice(i, 1);
+                
+                // Projectile removed due to collision or timeout
+            }
+        }
+    }
+    
+    /**
+     * Create collision effect at position
+     */
+    createCollisionEffect(position, type) {
+        const effectColor = type === 'wall' ? 0xffff00 : 0xff8800; // Yellow for walls, orange for enemies
+        const effectSize = type === 'wall' ? 0.3 : 0.5;
+        
+        // Create explosion effect
+        const particles = [];
+        const particleCount = 8;
+        
+        for (let i = 0; i < particleCount; i++) {
+            const particle = new THREE.Mesh(
+                new THREE.SphereGeometry(0.05, 4, 4),
+                new THREE.MeshBasicMaterial({ color: effectColor })
+            );
+            
+            particle.position.copy(position);
+            
+            // Random direction for each particle
+            const direction = new THREE.Vector3(
+                (Math.random() - 0.5) * 2,
+                Math.random() * 0.5,
+                (Math.random() - 0.5) * 2
+            ).normalize();
+            
+            particle.userData = {
+                velocity: direction.multiplyScalar(3 + Math.random() * 2),
+                life: 0.5 + Math.random() * 0.3,
+                maxLife: 0.5 + Math.random() * 0.3
+            };
+            
+            this.scene.add(particle);
+            particles.push(particle);
+        }
+        
+        // Store particles for cleanup
+        if (!this.effectParticles) this.effectParticles = [];
+        this.effectParticles.push(...particles);
+    }
+    
+    /**
+     * Update particle effects
+     */
+    updateEffects(deltaTime) {
+        if (!this.effectParticles || this.effectParticles.length === 0) return;
+        
+        for (let i = this.effectParticles.length - 1; i >= 0; i--) {
+            const particle = this.effectParticles[i];
+            const userData = particle.userData;
+            
+            // Move particle
+            particle.position.add(userData.velocity.clone().multiplyScalar(deltaTime));
+            
+            // Apply gravity
+            userData.velocity.y -= 9.8 * deltaTime;
+            
+            // Fade out
+            userData.life -= deltaTime;
+            const alpha = userData.life / userData.maxLife;
+            particle.material.opacity = alpha;
+            particle.material.transparent = true;
+            
+            // Remove expired particles
+            if (userData.life <= 0) {
+                this.scene.remove(particle);
+                particle.geometry.dispose();
+                particle.material.dispose();
+                this.effectParticles.splice(i, 1);
+            }
+        }
+    }
+    
+    /**
+     * Update enemies (AI, movement, etc.)
+     */
+    updateEnemies(deltaTime) {
+        for (const enemy of this.enemies) {
+            if (!enemy.userData) continue;
+            
+            // Simple AI: move towards player
+            const dirToPlayer = new THREE.Vector3()
+                .subVectors(this.player.position, enemy.position)
+                .normalize();
+            
+            // Move enemy towards player
+            const movement = dirToPlayer.multiplyScalar(enemy.userData.speed * deltaTime);
+            const newPos = enemy.position.clone().add(movement);
+            
+            // Check wall collision for enemy
+            if (!this.checkWallCollision(newPos)) {
+                enemy.position.copy(newPos);
+            }
+            
+            // Check if enemy reached player (damage player)
+            const distToPlayer = enemy.position.distanceTo(this.player.position);
+            if (distToPlayer < 1.0) {
+                // Player hit by enemy - could implement damage system here
+                console.log('💀 Player hit by enemy!');
+            }
+        }
+    }
+    
+    /**
+     * Clear all projectiles
+     */
+    clearProjectiles() {
+        for (const proj of this.projectiles) {
+            this.scene.remove(proj);
+            proj.geometry.dispose();
+            proj.material.dispose();
+        }
+        this.projectiles = [];
+    }
+    
+    /**
+     * Clear all enemies
+     */
+    clearEnemies() {
+        for (const enemy of this.enemies) {
+            this.scene.remove(enemy);
+            if (enemy.geometry) enemy.geometry.dispose();
+            if (enemy.material) enemy.material.dispose();
+        }
+        this.enemies = [];
+    }
+    
+    /**
+     * Clear all effect particles
+     */
+    clearEffects() {
+        if (this.effectParticles) {
+            for (const particle of this.effectParticles) {
+                this.scene.remove(particle);
+                if (particle.geometry) particle.geometry.dispose();
+                if (particle.material) particle.material.dispose();
+            }
+            this.effectParticles = [];
+        }
+    }
+    
+    /**
+     * Add an enemy to the game
+     */
+    addEnemy(enemy) {
+        this.enemies.push(enemy);
+        this.scene.add(enemy);
+    }
+    
+    /**
+     * Spawn enemy at position
+     */
+    spawnEnemy(position, color = 0xff0000) {
+        // Create enemy (red cube for now)
+        const enemyGeo = new THREE.BoxGeometry(0.8, 0.8, 0.8);
+        const enemyMat = new THREE.MeshLambertMaterial({ color: color });
+        const enemy = new THREE.Mesh(enemyGeo, enemyMat);
+        
+        enemy.position.copy(position);
+        enemy.position.y = 0.4; // Half height above ground
+        
+        // Add enemy properties
+        enemy.userData = {
+            type: 'enemy',
+            health: 1,
+            speed: 2,
+            lastUpdate: Date.now()
+        };
+        
+        this.addEnemy(enemy);
+        return enemy;
+    }
+    
+    /**
+     * Spawn test enemies for debugging
+     */
+    spawnTestEnemies() {
+        // Spawn a few enemies at random positions in the maze
+        const testPositions = [
+            new THREE.Vector3(10, 0, 10),
+            new THREE.Vector3(-10, 0, 10),
+            new THREE.Vector3(0, 0, 20),
+            new THREE.Vector3(20, 0, -10)
+        ];
+        
+        testPositions.forEach((pos, index) => {
+            const color = [0xff0000, 0xff8800, 0x8800ff, 0x0088ff][index]; // Different colors
+            this.spawnEnemy(pos, color);
+        });
+        
+        console.log(`🤖 Spawned ${testPositions.length} test enemies`);
     }
     
     /**
@@ -939,6 +1351,11 @@ class Game3D extends EventEmitter {
                 // Reset player position
                 this.positionPlayerAtEntrance();
                 this.gameState.resetMazeTimer();
+            }
+        } else if (event.key === 'e' || event.key === 'E') {
+            if (this.gameState.isPlaying()) {
+                // Spawn test enemies
+                this.spawnTestEnemies();
             }
         } else if (event.key === 'v' || event.key === 'V') {
             // Cycle view modes
