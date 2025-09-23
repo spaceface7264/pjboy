@@ -13,6 +13,9 @@ export class MobileControls {
         this.looking = false;
         this.lastLookTouch = null;
         
+        // Look velocity for continuous rotation
+        this.lookVelocity = { x: 0, y: 0 };
+        
         // Callbacks
         this.onMovement = null;
         this.onLook = null;
@@ -272,22 +275,23 @@ export class MobileControls {
             // Position knob relative to center
             lookJoystick.knob.style.transform = `translate(calc(-50% + ${x}px), calc(-50% + ${y}px))`;
             
-            // Apply look controls with joystick values
-            if (this.onLook) {
-                const lookX = Math.max(-1, Math.min(1, x / lookJoystick.radius));
-                const lookY = Math.max(-1, Math.min(1, y / lookJoystick.radius));
-                
-                // Apply sensitivity
-                const yawSensitivity = 0.05;
-                const pitchSensitivity = 0.05;
-                this.onLook(lookX * yawSensitivity, -lookY * pitchSensitivity);
-            }
+            // Set look velocity for continuous rotation
+            const lookX = Math.max(-1, Math.min(1, x / lookJoystick.radius));
+            const lookY = Math.max(-1, Math.min(1, y / lookJoystick.radius));
+            
+            // Store velocity for continuous application
+            this.lookVelocity.x = lookX;
+            this.lookVelocity.y = lookY; // Y-axis flipped - push up = look up
         };
         
         const handleEnd = (e) => {
             e.preventDefault();
             e.stopPropagation();
             lookJoystick.active = false;
+            
+            // Reset look velocity
+            this.lookVelocity.x = 0;
+            this.lookVelocity.y = 0;
             
             // Reset knob to center with smooth transition
             lookJoystick.knob.style.transition = 'transform 0.2s ease-out';
@@ -457,6 +461,13 @@ export class MobileControls {
      */
     getMovement() {
         return this.movement;
+    }
+    
+    /**
+     * Get current look velocity values
+     */
+    getLookVelocity() {
+        return this.lookVelocity;
     }
     
     /**

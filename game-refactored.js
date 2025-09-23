@@ -194,22 +194,8 @@ class Game3D extends EventEmitter {
             this.mobileMovement = movement;
         };
         
-        // Look callback
-        this.mobileControls.onLook = (deltaX, deltaY) => {
-            if (this.gameState.isPlaying() && this.viewMode === 'fpv') {
-                // Update player rotation (yaw)
-                this.player.rotation.y -= deltaX;
-                
-                // Update pitch
-                this.fpvPitch -= deltaY;
-                this.fpvPitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, this.fpvPitch));
-                
-                // Update player model rotation
-                if (this.player.model) {
-                    this.player.model.rotation.y = this.player.rotation.y;
-                }
-            }
-        };
+        // Look callback (now disabled - using continuous velocity instead)
+        this.mobileControls.onLook = null;
         
         // Action callback
         this.mobileControls.onAction = (key) => {
@@ -649,6 +635,29 @@ class Game3D extends EventEmitter {
             // Update model position
             if (this.player.model) {
                 this.player.model.position.copy(this.player.position);
+            }
+        }
+        
+        // Handle continuous look velocity from mobile joystick
+        if (isMobile && this.gameState.isPlaying() && this.viewMode === 'fpv') {
+            const lookVelocity = this.mobileControls.getLookVelocity();
+            if (lookVelocity.x !== 0 || lookVelocity.y !== 0) {
+                // Apply look sensitivity and frame rate independence
+                const lookSensitivity = 2.0; // Adjust this for comfortable speed
+                const deltaLookX = lookVelocity.x * lookSensitivity * deltaTime;
+                const deltaLookY = lookVelocity.y * lookSensitivity * deltaTime;
+                
+                // Update player rotation (yaw)
+                this.player.rotation.y -= deltaLookX;
+                
+                // Update pitch
+                this.fpvPitch -= deltaLookY;
+                this.fpvPitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, this.fpvPitch));
+                
+                // Update player model rotation
+                if (this.player.model) {
+                    this.player.model.rotation.y = this.player.rotation.y;
+                }
             }
         }
     }
