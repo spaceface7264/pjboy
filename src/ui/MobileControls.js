@@ -245,8 +245,8 @@ export class MobileControls {
                 const deltaY = lookTouch.clientY - this.lastLookTouch.y;
                 
                 if (this.onLook) {
-                    // Classic FPS mobile: swipe right=look right, swipe up=look up  
-                    this.onLook(deltaX * 0.001, -deltaY * 0.001);
+                    // Fixed touch gestures: swipe right=look right, swipe up=look up  
+                    this.onLook(-deltaX * 0.001, deltaY * 0.001);
                 }
                 
                 this.lastLookTouch = {
@@ -370,6 +370,49 @@ export class MobileControls {
      */
     isMobile() {
         return this.isTouch;
+    }
+    
+    /**
+     * Get responsive sizing based on screen dimensions
+     */
+    getResponsiveSizing() {
+        const screenWidth = window.innerWidth;
+        const screenHeight = window.innerHeight;
+        const isLandscape = screenWidth > screenHeight;
+        
+        // Base sizes for different screen categories
+        let joystickSize, actionButtonSize, fontSize;
+        
+        if (screenWidth <= 375) {
+            // Small phones (iPhone SE, small Android)
+            joystickSize = isLandscape ? 100 : 110;
+            actionButtonSize = isLandscape ? 45 : 50;
+            fontSize = '12px';
+        } else if (screenWidth <= 414) {
+            // Medium phones (iPhone 6/7/8, standard Android)
+            joystickSize = isLandscape ? 110 : 120;
+            actionButtonSize = isLandscape ? 50 : 55;
+            fontSize = '14px';
+        } else if (screenWidth <= 768) {
+            // Large phones/small tablets
+            joystickSize = isLandscape ? 120 : 130;
+            actionButtonSize = isLandscape ? 55 : 60;
+            fontSize = '16px';
+        } else {
+            // Tablets and larger
+            joystickSize = isLandscape ? 140 : 150;
+            actionButtonSize = isLandscape ? 60 : 65;
+            fontSize = '18px';
+        }
+        
+        return {
+            joystickSize,
+            actionButtonSize,
+            fontSize,
+            isLandscape,
+            screenWidth,
+            screenHeight
+        };
     }
     
     /**

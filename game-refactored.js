@@ -107,9 +107,16 @@ class Game3D extends EventEmitter {
         this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
         this.camera.position.set(0, 5, 10);
         
-        // Create renderer
-        this.renderer = new THREE.WebGLRenderer({ antialias: true });
+        // Create renderer with mobile optimizations
+        this.renderer = new THREE.WebGLRenderer({ 
+            antialias: true,
+            alpha: false,
+            stencil: false,
+            powerPreference: "high-performance",
+            preserveDrawingBuffer: false
+        });
         this.renderer.setSize(window.innerWidth, window.innerHeight);
+        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // Limit pixel ratio for performance
         this.renderer.shadowMap.enabled = true;
         this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
         this.renderer.setClearColor(0x001100);
@@ -122,8 +129,12 @@ class Game3D extends EventEmitter {
             document.body.appendChild(this.renderer.domElement);
         }
         
-        // Handle window resize
+        // Handle window resize and orientation change
         window.addEventListener('resize', () => this.onWindowResize());
+        window.addEventListener('orientationchange', () => {
+            // Delay to ensure the viewport has updated
+            setTimeout(() => this.onWindowResize(), 100);
+        });
     }
     
     /**
@@ -970,9 +981,35 @@ class Game3D extends EventEmitter {
     }
     
     onWindowResize() {
-        this.camera.aspect = window.innerWidth / window.innerHeight;
+        // Get actual viewport dimensions
+        const width = window.innerWidth;
+        const height = window.innerHeight;
+        
+        // Update camera aspect ratio
+        this.camera.aspect = width / height;
         this.camera.updateProjectionMatrix();
-        this.renderer.setSize(window.innerWidth, window.innerHeight);
+        
+        // Update renderer size
+        this.renderer.setSize(width, height);
+        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        
+        // Update mobile controls layout if they exist
+        if (this.mobileControls && this.mobileControls.isMobile()) {
+            // Force mobile controls to recalculate positions
+            this.mobileControls.hide();
+            setTimeout(() => {
+                this.mobileControls.show();
+            }, 50);
+        }
+        
+        // Update UI elements for new screen size
+        if (this.ui) {
+            // Force UI refresh for responsive elements
+            this.ui.updateTimerUI();
+            this.ui.updateFlagUI();
+        }
+        
+        console.log(`Screen resized to: ${width}x${height}, aspect: ${(width/height).toFixed(2)}`);
     }
     
     /**
