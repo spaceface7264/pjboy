@@ -757,7 +757,14 @@ class Game3D extends EventEmitter {
             const proj = this.projectiles[i];
             const userData = proj.userData;
             
-            // Calculate next position
+            // Check if this is an enemy projectile
+            if (userData.isEnemyProjectile) {
+                // Handle enemy projectile (targets player)
+                this.updateEnemyProjectile(proj, deltaTime, i);
+                continue;
+            }
+            
+            // Calculate next position for player projectiles
             const movement = userData.dir.clone().multiplyScalar(userData.speed * deltaTime);
             const nextPosition = proj.position.clone().add(movement);
             
@@ -1048,6 +1055,36 @@ class Game3D extends EventEmitter {
                 userData.patrolDistance = 0;
             }
             
+            // === ENHANCED HUNTER SPECIAL ABILITIES ===
+            if (userData.type === 'enhanced_hunter') {
+                // Animate weapon spikes
+                if (userData.spikeGroup) {
+                    userData.spikeGroup.rotation.y += deltaTime * 3;
+                }
+                
+                // Pulse core based on aggression
+                if (userData.core) {
+                    const aggroIntensity = distToPlayer < userData.aggroRange ? 1.5 : 0.8;
+                    const pulseIntensity = aggroIntensity + Math.sin(userData.floatOffset * 6) * 0.3;
+                    userData.core.material.emissiveIntensity = pulseIntensity;
+                }
+                
+                // Enhanced Hunter shooting ability
+                if (userData.canShoot && distToPlayer < userData.attackRange && distToPlayer > 3) {
+                    if (currentTime - userData.lastAttack > userData.attackCooldown) {
+                        this.hunterShootProjectile(enemy, this.player.position);
+                        userData.lastAttack = currentTime;
+                        console.log('🏹 Enhanced Hunter fired projectile!');
+                    }
+                }
+                
+                // Enhanced aggression - faster movement when chasing
+                if (distToPlayer < userData.aggroRange) {
+                    const aggroMultiplier = 1.5;
+                    movement.multiplyScalar(aggroMultiplier);
+                }
+            }
+            
             // === PLAYER DAMAGE ===
             if (distToPlayer < 2.0) {
                 console.log(`💀 Player hit by ${userData.enemyType} enemy!`);
@@ -1203,9 +1240,121 @@ class Game3D extends EventEmitter {
             'sphere': 50,
             'crystal': 100,
             'organic': 75,
-            'spiked': 150
+            'spiked': 150,
+            'enhanced_hunter': 200
         };
         return pointValues[enemyType] || 50;
+    }
+    
+    /**
+     * Enhanced Hunter shoots projectile at target
+     */
+    hunterShootProjectile(hunter, targetPosition) {
+        const userData = hunter.userData;
+        
+        // Create projectile
+        const projGeo = new THREE.SphereGeometry(0.15, 8, 6);
+        const projMat = new THREE.MeshBasicMaterial({
+            color: userData.projectileColor || 0xff0000,
+            emissive: userData.projectileColor || 0xff0000,
+            emissiveIntensity: 0.8
+        });
+        const projectile = new THREE.Mesh(projGeo, projMat);
+        
+        // Position at hunter's location
+        projectile.position.copy(hunter.position);
+        projectile.position.y += 0.5; // Shoot from center
+        
+        // Calculate direction to target
+        const direction = new THREE.Vector3()
+            .subVectors(targetPosition, projectile.position)
+            .normalize();
+        
+        // Add some leading for moving targets
+        const leadFactor = 0.1;
+        direction.x += (Math.random() - 0.5) * leadFactor;
+        direction.z += (Math.random() - 0.5) * leadFactor;
+        direction.normalize();
+        
+        projectile.userData = {
+            dir: direction.clone(),
+            speed: userData.projectileSpeed || 8,
+            ttl: 5, // 5 seconds time to live
+            radius: 0.15,
+            isEnemyProjectile: true,
+            damage: userData.damage || 2
+        };
+        
+        this.scene.add(projectile);
+        this.projectiles.push(projectile);
+        
+        // Create muzzle flash effect
+        this.createCollisionEffect(projectile.position, 'enemy');
+        
+        console.log('🔥 Hunter projectile fired!');
+    }
+    
+    /**
+     * Update enemy projectile (targets player)
+     */
+    updateEnemyProjectile(proj, deltaTime, index) {
+        const userData = proj.userData;
+        
+        // Move projectile
+        const movement = userData.dir.clone().multiplyScalar(userData.speed * deltaTime);
+        const nextPosition = proj.position.clone().add(movement);
+        
+        // Check collision with player
+        const distToPlayer = nextPosition.distanceTo(this.player.position);
+        if (distToPlayer < (userData.radius + 1.0)) {
+            // Hit player!
+            console.log(`💀 Player hit by enemy projectile! Damage: ${userData.damage}`);
+            
+            // Create hit effect
+            this.createCollisionEffect(proj.position, 'enemy');
+            
+            // Remove projectile
+            this.scene.remove(proj);
+            proj.geometry.dispose();
+            proj.material.dispose();
+            this.projectiles.splice(index, 1);
+            return;
+        }
+        
+        // Check collision with walls
+        const walls = this.maze.getWalls();
+        for (const wall of walls) {
+            if (wall && wall.position) {
+                const wallHalfSize = wall.size ? wall.size.x / 2 : 2.5;
+                const distToWall = nextPosition.distanceTo(wall.position);
+                
+                if (distToWall < (userData.radius + wallHalfSize)) {
+                    // Hit wall
+                    this.createCollisionEffect(proj.position, 'wall');
+                    
+                    // Remove projectile
+                    this.scene.remove(proj);
+                    proj.geometry.dispose();
+                    proj.material.dispose();
+                    this.projectiles.splice(index, 1);
+                    return;
+                }
+            }
+        }
+        
+        // Update TTL
+        userData.ttl -= deltaTime;
+        if (userData.ttl <= 0) {
+            // Remove expired projectile
+            this.scene.remove(proj);
+            proj.geometry.dispose();
+            proj.material.dispose();
+            this.projectiles.splice(index, 1);
+            return;
+        }
+        
+        // Move projectile if no collision
+        proj.position.copy(nextPosition);
     }
     
     /**
@@ -1333,6 +1482,11 @@ class Game3D extends EventEmitter {
         
         console.log(`🤖 Spawned ${testPositions.length} test enemies. Total enemies: ${this.enemies.length}`);
         console.log(`🤖 All enemies:`, this.enemies.map(e => ({pos: e.position, visible: e.visible})));
+        
+        // Also spawn one enhanced Hunter enemy
+        const hunterPos = new THREE.Vector3(playerPos.x + 25, 2, playerPos.z + 10);
+        this.spawnEnhancedHunter(hunterPos);
+        console.log(`🏹 Enhanced Hunter spawned at:`, hunterPos);
     }
     
     /**
@@ -1417,6 +1571,97 @@ class Game3D extends EventEmitter {
         }
         
         console.log(`🎮 Level ${level}: Spawned ${this.enemies.length} enemies`);
+    }
+    
+    /**
+     * ENHANCED HUNTER - Aggressive enemy with projectile shooting and weapon spikes
+     */
+    spawnEnhancedHunter(position) {
+        const geometry = new THREE.OctahedronGeometry(1.2);
+        const material = new THREE.MeshPhongMaterial({
+            color: 0xff4400,
+            emissive: 0x220000,
+            emissiveIntensity: 0.5,
+            shininess: 100
+        });
+        
+        const enemy = new THREE.Mesh(geometry, material);
+        enemy.position.copy(position);
+        enemy.position.y = 2;
+        enemy.castShadow = true;
+        
+        // Add weapon spikes
+        const spikeGroup = new THREE.Group();
+        for (let i = 0; i < 4; i++) {
+            const spike = new THREE.Mesh(
+                new THREE.ConeGeometry(0.1, 1, 4),
+                new THREE.MeshPhongMaterial({ 
+                    color: 0xff0000, 
+                    emissive: 0x440000,
+                    emissiveIntensity: 0.3
+                })
+            );
+            spike.position.set(
+                Math.cos(i * Math.PI / 2) * 1.5,
+                0,
+                Math.sin(i * Math.PI / 2) * 1.5
+            );
+            spike.rotation.z = -i * Math.PI / 2;
+            spikeGroup.add(spike);
+        }
+        enemy.add(spikeGroup);
+        
+        // Add glowing core
+        const core = new THREE.Mesh(
+            new THREE.SphereGeometry(0.3, 12, 8),
+            new THREE.MeshBasicMaterial({
+                color: 0xff0000,
+                emissive: 0xff0000,
+                emissiveIntensity: 1
+            })
+        );
+        enemy.add(core);
+        
+        enemy.userData = {
+            type: 'enhanced_hunter',
+            enemyType: 'enhanced_hunter',
+            health: 4,
+            maxHealth: 4,
+            speed: 2.5,
+            detectionRange: 20,
+            attackRange: 15,
+            damage: 2,
+            points: 200,
+            lastAttack: 0,
+            attackCooldown: 1200, // Faster shooting
+            
+            // Projectile shooting ability
+            canShoot: true,
+            projectileSpeed: 10,
+            projectileColor: 0xff0000,
+            
+            // Enhanced movement
+            patrolDirection: new THREE.Vector3(Math.random() - 0.5, 0, Math.random() - 0.5).normalize(),
+            patrolDistance: 0,
+            maxPatrolDistance: 12,
+            
+            // Enhanced animation
+            floatOffset: Math.random() * Math.PI * 2,
+            rotateSpeed: 1.5,
+            baseY: enemy.position.y,
+            spikeGroup: spikeGroup,
+            core: core,
+            
+            // AI State
+            state: 'patrol', // patrol, chase, attack
+            stateTimer: 0,
+            target: null,
+            aggroRange: 25
+        };
+        
+        console.log(`🏹 Enhanced Hunter created with 4 HP and projectile shooting`);
+        this.addEnemy(enemy);
+        return enemy;
     }
     
     /**
