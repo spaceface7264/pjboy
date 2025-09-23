@@ -1041,18 +1041,33 @@ class Game3D extends EventEmitter {
             const newPos = enemy.position.clone().add(movement);
             newPos.y = enemy.position.y; // Keep floating Y position
             
-            // Check wall collision
-            if (!this.checkWallCollision(newPos)) {
+            // Determine enemy collision radius based on type
+            let enemyRadius = 0.8; // Default radius
+            switch (userData.type || userData.enemyType) {
+                case 'enhanced_hunter':
+                    enemyRadius = 1.5; // Larger radius for Hunter
+                    break;
+                case 'sphere':
+                    enemyRadius = 1.2;
+                    break;
+                case 'crystal':
+                    enemyRadius = 1.5;
+                    break;
+                case 'organic':
+                    enemyRadius = 1.3;
+                    break;
+                case 'spiked':
+                    enemyRadius = 1.1;
+                    break;
+            }
+            
+            // Check wall collision with proper enemy radius
+            if (!this.checkWallCollision(newPos, enemyRadius)) {
                 enemy.position.x = newPos.x;
                 enemy.position.z = newPos.z;
             } else {
-                // Hit wall - change patrol direction
-                userData.patrolDirection = new THREE.Vector3(
-                    Math.random() - 0.5, 
-                    0, 
-                    Math.random() - 0.5
-                ).normalize();
-                userData.patrolDistance = 0;
+                // Hit wall - implement smarter wall avoidance
+                this.handleEnemyWallAvoidance(enemy, userData, enemyRadius, distToPlayer, deltaTime);
             }
             
             // === ENHANCED HUNTER SPECIAL ABILITIES ===
@@ -1083,6 +1098,27 @@ class Game3D extends EventEmitter {
                     const aggroMultiplier = 1.5;
                     movement.multiplyScalar(aggroMultiplier);
                 }
+            }
+            
+            // === STUCK DETECTION ===
+            const moveDistance = enemy.position.distanceTo(userData.lastPosition);
+            if (moveDistance < 0.1) {
+                userData.stuckCounter++;
+            } else {
+                userData.stuckCounter = 0;
+                userData.lastPosition.copy(enemy.position);
+            }
+            
+            // If stuck for too long, force a new direction
+            if (userData.stuckCounter > 30) { // ~30 frames = ~0.5 seconds
+                userData.patrolDirection = new THREE.Vector3(
+                    Math.random() - 0.5,
+                    0,
+                    Math.random() - 0.5
+                ).normalize();
+                userData.stuckCounter = 0;
+                userData.patrolDistance = 0;
+                console.log(`🔄 ${userData.enemyType} enemy unstuck with new random direction`);
             }
             
             // === PLAYER DAMAGE ===
@@ -1433,21 +1469,25 @@ class Game3D extends EventEmitter {
         enemy.position.copy(position);
         enemy.position.y = 2; // Float above ground
         
-        // Add enemy properties
-        enemy.userData = {
-            type: 'enemy',
-            enemyType: selectedType,
-            health: health,
-            maxHealth: health,
-            speed: speed,
-            lastUpdate: Date.now(),
-            floatOffset: Math.random() * Math.PI * 2, // Random float animation offset
-            rotateSpeed: (Math.random() - 0.5) * 2, // Random rotation speed
-            baseY: enemy.position.y, // Store original Y position
-            patrolDirection: new THREE.Vector3(Math.random() - 0.5, 0, Math.random() - 0.5).normalize(),
-            patrolDistance: 0,
-            maxPatrolDistance: 10 + Math.random() * 10
-        };
+            // Add enemy properties
+            enemy.userData = {
+                type: 'enemy',
+                enemyType: selectedType,
+                health: health,
+                maxHealth: health,
+                speed: speed,
+                lastUpdate: Date.now(),
+                floatOffset: Math.random() * Math.PI * 2, // Random float animation offset
+                rotateSpeed: (Math.random() - 0.5) * 2, // Random rotation speed
+                baseY: enemy.position.y, // Store original Y position
+                patrolDirection: new THREE.Vector3(Math.random() - 0.5, 0, Math.random() - 0.5).normalize(),
+                patrolDistance: 0,
+                maxPatrolDistance: 10 + Math.random() * 10,
+                // Wall avoidance tracking
+                stuckCounter: 0,
+                lastPosition: enemy.position.clone(),
+                wallHugDirection: null
+            };
         
         console.log(`🤖 Creating ${selectedType} enemy with ${health}HP at:`, enemy.position);
         this.addEnemy(enemy);
@@ -1538,7 +1578,8 @@ class Game3D extends EventEmitter {
                 const entranceDistance = this.gameState.levelStartWorld ? 
                     testPos.distanceTo(this.gameState.levelStartWorld) : 20;
                 
-                if (!this.checkWallCollision(testPos) && entranceDistance > 15) {
+                // Use larger collision radius for enemy spawning (1.5 units)
+                if (!this.checkWallCollision(testPos, 1.5) && entranceDistance > 15) {
                     validPosition = testPos;
                 }
                 attempts++;
@@ -1656,7 +1697,12 @@ class Game3D extends EventEmitter {
             state: 'patrol', // patrol, chase, attack
             stateTimer: 0,
             target: null,
-            aggroRange: 25
+            aggroRange: 25,
+            
+            // Wall avoidance tracking
+            stuckCounter: 0,
+            lastPosition: enemy.position.clone(),
+            wallHugDirection: null
         };
         
         console.log(`🏹 Enhanced Hunter created with 4 HP and projectile shooting`);
@@ -1667,9 +1713,8 @@ class Game3D extends EventEmitter {
     /**
      * Check wall collision
      */
-    checkWallCollision(position) {
+    checkWallCollision(position, radius = 0.4) {
         const walls = this.maze.getWalls();
-        const playerRadius = 0.4; // Slightly smaller radius for better navigation
         
         for (const wall of walls) {
             const wallPos = wall.position;
@@ -1682,12 +1727,67 @@ class Game3D extends EventEmitter {
             const wallHalfX = wallSize.x / 2;
             const wallHalfZ = wallSize.z / 2;
             
-            if (dx < (wallHalfX + playerRadius) && dz < (wallHalfZ + playerRadius)) {
+            if (dx < (wallHalfX + radius) && dz < (wallHalfZ + radius)) {
                 return true; // Collision detected
             }
         }
         
         return false; // No collision
+    }
+    
+    /**
+     * Handle enemy wall avoidance with smarter navigation
+     */
+    handleEnemyWallAvoidance(enemy, userData, enemyRadius, distToPlayer, deltaTime) {
+        const currentPos = enemy.position;
+        
+        // Try multiple directions to find a path around the wall
+        const avoidanceDirections = [
+            // Try turning left/right from current direction
+            userData.patrolDirection.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 2),
+            userData.patrolDirection.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), -Math.PI / 2),
+            // Try diagonal movements
+            userData.patrolDirection.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 4),
+            userData.patrolDirection.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), -Math.PI / 4),
+            // Try moving toward player if in chase mode
+            distToPlayer < 15 ? new THREE.Vector3().subVectors(this.player.position, currentPos).normalize() : null,
+            // Try backing up
+            userData.patrolDirection.clone().multiplyScalar(-1)
+        ].filter(dir => dir !== null);
+        
+        // Test each avoidance direction
+        for (const testDir of avoidanceDirections) {
+            const testMovement = testDir.clone().multiplyScalar(userData.speed * 0.1); // Small test movement
+            const testPos = currentPos.clone().add(testMovement);
+            testPos.y = currentPos.y; // Keep Y position
+            
+            if (!this.checkWallCollision(testPos, enemyRadius)) {
+                // Found a valid direction!
+                userData.patrolDirection = testDir.normalize();
+                userData.patrolDistance = 0;
+                
+                // Apply the movement
+                const actualMovement = testDir.clone().multiplyScalar(userData.speed * deltaTime * 0.5); // Slower when avoiding
+                const newPos = currentPos.clone().add(actualMovement);
+                
+                if (!this.checkWallCollision(newPos, enemyRadius)) {
+                    enemy.position.x = newPos.x;
+                    enemy.position.z = newPos.z;
+                }
+                return;
+            }
+        }
+        
+        // If all else fails, pick a completely random direction
+        userData.patrolDirection = new THREE.Vector3(
+            Math.random() - 0.5,
+            0,
+            Math.random() - 0.5
+        ).normalize();
+        userData.patrolDistance = 0;
+        userData.maxPatrolDistance = 5 + Math.random() * 5; // Shorter patrol when stuck
+        
+        console.log(`🤖 ${userData.type || userData.enemyType} enemy found new random direction after wall collision`);
     }
     
     /**
