@@ -26,7 +26,7 @@ class Game3D extends EventEmitter {
         // Camera system
         this.viewMode = 'fpv'; // 'iso' | 'fpv' | 'birds-eye' | 'ghost'
         this.fpvPitch = 0;
-        this.fpvYawSensitivity = 0.0025;
+        this.fpvYawSensitivity = 0.001;
         this.fpvBobAmplitude = 0.05;
         this.fpvBobFrequency = 8;
         
@@ -397,30 +397,31 @@ class Game3D extends EventEmitter {
      */
     positionPlayerAtEntrance() {
         if (!this.gameState.levelStartWorld || !this.gameState.levelEndWorld) {
+            console.log('Debug: Missing start or end positions');
             return;
         }
         
         const startPos = this.gameState.levelStartWorld;
         const endPos = this.gameState.levelEndWorld;
         
-        // Calculate direction from end to start (opposite of maze direction)
-        const dirToStart = new THREE.Vector3()
-            .subVectors(startPos, endPos)
-            .normalize();
+        console.log('Debug: Start pos:', startPos);
+        console.log('Debug: End pos:', endPos);
         
-        // Position player 10 units away from start, facing the start
-        const spawnDistance = 10; // 10 units distance from maze opening
-        const spawnPos = startPos.clone().add(dirToStart.multiplyScalar(spawnDistance));
+        // Since entrance is at column 0 and maze grows towards positive X,
+        // place player to the left (negative X direction) of the entrance
+        const spawnDistance = 8; // Reduced from 10 for better positioning
+        const spawnPos = startPos.clone();
+        spawnPos.x -= spawnDistance; // Move player to the left of entrance
+        spawnPos.y = 1; // Keep above ground
+        
+        console.log('Debug: Spawn pos:', spawnPos);
         
         this.player.position.copy(spawnPos);
-        this.player.position.y = 1; // Keep above ground
         
-        // Face the player towards the start marker (direction from player to start)
-        const dirToStartFromPlayer = new THREE.Vector3()
-            .subVectors(startPos, spawnPos)
-            .normalize();
-        const angleToStart = Math.atan2(dirToStartFromPlayer.x, dirToStartFromPlayer.z);
-        this.player.rotation.y = angleToStart;
+        // Face the player towards the start marker (look right towards entrance)
+        this.player.rotation.y = -Math.PI / 2; // Face positive X direction (towards maze)
+        
+        console.log('Debug: Player rotation:', this.player.rotation.y);
         
         // Update model position if exists
         if (this.player.model) {
@@ -583,19 +584,24 @@ class Game3D extends EventEmitter {
         const isMobile = this.mobileControls && this.mobileControls.isMobile();
         if (!isMobile && !this.isPointerLocked) return;
         
-        const moveSpeed = 10 * deltaTime; // Adjusted for wider corridors
+        const moveSpeed = 8 * deltaTime; // Adjusted for wider corridors
         const movement = new THREE.Vector3();
         
-        // WASD movement relative to player rotation
-        if (this.keys['w'] || this.keys['W']) movement.z -= moveSpeed;
-        if (this.keys['s'] || this.keys['S']) movement.z += moveSpeed;
-        if (this.keys['a'] || this.keys['A']) movement.x -= moveSpeed;
-        if (this.keys['d'] || this.keys['D']) movement.x += moveSpeed;
+        // WASD movement relative to player rotation (direction only, no speed yet)
+        if (this.keys['w'] || this.keys['W']) movement.z -= 1;
+        if (this.keys['s'] || this.keys['S']) movement.z += 1;
+        if (this.keys['a'] || this.keys['A']) movement.x -= 1;
+        if (this.keys['d'] || this.keys['D']) movement.x += 1;
         
-        // Mobile touch movement
+        // Mobile touch movement (already normalized from joystick)
         if (isMobile && this.mobileMovement) {
-            movement.x += this.mobileMovement.x * moveSpeed;
-            movement.z += this.mobileMovement.y * moveSpeed;
+            movement.x += this.mobileMovement.x;
+            movement.z += this.mobileMovement.y;
+        }
+        
+        // Normalize movement to prevent faster diagonal movement, then apply speed
+        if (movement.length() > 0) {
+            movement.normalize().multiplyScalar(moveSpeed);
         }
         
         // Apply movement

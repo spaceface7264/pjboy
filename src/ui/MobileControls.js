@@ -246,7 +246,7 @@ export class MobileControls {
                 
                 if (this.onLook) {
                     // Classic FPS mobile: swipe right=look right, swipe up=look up  
-                    this.onLook(deltaX * 0.005, -deltaY * 0.005);
+                    this.onLook(deltaX * 0.001, -deltaY * 0.001);
                 }
                 
                 this.lastLookTouch = {

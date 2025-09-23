@@ -1445,7 +1445,7 @@ class Game3D {
             document.body.style.cursor = 'default';
             // Only rebuild maze if switching from create mode, not when starting new levels
             if (this.gameMode === 'create') {
-                this.createLabyrinth();
+            this.createLabyrinth();
             }
             // Setup play mode camera/controls and enemies
             this.setupPlayMode();

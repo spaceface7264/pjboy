@@ -37,7 +37,7 @@ class Game3D {
         this.modelYawOffset = 0; // Yaw offset to align model forward with aim (radians)
         this.viewMode = 'fpv'; // 'iso' | 'fpv' | 'birds-eye' | 'ghost'
         this.fpvPitch = 0;
-        this.fpvYawSensitivity = 0.0025;
+        this.fpvYawSensitivity = 0.001;
         this.fpvBobAmplitude = 0.05; // camera bobbing in meters
         this.fpvBobFrequency = 8;    // cycles per second when moving
         this.labyrinthCorridorWidth = 8; // world units (within your 5–10 range)
