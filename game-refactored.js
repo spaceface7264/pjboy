@@ -26,7 +26,7 @@ class Game3D extends EventEmitter {
         // Camera system
         this.viewMode = 'fpv'; // 'iso' | 'fpv' | 'birds-eye' | 'ghost'
         this.fpvPitch = 0;
-        this.fpvYawSensitivity = 0.001;
+        this.fpvYawSensitivity = 0.0008;
         this.fpvBobAmplitude = 0.05;
         this.fpvBobFrequency = 8;
         
