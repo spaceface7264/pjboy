@@ -380,6 +380,7 @@ class Game3D extends EventEmitter {
         // Clear existing maze and flags
         this.maze.clearMaze();
         this.clearAllFlags();
+        this.clearEnemies();
         
         // Set difficulty based on level
         this.maze.setDifficulty(this.gameState.currentLevel);
@@ -396,6 +397,9 @@ class Game3D extends EventEmitter {
             this.gameState.levelStartWorld = result.levelStartWorld;
             this.gameState.levelEndWorld = result.levelEndWorld;
         }
+        
+        // Spawn enemies for this level
+        this.spawnLevelEnemies();
     }
     
     /**
@@ -848,23 +852,47 @@ class Game3D extends EventEmitter {
                     const enemy = this.enemies[j];
                     if (enemy && enemy.position) {
                         const distance = proj.position.distanceTo(enemy.position);
-                        if (distance < (userData.radius + 0.8)) { // Enemy collision (enemies are smaller)
+                        if (distance < (userData.radius + 1.5)) { // Enemy collision (bigger collision radius)
                             hitTarget = true;
                             hitType = 'enemy';
                             
-                            // Create collision effect at enemy position
+                            // Damage enemy
+                            enemy.userData.health -= 1;
+                            const enemyType = enemy.userData.enemyType || 'unknown';
+                            const remainingHP = enemy.userData.health;
+                            
+                            // Show damage number
+                            this.showDamageNumber(enemy.position, 1, remainingHP <= 0);
+                            
+                            // Create hit effect
                             this.createCollisionEffect(enemy.position, 'enemy');
                             
-                            // Remove enemy
-                            this.scene.remove(enemy);
-                            if (enemy.geometry) enemy.geometry.dispose();
-                            if (enemy.material) enemy.material.dispose();
-                            this.enemies.splice(j, 1);
+                            // Make enemy flash when hit
+                            this.flashEnemy(enemy);
                             
-                            // Add score/stats
-                            this.gameState.addEnemyKill();
+                            if (remainingHP <= 0) {
+                                // Enemy destroyed
+                                console.log(`💥 ${enemyType} enemy destroyed!`);
+                                
+                                // Create destruction effect
+                                this.createDestructionEffect(enemy.position, enemy.material.color);
+                                
+                                // Remove enemy
+                                this.scene.remove(enemy);
+                                if (enemy.geometry) enemy.geometry.dispose();
+                                if (enemy.material) enemy.material.dispose();
+                                this.enemies.splice(j, 1);
+                                
+                                // Add score based on enemy type
+                                const points = this.getEnemyPoints(enemyType);
+                                this.gameState.totalScore += points;
+                                this.gameState.addEnemyKill();
+                                
+                                console.log(`🎯 +${points} points! Total: ${this.gameState.totalScore}`);
+                            } else {
+                                console.log(`🎯 ${enemyType} hit! ${remainingHP}/${enemy.userData.maxHealth} HP remaining`);
+                            }
                             
-                            console.log('🎯 Enemy hit!');
                             break;
                         }
                     }
@@ -960,28 +988,70 @@ class Game3D extends EventEmitter {
      * Update enemies (AI, movement, etc.)
      */
     updateEnemies(deltaTime) {
+        const currentTime = Date.now();
+        
         for (const enemy of this.enemies) {
             if (!enemy.userData) continue;
             
-            // Simple AI: move towards player
-            const dirToPlayer = new THREE.Vector3()
-                .subVectors(this.player.position, enemy.position)
-                .normalize();
+            const userData = enemy.userData;
             
-            // Move enemy towards player
-            const movement = dirToPlayer.multiplyScalar(enemy.userData.speed * deltaTime);
-            const newPos = enemy.position.clone().add(movement);
+            // === FLOATING ANIMATION ===
+            userData.floatOffset += deltaTime * 2; // Float speed
+            const floatHeight = Math.sin(userData.floatOffset) * 0.5; // Float up/down 0.5 units
+            enemy.position.y = userData.baseY + floatHeight;
             
-            // Check wall collision for enemy
-            if (!this.checkWallCollision(newPos)) {
-                enemy.position.copy(newPos);
+            // === ROTATION ANIMATION ===
+            enemy.rotation.y += userData.rotateSpeed * deltaTime;
+            enemy.rotation.x += userData.rotateSpeed * 0.5 * deltaTime;
+            
+            // === PATROL AI ===
+            const distToPlayer = enemy.position.distanceTo(this.player.position);
+            let movement = new THREE.Vector3();
+            
+            if (distToPlayer < 15) {
+                // CHASE MODE: Close to player - move towards them
+                const dirToPlayer = new THREE.Vector3()
+                    .subVectors(this.player.position, enemy.position)
+                    .normalize();
+                movement = dirToPlayer.multiplyScalar(userData.speed * deltaTime);
+                
+                // Reset patrol when chasing
+                userData.patrolDistance = 0;
+            } else {
+                // PATROL MODE: Far from player - patrol hallways
+                movement = userData.patrolDirection.clone().multiplyScalar(userData.speed * 0.6 * deltaTime);
+                userData.patrolDistance += userData.speed * 0.6 * deltaTime;
+                
+                // Change direction when hitting max patrol distance or walls
+                if (userData.patrolDistance >= userData.maxPatrolDistance) {
+                    userData.patrolDirection.multiplyScalar(-1); // Reverse direction
+                    userData.patrolDistance = 0;
+                    userData.maxPatrolDistance = 10 + Math.random() * 10; // New patrol distance
+                }
             }
             
-            // Check if enemy reached player (damage player)
-            const distToPlayer = enemy.position.distanceTo(this.player.position);
-            if (distToPlayer < 1.0) {
-                // Player hit by enemy - could implement damage system here
-                console.log('💀 Player hit by enemy!');
+            // === MOVEMENT WITH COLLISION ===
+            const newPos = enemy.position.clone().add(movement);
+            newPos.y = enemy.position.y; // Keep floating Y position
+            
+            // Check wall collision
+            if (!this.checkWallCollision(newPos)) {
+                enemy.position.x = newPos.x;
+                enemy.position.z = newPos.z;
+            } else {
+                // Hit wall - change patrol direction
+                userData.patrolDirection = new THREE.Vector3(
+                    Math.random() - 0.5, 
+                    0, 
+                    Math.random() - 0.5
+                ).normalize();
+                userData.patrolDistance = 0;
+            }
+            
+            // === PLAYER DAMAGE ===
+            if (distToPlayer < 2.0) {
+                console.log(`💀 Player hit by ${userData.enemyType} enemy!`);
+                // Could implement damage system here
             }
         }
     }
@@ -1025,6 +1095,120 @@ class Game3D extends EventEmitter {
     }
     
     /**
+     * Show floating damage number when enemy is hit
+     */
+    showDamageNumber(position, damage, isKill = false) {
+        // Create floating text for damage
+        const canvas = document.createElement('canvas');
+        const context = canvas.getContext('2d');
+        canvas.width = 128;
+        canvas.height = 64;
+        
+        context.fillStyle = isKill ? '#ff0000' : '#ffff00';
+        context.font = isKill ? 'bold 32px Arial' : 'bold 24px Arial';
+        context.textAlign = 'center';
+        context.fillText(isKill ? 'DESTROYED!' : `-${damage}`, 64, 40);
+        
+        const texture = new THREE.CanvasTexture(canvas);
+        const material = new THREE.SpriteMaterial({ map: texture, transparent: true });
+        const sprite = new THREE.Sprite(material);
+        
+        sprite.position.copy(position);
+        sprite.position.y += 2;
+        sprite.scale.set(3, 1.5, 1);
+        
+        this.scene.add(sprite);
+        
+        // Animate the damage number
+        const startY = sprite.position.y;
+        const animationDuration = 2000; // 2 seconds
+        const startTime = Date.now();
+        
+        const animateDamage = () => {
+            const elapsed = Date.now() - startTime;
+            const progress = elapsed / animationDuration;
+            
+            if (progress < 1) {
+                sprite.position.y = startY + progress * 3; // Float up
+                sprite.material.opacity = 1 - progress; // Fade out
+                requestAnimationFrame(animateDamage);
+            } else {
+                this.scene.remove(sprite);
+                texture.dispose();
+                material.dispose();
+            }
+        };
+        
+        animateDamage();
+    }
+    
+    /**
+     * Flash enemy when hit
+     */
+    flashEnemy(enemy) {
+        const originalColor = enemy.material.color.getHex();
+        const originalEmissive = enemy.material.emissive.getHex();
+        
+        // Flash white
+        enemy.material.color.setHex(0xffffff);
+        enemy.material.emissive.setHex(0xffffff);
+        
+        setTimeout(() => {
+            enemy.material.color.setHex(originalColor);
+            enemy.material.emissive.setHex(originalEmissive);
+        }, 100);
+    }
+    
+    /**
+     * Create destruction effect when enemy dies
+     */
+    createDestructionEffect(position, color) {
+        // Create more particles for destruction
+        for (let i = 0; i < 15; i++) {
+            const particleGeo = new THREE.SphereGeometry(0.1 + Math.random() * 0.2);
+            const particleMat = new THREE.MeshBasicMaterial({ 
+                color: color,
+                transparent: true,
+                opacity: 0.8
+            });
+            const particle = new THREE.Mesh(particleGeo, particleMat);
+            
+            particle.position.copy(position);
+            particle.position.y += Math.random() * 2;
+            
+            // Random velocity
+            const velocity = new THREE.Vector3(
+                (Math.random() - 0.5) * 8,
+                Math.random() * 6 + 2,
+                (Math.random() - 0.5) * 8
+            );
+            
+            particle.userData = {
+                velocity: velocity,
+                life: 1.0,
+                maxLife: 1.0 + Math.random() * 0.5,
+                gravity: -12
+            };
+            
+            this.scene.add(particle);
+            this.effectParticles.push(particle);
+        }
+    }
+    
+    /**
+     * Get points for destroying enemy type
+     */
+    getEnemyPoints(enemyType) {
+        const pointValues = {
+            'sphere': 50,
+            'crystal': 100,
+            'organic': 75,
+            'spiked': 150
+        };
+        return pointValues[enemyType] || 50;
+    }
+    
+    /**
      * Add an enemy to the game
      */
     addEnemy(enemy) {
@@ -1035,23 +1219,88 @@ class Game3D extends EventEmitter {
     /**
      * Spawn enemy at position
      */
-    spawnEnemy(position, color = 0xff0000) {
-        // Create enemy (red cube for now)
-        const enemyGeo = new THREE.BoxGeometry(0.8, 0.8, 0.8);
-        const enemyMat = new THREE.MeshLambertMaterial({ color: color });
+    spawnEnemy(position, color = 0xff0000, enemyType = 'random') {
+        // Create varied enemy shapes
+        const enemyTypes = ['sphere', 'crystal', 'organic', 'spiked'];
+        const selectedType = enemyType === 'random' ? enemyTypes[Math.floor(Math.random() * enemyTypes.length)] : enemyType;
+        
+        let enemyGeo, enemyMat;
+        let health = 1;
+        let speed = 2;
+        
+        switch(selectedType) {
+            case 'sphere':
+                enemyGeo = new THREE.SphereGeometry(1.2, 16, 12);
+                enemyMat = new THREE.MeshPhongMaterial({ 
+                    color: color,
+                    emissive: color,
+                    emissiveIntensity: 0.3,
+                    shininess: 100
+                });
+                health = 2;
+                speed = 3;
+                break;
+                
+            case 'crystal':
+                enemyGeo = new THREE.OctahedronGeometry(1.5);
+                enemyMat = new THREE.MeshPhongMaterial({ 
+                    color: color,
+                    emissive: color,
+                    emissiveIntensity: 0.4,
+                    transparent: true,
+                    opacity: 0.8
+                });
+                health = 3;
+                speed = 1.5;
+                break;
+                
+            case 'organic':
+                enemyGeo = new THREE.DodecahedronGeometry(1.3);
+                enemyMat = new THREE.MeshLambertMaterial({ 
+                    color: color,
+                    emissive: color,
+                    emissiveIntensity: 0.2
+                });
+                health = 2;
+                speed = 2.5;
+                break;
+                
+            case 'spiked':
+                enemyGeo = new THREE.IcosahedronGeometry(1.1);
+                enemyMat = new THREE.MeshPhongMaterial({ 
+                    color: color,
+                    emissive: color,
+                    emissiveIntensity: 0.5,
+                    shininess: 50,
+                    wireframe: false
+                });
+                health = 1;
+                speed = 4;
+                break;
+        }
+        
         const enemy = new THREE.Mesh(enemyGeo, enemyMat);
         
         enemy.position.copy(position);
-        enemy.position.y = 0.4; // Half height above ground
+        enemy.position.y = 2; // Float above ground
         
         // Add enemy properties
         enemy.userData = {
             type: 'enemy',
-            health: 1,
-            speed: 2,
-            lastUpdate: Date.now()
+            enemyType: selectedType,
+            health: health,
+            maxHealth: health,
+            speed: speed,
+            lastUpdate: Date.now(),
+            floatOffset: Math.random() * Math.PI * 2, // Random float animation offset
+            rotateSpeed: (Math.random() - 0.5) * 2, // Random rotation speed
+            baseY: enemy.position.y, // Store original Y position
+            patrolDirection: new THREE.Vector3(Math.random() - 0.5, 0, Math.random() - 0.5).normalize(),
+            patrolDistance: 0,
+            maxPatrolDistance: 10 + Math.random() * 10
         };
         
+        console.log(`🤖 Creating ${selectedType} enemy with ${health}HP at:`, enemy.position);
         this.addEnemy(enemy);
         return enemy;
     }
@@ -1060,20 +1309,114 @@ class Game3D extends EventEmitter {
      * Spawn test enemies for debugging
      */
     spawnTestEnemies() {
-        // Spawn a few enemies at random positions in the maze
+        // Clear existing enemies first
+        this.clearEnemies();
+        
+        // Get player position for reference
+        const playerPos = this.player.position.clone();
+        console.log(`🧑 Player position:`, playerPos);
+        
+        // Spawn enemies closer to player and in visible range
         const testPositions = [
-            new THREE.Vector3(10, 0, 10),
-            new THREE.Vector3(-10, 0, 10),
-            new THREE.Vector3(0, 0, 20),
-            new THREE.Vector3(20, 0, -10)
+            new THREE.Vector3(playerPos.x + 15, 1, playerPos.z + 5),   // Right of player
+            new THREE.Vector3(playerPos.x + 10, 1, playerPos.z + 15),  // Ahead-right
+            new THREE.Vector3(playerPos.x + 5, 1, playerPos.z + 10),   // Close ahead
+            new THREE.Vector3(playerPos.x + 20, 1, playerPos.z)        // Far right
         ];
         
         testPositions.forEach((pos, index) => {
             const color = [0xff0000, 0xff8800, 0x8800ff, 0x0088ff][index]; // Different colors
-            this.spawnEnemy(pos, color);
+            console.log(`🤖 Spawning enemy ${index + 1} at:`, pos);
+            const enemy = this.spawnEnemy(pos, color);
+            console.log(`🤖 Enemy created:`, enemy.position, `Color: 0x${color.toString(16)}`);
         });
         
-        console.log(`🤖 Spawned ${testPositions.length} test enemies`);
+        console.log(`🤖 Spawned ${testPositions.length} test enemies. Total enemies: ${this.enemies.length}`);
+        console.log(`🤖 All enemies:`, this.enemies.map(e => ({pos: e.position, visible: e.visible})));
+    }
+    
+    /**
+     * Spawn enemies for the current level
+     */
+    spawnLevelEnemies() {
+        const level = this.gameState.currentLevel;
+        const baseEnemyCount = Math.min(2 + Math.floor(level / 2), 8); // 2-8 enemies based on level
+        const enemyCount = baseEnemyCount + Math.floor(Math.random() * 3); // Add 0-2 random enemies
+        
+        console.log(`🎮 Spawning ${enemyCount} enemies for level ${level}`);
+        
+        // Get maze dimensions for spawn area calculation
+        const mazeSize = this.maze.size || 20;
+        const spawnRadius = mazeSize * 2; // Spawn within maze bounds
+        
+        // Enemy type probabilities by level
+        const getRandomEnemyType = () => {
+            const rand = Math.random();
+            if (level <= 2) {
+                // Early levels: mostly spheres and organic
+                return rand < 0.6 ? 'sphere' : 'organic';
+            } else if (level <= 5) {
+                // Mid levels: add crystals
+                if (rand < 0.4) return 'sphere';
+                if (rand < 0.7) return 'organic';
+                return 'crystal';
+            } else {
+                // High levels: all types including dangerous spiked
+                if (rand < 0.25) return 'sphere';
+                if (rand < 0.5) return 'organic';
+                if (rand < 0.75) return 'crystal';
+                return 'spiked';
+            }
+        };
+        
+        // Generate spawn positions throughout the maze
+        for (let i = 0; i < enemyCount; i++) {
+            let attempts = 0;
+            let validPosition = null;
+            
+            // Try to find a valid spawn position (not in walls, not too close to start)
+            while (attempts < 50 && !validPosition) {
+                const x = (Math.random() - 0.5) * spawnRadius;
+                const z = (Math.random() - 0.5) * spawnRadius;
+                const testPos = new THREE.Vector3(x, 2, z);
+                
+                // Check if position is valid (not in wall, not too close to entrance)
+                const entranceDistance = this.gameState.levelStartWorld ? 
+                    testPos.distanceTo(this.gameState.levelStartWorld) : 20;
+                
+                if (!this.checkWallCollision(testPos) && entranceDistance > 15) {
+                    validPosition = testPos;
+                }
+                attempts++;
+            }
+            
+            // If we found a valid position, spawn enemy there
+            if (validPosition) {
+                const enemyType = getRandomEnemyType();
+                const colors = [0xff3333, 0x33ff33, 0x3333ff, 0xffff33, 0xff33ff, 0x33ffff];
+                const color = colors[i % colors.length];
+                
+                this.spawnEnemy(validPosition, color, enemyType);
+            } else {
+                // Fallback: spawn near player but farther away
+                const playerPos = this.player.position.clone();
+                const angle = (i / enemyCount) * Math.PI * 2;
+                const distance = 20 + Math.random() * 15;
+                const fallbackPos = new THREE.Vector3(
+                    playerPos.x + Math.cos(angle) * distance,
+                    2,
+                    playerPos.z + Math.sin(angle) * distance
+                );
+                
+                const enemyType = getRandomEnemyType();
+                const colors = [0xff6666, 0x66ff66, 0x6666ff, 0xffff66, 0xff66ff, 0x66ffff];
+                const color = colors[i % colors.length];
+                
+                this.spawnEnemy(fallbackPos, color, enemyType);
+            }
+        }
+        
+        console.log(`🎮 Level ${level}: Spawned ${this.enemies.length} enemies`);
     }
     
     /**
