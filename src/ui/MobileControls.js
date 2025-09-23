@@ -28,7 +28,7 @@ export class MobileControls {
      */
     createMobileUI() {
         this.createVirtualJoystick();
-        this.createLookArea();
+        this.createLookJoystick();
         this.createActionButtons();
     }
     
@@ -171,103 +171,138 @@ export class MobileControls {
     }
     
     /**
-     * Create look area for camera control
+     * Create look joystick for camera control
      */
-    createLookArea() {
-        const lookArea = document.createElement('div');
-        lookArea.id = 'look-area';
-        lookArea.style.cssText = `
+    createLookJoystick() {
+        const lookJoystickContainer = document.createElement('div');
+        lookJoystickContainer.id = 'look-joystick';
+        lookJoystickContainer.style.cssText = `
             position: fixed;
-            top: 0;
-            right: 0;
-            width: 70%;
-            height: 70%;
-            z-index: 999;
+            bottom: 20px;
+            right: 20px;
+            width: 120px;
+            height: 120px;
+            border: 3px solid rgba(255, 165, 0, 0.5);
+            border-radius: 50%;
+            background: rgba(0, 0, 0, 0.3);
+            z-index: 1000;
             display: none;
-            background: transparent;
-            border: none;
-            pointer-events: auto;
         `;
         
-        // Look area is now invisible - no instructions needed
+        // Look joystick knob
+        const lookJoystickKnob = document.createElement('div');
+        lookJoystickKnob.id = 'look-joystick-knob';
+        lookJoystickKnob.style.cssText = `
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 40px;
+            height: 40px;
+            background: rgba(255, 165, 0, 0.8);
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            transition: none;
+            pointer-events: none;
+        `;
         
-        document.body.appendChild(lookArea);
-        this.lookArea = lookArea;
+        lookJoystickContainer.appendChild(lookJoystickKnob);
+        document.body.appendChild(lookJoystickContainer);
         
-        this.setupLookEvents();
+        this.lookJoystick = {
+            container: lookJoystickContainer,
+            knob: lookJoystickKnob,
+            radius: 40,
+            active: false,
+            touchId: null
+        };
+        
+        this.setupLookJoystickEvents();
     }
     
     /**
-     * Setup look area touch events
+     * Setup look joystick touch events
      */
-    setupLookEvents() {
+    setupLookJoystickEvents() {
+        const lookJoystick = this.lookJoystick;
+        
         const handleStart = (e) => {
             e.preventDefault();
-            this.looking = true;
+            e.stopPropagation();
             
-            // Find the touch that's in the look area
-            let lookTouch = null;
-            for (let i = 0; i < e.touches.length; i++) {
-                const touch = e.touches[i];
-                const rect = this.lookArea.getBoundingClientRect();
-                if (touch.clientX >= rect.left && touch.clientX <= rect.right &&
-                    touch.clientY >= rect.top && touch.clientY <= rect.bottom) {
-                    lookTouch = touch;
-                    break;
-                }
-            }
-            
-            if (lookTouch) {
-                this.lastLookTouch = {
-                    x: lookTouch.clientX,
-                    y: lookTouch.clientY,
-                    id: lookTouch.identifier
-                };
-            }
+            const touch = e.touches[0];
+            lookJoystick.active = true;
+            lookJoystick.touchId = touch.identifier;
+            lookJoystick.container.style.opacity = '1';
         };
         
         const handleMove = (e) => {
-            if (!this.looking || !this.lastLookTouch) return;
+            if (!lookJoystick.active) return;
             e.preventDefault();
+            e.stopPropagation();
             
             // Find the touch with matching ID
             let lookTouch = null;
             for (let i = 0; i < e.touches.length; i++) {
                 const touch = e.touches[i];
-                if (touch.identifier === this.lastLookTouch.id) {
+                if (touch.identifier === lookJoystick.touchId) {
                     lookTouch = touch;
                     break;
                 }
             }
             
-            if (lookTouch) {
-                const deltaX = lookTouch.clientX - this.lastLookTouch.x;
-                const deltaY = lookTouch.clientY - this.lastLookTouch.y;
+            if (!lookTouch) return;
+            
+            const touch = lookTouch;
+            const rect = lookJoystick.container.getBoundingClientRect();
+            const centerX = rect.left + rect.width / 2;
+            const centerY = rect.top + rect.height / 2;
+            
+            const deltaX = touch.clientX - centerX;
+            const deltaY = touch.clientY - centerY;
+            const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
+            
+            let x = deltaX;
+            let y = deltaY;
+            
+            if (distance > lookJoystick.radius) {
+                x = (deltaX / distance) * lookJoystick.radius;
+                y = (deltaY / distance) * lookJoystick.radius;
+            }
+            
+            // Position knob relative to center
+            lookJoystick.knob.style.transform = `translate(calc(-50% + ${x}px), calc(-50% + ${y}px))`;
+            
+            // Apply look controls with joystick values
+            if (this.onLook) {
+                const lookX = Math.max(-1, Math.min(1, x / lookJoystick.radius));
+                const lookY = Math.max(-1, Math.min(1, y / lookJoystick.radius));
                 
-                if (this.onLook) {
-                    // Mobile gesture control with separate yaw sensitivity
-                    const yawSensitivity = 0.01;
-                    const pitchSensitivity = 0.001;
-                    this.onLook(-deltaX * yawSensitivity, -deltaY * pitchSensitivity);
-                }
-                
-                this.lastLookTouch = {
-                    x: lookTouch.clientX,
-                    y: lookTouch.clientY,
-                    id: lookTouch.identifier
-                };
+                // Apply sensitivity
+                const yawSensitivity = 0.05;
+                const pitchSensitivity = 0.05;
+                this.onLook(lookX * yawSensitivity, -lookY * pitchSensitivity);
             }
         };
         
         const handleEnd = (e) => {
             e.preventDefault();
-            this.looking = false;
-            this.lastLookTouch = null;
+            e.stopPropagation();
+            lookJoystick.active = false;
+            
+            // Reset knob to center with smooth transition
+            lookJoystick.knob.style.transition = 'transform 0.2s ease-out';
+            lookJoystick.knob.style.transform = 'translate(-50%, -50%)';
+            lookJoystick.container.style.opacity = '0.7';
+            
+            // Remove transition after animation completes
+            setTimeout(() => {
+                lookJoystick.knob.style.transition = 'none';
+            }, 200);
         };
         
-        this.lookArea.addEventListener('touchstart', handleStart);
-        this.lookArea.addEventListener('touchmove', handleMove);
-        this.lookArea.addEventListener('touchend', handleEnd);
+        lookJoystick.container.addEventListener('touchstart', handleStart);
+        lookJoystick.container.addEventListener('touchmove', handleMove);
+        lookJoystick.container.addEventListener('touchend', handleEnd);
     }
     
     /**
@@ -344,8 +379,8 @@ export class MobileControls {
         if (this.virtualJoystick) {
             this.virtualJoystick.container.style.display = 'block';
         }
-        if (this.lookArea) {
-            this.lookArea.style.display = 'block';
+        if (this.lookJoystick) {
+            this.lookJoystick.container.style.display = 'block';
         }
         if (this.actionButtons) {
             this.actionButtons.style.display = 'flex';
@@ -359,8 +394,8 @@ export class MobileControls {
         if (this.virtualJoystick) {
             this.virtualJoystick.container.style.display = 'none';
         }
-        if (this.lookArea) {
-            this.lookArea.style.display = 'none';
+        if (this.lookJoystick) {
+            this.lookJoystick.container.style.display = 'none';
         }
         if (this.actionButtons) {
             this.actionButtons.style.display = 'none';
@@ -431,8 +466,8 @@ export class MobileControls {
         if (this.virtualJoystick) {
             this.virtualJoystick.container.remove();
         }
-        if (this.lookArea) {
-            this.lookArea.remove();
+        if (this.lookJoystick) {
+            this.lookJoystick.container.remove();
         }
         if (this.actionButtons) {
             this.actionButtons.remove();
