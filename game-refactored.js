@@ -1061,11 +1061,38 @@ class Game3D extends EventEmitter {
                     break;
             }
             
-            // Check wall collision with proper enemy radius
-            if (!this.checkWallCollision(newPos, enemyRadius)) {
+            // Use aggressive collision detection - check both current and new positions
+            const currentCollision = this.checkWallCollision(enemy.position, enemyRadius);
+            const futureCollision = this.checkWallCollision(newPos, enemyRadius);
+            
+            // Also check with a slightly larger radius for safety buffer
+            const safetyBuffer = 0.5;
+            const futureCollisionSafe = this.checkWallCollision(newPos, enemyRadius + safetyBuffer);
+            
+            // Debug: Log collision attempts occasionally
+            if (Math.random() < 0.01) {
+                console.log(`🤖 ${userData.enemyType} collision check:`, {
+                    currentPos: enemy.position,
+                    newPos: newPos,
+                    radius: enemyRadius,
+                    currentCollision: currentCollision,
+                    futureCollision: futureCollision,
+                    futureCollisionSafe: futureCollisionSafe,
+                    wallCount: this.maze.getWalls().length
+                });
+            }
+            
+            // If currently inside a wall, force them out
+            if (currentCollision) {
+                console.log(`🚑 ${userData.enemyType} is INSIDE a wall! Force escaping...`);
+                this.forceEnemyOutOfWall(enemy, userData, enemyRadius);
+            }
+            // If future position would cause collision, avoid it
+            else if (!futureCollision && !futureCollisionSafe) {
                 enemy.position.x = newPos.x;
                 enemy.position.z = newPos.z;
             } else {
+                console.log(`🚧 ${userData.enemyType} avoiding wall collision...`);
                 // Hit wall - implement smarter wall avoidance
                 this.handleEnemyWallAvoidance(enemy, userData, enemyRadius, distToPlayer, deltaTime);
             }
@@ -1716,18 +1743,46 @@ class Game3D extends EventEmitter {
     checkWallCollision(position, radius = 0.4) {
         const walls = this.maze.getWalls();
         
+        // Debug: Check if walls exist
+        if (walls.length === 0) {
+            console.log('⚠️ No walls found for collision detection!');
+            return false;
+        }
+        
         for (const wall of walls) {
+            if (!wall || !wall.position || !wall.size) {
+                console.log('⚠️ Invalid wall object:', wall);
+                continue;
+            }
+            
             const wallPos = wall.position;
             const wallSize = wall.size;
             
-            const dx = Math.abs(position.x - wallPos.x);
-            const dz = Math.abs(position.z - wallPos.z);
+            // Ensure we have valid position coordinates
+            const wallX = wallPos.x !== undefined ? wallPos.x : 0;
+            const wallZ = wallPos.z !== undefined ? wallPos.z : 0;
+            
+            const dx = Math.abs(position.x - wallX);
+            const dz = Math.abs(position.z - wallZ);
             
             // More precise collision detection with wall boundaries
             const wallHalfX = wallSize.x / 2;
             const wallHalfZ = wallSize.z / 2;
             
             if (dx < (wallHalfX + radius) && dz < (wallHalfZ + radius)) {
+                // Debug: Log collision details occasionally
+                if (Math.random() < 0.01 && radius > 1.0) {
+                    console.log('🚧 Wall collision detected:', {
+                        position: position,
+                        wallPos: wallPos,
+                        wallSize: wallSize,
+                        radius: radius,
+                        dx: dx,
+                        dz: dz,
+                        wallHalfX: wallHalfX,
+                        wallHalfZ: wallHalfZ
+                    });
+                }
                 return true; // Collision detected
             }
         }
@@ -1788,6 +1843,52 @@ class Game3D extends EventEmitter {
         userData.maxPatrolDistance = 5 + Math.random() * 5; // Shorter patrol when stuck
         
         console.log(`🤖 ${userData.type || userData.enemyType} enemy found new random direction after wall collision`);
+    }
+    
+    /**
+     * Force enemy out of wall if they somehow got inside
+     */
+    forceEnemyOutOfWall(enemy, userData, enemyRadius) {
+        const currentPos = enemy.position;
+        const escapeDirections = [
+            new THREE.Vector3(1, 0, 0),   // +X
+            new THREE.Vector3(-1, 0, 0),  // -X
+            new THREE.Vector3(0, 0, 1),   // +Z
+            new THREE.Vector3(0, 0, -1),  // -Z
+            new THREE.Vector3(1, 0, 1).normalize(),   // +X+Z
+            new THREE.Vector3(-1, 0, 1).normalize(),  // -X+Z
+            new THREE.Vector3(1, 0, -1).normalize(),  // +X-Z
+            new THREE.Vector3(-1, 0, -1).normalize()  // -X-Z
+        ];
+        
+        // Try each direction with increasing distance
+        for (let distance = 1; distance <= 5; distance++) {
+            for (const direction of escapeDirections) {
+                const escapePos = currentPos.clone().add(direction.clone().multiplyScalar(distance));
+                escapePos.y = currentPos.y; // Keep Y position
+                
+                if (!this.checkWallCollision(escapePos, enemyRadius)) {
+                    enemy.position.copy(escapePos);
+                    userData.patrolDirection = direction.clone();
+                    userData.patrolDistance = 0;
+                    console.log(`🚑 Forced ${userData.type || userData.enemyType} out of wall to:`, escapePos);
+                    return;
+                }
+            }
+        }
+        
+        // If all else fails, teleport to a safe position near the player
+        const playerPos = this.player.position.clone();
+        const safePos = new THREE.Vector3(
+            playerPos.x + (Math.random() - 0.5) * 20,
+            currentPos.y,
+            playerPos.z + (Math.random() - 0.5) * 20
+        );
+        
+        if (!this.checkWallCollision(safePos, enemyRadius)) {
+            enemy.position.copy(safePos);
+            console.log(`🎆 Emergency teleported ${userData.type || userData.enemyType} to safe position:`, safePos);
+        }
     }
     
     /**
