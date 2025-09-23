@@ -772,7 +772,10 @@ class Game3D extends EventEmitter {
             if (walls.length === 0) {
                 console.log('⚠️ No walls found for collision detection!');
             } else if (Math.random() < 0.1) { // 10% chance to log wall info
-                console.log(`🧱 Found ${walls.length} walls. First wall:`, walls[0]?.position);
+                console.log(`🧱 Found ${walls.length} walls. First wall:`, {
+                    position: walls[0]?.position,
+                    size: walls[0]?.size
+                });
             }
             
             // Check multiple points along the movement path for fast projectiles
@@ -783,9 +786,8 @@ class Game3D extends EventEmitter {
                 // Check wall collision with proper AABB (Axis-Aligned Bounding Box) detection
                 for (const wall of walls) {
                 if (wall && wall.position) {
-                    // Wall dimensions (assuming standard 1x1x1 cubes)
-                    const wallSize = 1.0; // Half-size since walls are typically 2x2x2 or 1x1x1
-                    const wallHalfSize = wallSize;
+                    // Wall dimensions (cellSize = 5, so walls are 5x5x5)
+                    const wallHalfSize = wall.size ? wall.size.x / 2 : 2.5; // Use actual wall size or default to 2.5
                     
                     // Check if projectile sphere intersects with wall cube
                     const wallMin = {
