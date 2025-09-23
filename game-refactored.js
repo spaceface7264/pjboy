@@ -348,6 +348,9 @@ class Game3D extends EventEmitter {
         this.gameState.resetLives();
         this.gameState.totalScore = 0;
         
+        // Reset player health to full
+        this.gameState.resetHealth();
+        
         // Clean up projectiles, enemies, and effects
         this.clearProjectiles();
         this.clearEnemies();
@@ -588,6 +591,12 @@ class Game3D extends EventEmitter {
         
         // Update effects
         this.updateEffects(deltaTime);
+        
+        // Update player health system
+        this.gameState.updateHealthRegen(deltaTime);
+        
+        // Update HP UI
+        this.ui.updateHPUI(this.gameState.gameMode, this.gameState.playerHP);
         
         // Check objectives
         this.checkObjectives();
@@ -1150,8 +1159,34 @@ class Game3D extends EventEmitter {
             
             // === PLAYER DAMAGE ===
             if (distToPlayer < 2.0) {
-                console.log(`💀 Player hit by ${userData.enemyType} enemy!`);
-                // Could implement damage system here
+                // Apply damage based on enemy type
+                let damage = 10; // Default damage
+                switch (userData.type || userData.enemyType) {
+                    case 'enhanced_hunter':
+                        damage = 15;
+                        break;
+                    case 'crystal':
+                        damage = 12;
+                        break;
+                    case 'spiked':
+                        damage = 20;
+                        break;
+                    case 'organic':
+                        damage = 8;
+                        break;
+                    case 'sphere':
+                        damage = 6;
+                        break;
+                }
+                
+                const playerDied = this.gameState.takeDamage(damage);
+                
+                // Create damage effect
+                this.createPlayerDamageEffect();
+                
+                if (playerDied) {
+                    this.handlePlayerDeath();
+                }
             }
         }
     }
@@ -1310,6 +1345,138 @@ class Game3D extends EventEmitter {
     }
     
     /**
+     * Create visual effect when player takes damage
+     */
+    createPlayerDamageEffect() {
+        // Screen flash effect
+        let damageOverlay = document.getElementById('damage-overlay');
+        if (!damageOverlay) {
+            damageOverlay = document.createElement('div');
+            damageOverlay.id = 'damage-overlay';
+            damageOverlay.style.cssText = `
+                position: fixed;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                background: rgba(255, 0, 0, 0.3);
+                pointer-events: none;
+                z-index: 9999;
+                opacity: 0;
+                transition: opacity 0.1s ease;
+            `;
+            document.body.appendChild(damageOverlay);
+        }
+        
+        // Flash effect
+        damageOverlay.style.opacity = '1';
+        setTimeout(() => {
+            damageOverlay.style.opacity = '0';
+        }, 200);
+        
+        // Screen shake effect (if camera exists)
+        if (this.camera) {
+            const originalPosition = this.camera.position.clone();
+            const shakeIntensity = 0.1;
+            const shakeDuration = 300;
+            const startTime = Date.now();
+            
+            const shakeCamera = () => {
+                const elapsed = Date.now() - startTime;
+                if (elapsed < shakeDuration) {
+                    const progress = elapsed / shakeDuration;
+                    const intensity = shakeIntensity * (1 - progress);
+                    
+                    this.camera.position.x = originalPosition.x + (Math.random() - 0.5) * intensity;
+                    this.camera.position.y = originalPosition.y + (Math.random() - 0.5) * intensity;
+                    this.camera.position.z = originalPosition.z + (Math.random() - 0.5) * intensity;
+                    
+                    requestAnimationFrame(shakeCamera);
+                } else {
+                    this.camera.position.copy(originalPosition);
+                }
+            };
+            
+            shakeCamera();
+        }
+        
+        // Audio effect (if available)
+        console.log('🔊 *DAMAGE SOUND*');
+    }
+    
+    /**
+     * Handle player death
+     */
+    handlePlayerDeath() {
+        console.log('💀 Player death handling...');
+        
+        // Stop game temporarily
+        this.gameState.gameState = 'gameOver';
+        
+        // Create death effect
+        this.createDeathEffect();
+        
+        // Show game over or respawn screen after delay
+        setTimeout(() => {
+            if (this.gameState.playerLives > 0) {
+                // Respawn
+                this.respawnPlayer();
+            } else {
+                // Game over
+                this.showGameOverScreen();
+            }
+        }, 2000);
+    }
+    
+    /**
+     * Create death effect
+     */
+    createDeathEffect() {
+        // Screen fade to red
+        let deathOverlay = document.getElementById('death-overlay');
+        if (!deathOverlay) {
+            deathOverlay = document.createElement('div');
+            deathOverlay.id = 'death-overlay';
+            deathOverlay.style.cssText = `
+                position: fixed;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                background: radial-gradient(circle, rgba(255,0,0,0.8) 0%, rgba(0,0,0,0.9) 100%);
+                pointer-events: none;
+                z-index: 9998;
+                opacity: 0;
+                transition: opacity 2s ease;
+            `;
+            document.body.appendChild(deathOverlay);
+        }
+        
+        deathOverlay.style.opacity = '1';
+        
+        // Remove after respawn/game over
+        setTimeout(() => {
+            deathOverlay.style.opacity = '0';
+        }, 3000);
+    }
+    
+    /**
+     * Respawn player
+     */
+    respawnPlayer() {
+        console.log('💊 Player respawning...');
+        
+        // Reset player position
+        this.positionPlayerAtEntrance();
+        
+        // Resume game
+        this.gameState.gameState = 'playing';
+        
+        // Show respawn notification
+        this.ui.showNotification(`RESPAWNED! Lives: ${this.gameState.playerLives}`, '#00ff88', 3000);
+    }
+    
+    /**
      * Enhanced Hunter shoots projectile at target
      */
     hunterShootProjectile(hunter, targetPosition) {
@@ -1371,10 +1538,18 @@ class Game3D extends EventEmitter {
         const distToPlayer = nextPosition.distanceTo(this.player.position);
         if (distToPlayer < (userData.radius + 1.0)) {
             // Hit player!
-            console.log(`💀 Player hit by enemy projectile! Damage: ${userData.damage}`);
+            const damage = userData.damage || 10;
+            const playerDied = this.gameState.takeDamage(damage);
             
-            // Create hit effect
+            console.log(`💀 Player hit by enemy projectile! Damage: ${damage}`);
+            
+            // Create hit effect and player damage effect
             this.createCollisionEffect(proj.position, 'enemy');
+            this.createPlayerDamageEffect();
+            
+            if (playerDied) {
+                this.handlePlayerDeath();
+            }
             
             // Remove projectile
             this.scene.remove(proj);

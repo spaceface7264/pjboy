@@ -11,6 +11,18 @@ export class GameState {
         this.levelCompleteTime = 0;
         this.playerLives = 3;
         this.totalScore = 0;
+        
+        // Player Health System
+        this.playerHP = {
+            current: 100,
+            maximum: 100,
+            lastDamageTime: 0,
+            isRegenerating: false,
+            regenRate: 2, // HP per second
+            regenDelay: 3000, // 3 seconds after last damage
+            invulnerable: false,
+            invulnerabilityDuration: 1000 // 1 second after taking damage
+        };
         this.levelEndWorld = null; // Position of the red exit marker
         
         // Timer system for maze solving
@@ -278,5 +290,125 @@ export class GameState {
      */
     isCreateMode() {
         return this.gameMode === 'create';
+    }
+    
+    /**
+     * Player Health Management
+     */
+    takeDamage(amount) {
+        const currentTime = Date.now();
+        
+        // Check if player is invulnerable
+        if (this.playerHP.invulnerable) {
+            console.log('🛡️ Player is invulnerable, damage blocked!');
+            return false;
+        }
+        
+        // Apply damage
+        this.playerHP.current = Math.max(0, this.playerHP.current - amount);
+        this.playerHP.lastDamageTime = currentTime;
+        this.playerHP.isRegenerating = false;
+        
+        // Set invulnerability period
+        this.playerHP.invulnerable = true;
+        setTimeout(() => {
+            this.playerHP.invulnerable = false;
+        }, this.playerHP.invulnerabilityDuration);
+        
+        console.log(`💔 Player took ${amount} damage! HP: ${this.playerHP.current}/${this.playerHP.maximum}`);
+        
+        // Check if player died
+        if (this.playerHP.current <= 0) {
+            this.handlePlayerDeath();
+            return true; // Player died
+        }
+        
+        return false; // Player survived
+    }
+    
+    /**
+     * Heal player
+     */
+    healPlayer(amount) {
+        const previousHP = this.playerHP.current;
+        this.playerHP.current = Math.min(this.playerHP.maximum, this.playerHP.current + amount);
+        const actualHealing = this.playerHP.current - previousHP;
+        
+        if (actualHealing > 0) {
+            console.log(`💚 Player healed ${actualHealing} HP! HP: ${this.playerHP.current}/${this.playerHP.maximum}`);
+        }
+        
+        return actualHealing;
+    }
+    
+    /**
+     * Update health regeneration
+     */
+    updateHealthRegen(deltaTime) {
+        const currentTime = Date.now();
+        
+        // Start regeneration if enough time has passed since last damage
+        if (!this.playerHP.isRegenerating && 
+            currentTime - this.playerHP.lastDamageTime > this.playerHP.regenDelay &&
+            this.playerHP.current < this.playerHP.maximum) {
+            this.playerHP.isRegenerating = true;
+            console.log('💖 Health regeneration started');
+        }
+        
+        // Apply regeneration
+        if (this.playerHP.isRegenerating && this.playerHP.current < this.playerHP.maximum) {
+            const regenAmount = this.playerHP.regenRate * deltaTime;
+            this.healPlayer(regenAmount);
+            
+            // Stop regenerating when at full health
+            if (this.playerHP.current >= this.playerHP.maximum) {
+                this.playerHP.isRegenerating = false;
+                console.log('💚 Health fully regenerated!');
+            }
+        }
+    }
+    
+    /**
+     * Reset player health to full
+     */
+    resetHealth() {
+        this.playerHP.current = this.playerHP.maximum;
+        this.playerHP.lastDamageTime = 0;
+        this.playerHP.isRegenerating = false;
+        this.playerHP.invulnerable = false;
+        console.log('💚 Player health reset to full!');
+    }
+    
+    /**
+     * Get current health percentage
+     */
+    getHealthPercentage() {
+        return (this.playerHP.current / this.playerHP.maximum) * 100;
+    }
+    
+    /**
+     * Handle player death
+     */
+    handlePlayerDeath() {
+        console.log('💀 Player died!');
+        
+        this.playerLives--;
+        
+        if (this.playerLives > 0) {
+            // Respawn with partial health
+            this.playerHP.current = this.playerHP.maximum * 0.5; // 50% health on respawn
+            this.playerHP.invulnerable = true;
+            
+            // Remove invulnerability after 3 seconds
+            setTimeout(() => {
+                this.playerHP.invulnerable = false;
+            }, 3000);
+            
+            console.log(`💀 Player respawned! Lives remaining: ${this.playerLives}`);
+        } else {
+            // Game over
+            this.gameState = 'gameOver';
+            console.log('💀 GAME OVER - No lives remaining!');
+        }
     }
 }

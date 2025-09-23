@@ -10,7 +10,8 @@ export class UI {
             'settings-modal',
             'hud-container',
             'timer-ui',
-            'flag-ui'
+            'flag-ui',
+            'hp-ui'
         ];
     }
     
@@ -365,6 +366,105 @@ export class UI {
             <div style="font-size: 20px; font-weight: bold;">🚩 ${flagCount}</div>
             <div style="font-size: 10px; margin-top: 3px; opacity: 0.7;">Press F</div>
         `;
+    }
+    
+    /**
+     * Update HP UI in top-left corner
+     */
+    updateHPUI(gameMode, playerHP) {
+        // Only show HP in play mode
+        if (gameMode !== 'play') {
+            const existingHP = document.getElementById('hp-ui');
+            if (existingHP) existingHP.remove();
+            return;
+        }
+        
+        let hpUI = document.getElementById('hp-ui');
+        if (!hpUI) {
+            hpUI = document.createElement('div');
+            hpUI.id = 'hp-ui';
+            hpUI.style.cssText = `
+                position: absolute;
+                top: 20px;
+                left: 20px;
+                background: rgba(0, 0, 0, 0.8);
+                border: 2px solid #00ff88;
+                border-radius: 8px;
+                padding: ${window.innerWidth <= 768 ? '8px 12px' : '10px 15px'};
+                font-family: 'Courier New', monospace;
+                font-size: ${window.innerWidth <= 768 ? '12px' : '14px'};
+                color: #00ff88;
+                z-index: 1000;
+                text-align: center;
+                min-width: ${window.innerWidth <= 768 ? '80px' : '120px'};
+            `;
+            document.body.appendChild(hpUI);
+        }
+        
+        // Calculate health percentage and color
+        const healthPercent = Math.round((playerHP.current / playerHP.maximum) * 100);
+        let healthColor = '#00ff88'; // Green
+        let borderColor = '#00ff88';
+        
+        if (healthPercent <= 25) {
+            healthColor = '#ff4444'; // Red
+            borderColor = '#ff4444';
+        } else if (healthPercent <= 50) {
+            healthColor = '#ffaa00'; // Orange
+            borderColor = '#ffaa00';
+        } else if (healthPercent <= 75) {
+            healthColor = '#ffff00'; // Yellow
+            borderColor = '#ffff00';
+        }
+        
+        // Update border color
+        hpUI.style.borderColor = borderColor;
+        hpUI.style.color = healthColor;
+        
+        // Create health bar visual
+        const barWidth = window.innerWidth <= 768 ? 60 : 80;
+        const fillWidth = Math.round((healthPercent / 100) * barWidth);
+        
+        // Add pulsing effect if health is low
+        const pulseClass = healthPercent <= 25 ? 'animation: pulse 1s infinite;' : '';
+        
+        hpUI.innerHTML = `
+            <div style="font-size: 10px; margin-bottom: 3px;">HEALTH</div>
+            <div style="font-size: 16px; font-weight: bold; margin-bottom: 3px;">💖 ${Math.round(playerHP.current)}/${playerHP.maximum}</div>
+            <div style="
+                width: ${barWidth}px;
+                height: 8px;
+                background: rgba(255,255,255,0.2);
+                border: 1px solid ${healthColor};
+                border-radius: 4px;
+                overflow: hidden;
+                margin: 0 auto;
+            ">
+                <div style="
+                    width: ${fillWidth}px;
+                    height: 100%;
+                    background: ${healthColor};
+                    transition: all 0.3s ease;
+                    ${pulseClass}
+                "></div>
+            </div>
+            <div style="font-size: 10px; margin-top: 3px; opacity: 0.7;">${Math.round(healthPercent)}%</div>
+            ${playerHP.isRegenerating ? '<div style="font-size: 8px; color: #00ff88; margin-top: 2px;">✨ REGEN</div>' : ''}
+            ${playerHP.invulnerable ? '<div style="font-size: 8px; color: #ffff00; margin-top: 2px;">🛡️ SHIELD</div>' : ''}
+        `;
+        
+        // Add CSS for pulse animation if not already added
+        if (healthPercent <= 25 && !document.getElementById('hp-pulse-style')) {
+            const style = document.createElement('style');
+            style.id = 'hp-pulse-style';
+            style.textContent = `
+                @keyframes pulse {
+                    0%, 100% { opacity: 1; }
+                    50% { opacity: 0.5; }
+                }
+            `;
+            document.head.appendChild(style);
+        }
     }
     
     /**

@@ -313,24 +313,53 @@ export class MobileControls {
      * Create action buttons
      */
     createActionButtons() {
-        const buttonContainer = document.createElement('div');
-        buttonContainer.id = 'action-buttons';
-        buttonContainer.style.cssText = `
+        // Shoot button above look joystick (right side)
+        const shootButton = this.createActionButton('SPACE', '🔴', 'Shoot');
+        shootButton.style.cssText = `
             position: fixed;
-            bottom: 20px;
+            bottom: 160px;
             right: 20px;
+            width: 60px;
+            height: 60px;
+            background: linear-gradient(45deg, #ff0000, #ff6600);
+            border: 3px solid rgba(255, 0, 0, 0.8);
+            border-radius: 50%;
+            color: white;
+            font-size: 24px;
+            font-weight: bold;
             display: none;
-            flex-direction: column;
-            gap: 10px;
+            justify-content: center;
+            align-items: center;
             z-index: 1000;
+            user-select: none;
+            -webkit-user-select: none;
         `;
+        document.body.appendChild(shootButton);
+        this.shootButton = shootButton;
         
-        // Flag button
+        // Flag button above movement joystick (left side)
         const flagButton = this.createActionButton('F', '🚩', 'Place Flag');
-        buttonContainer.appendChild(flagButton);
-        
-        document.body.appendChild(buttonContainer);
-        this.actionButtons = buttonContainer;
+        flagButton.style.cssText = `
+            position: fixed;
+            bottom: 160px;
+            left: 20px;
+            width: 60px;
+            height: 60px;
+            background: linear-gradient(45deg, #00ff00, #00aaff);
+            border: 3px solid rgba(0, 255, 0, 0.8);
+            border-radius: 50%;
+            color: white;
+            font-size: 24px;
+            font-weight: bold;
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            user-select: none;
+            -webkit-user-select: none;
+        `;
+        document.body.appendChild(flagButton);
+        this.flagButton = flagButton;
     }
     
     /**
@@ -386,8 +415,11 @@ export class MobileControls {
         if (this.lookJoystick) {
             this.lookJoystick.container.style.display = 'block';
         }
-        if (this.actionButtons) {
-            this.actionButtons.style.display = 'flex';
+        if (this.shootButton) {
+            this.shootButton.style.display = 'flex';
+        }
+        if (this.flagButton) {
+            this.flagButton.style.display = 'flex';
         }
     }
     
@@ -401,8 +433,11 @@ export class MobileControls {
         if (this.lookJoystick) {
             this.lookJoystick.container.style.display = 'none';
         }
-        if (this.actionButtons) {
-            this.actionButtons.style.display = 'none';
+        if (this.shootButton) {
+            this.shootButton.style.display = 'none';
+        }
+        if (this.flagButton) {
+            this.flagButton.style.display = 'none';
         }
     }
     
@@ -480,8 +515,11 @@ export class MobileControls {
         if (this.lookJoystick) {
             this.lookJoystick.container.remove();
         }
-        if (this.actionButtons) {
-            this.actionButtons.remove();
+        if (this.shootButton) {
+            this.shootButton.remove();
+        }
+        if (this.flagButton) {
+            this.flagButton.remove();
         }
     }
 }
