@@ -246,8 +246,8 @@ export class MobileControls {
                 
                 if (this.onLook) {
                     // Mobile gesture control with separate yaw sensitivity
-                    const yawSensitivity = 0.01;
-                    const pitchSensitivity = 0.001;
+                    const yawSensitivity = 0.0025;
+                    const pitchSensitivity = 0.0025;
                     this.onLook(-deltaX * yawSensitivity, -deltaY * pitchSensitivity);
                 }
                 
