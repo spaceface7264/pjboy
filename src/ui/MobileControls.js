@@ -245,8 +245,10 @@ export class MobileControls {
                 const deltaY = lookTouch.clientY - this.lastLookTouch.y;
                 
                 if (this.onLook) {
-                    // Fixed touch gestures: swipe right=look right, swipe up=look up  
-                    this.onLook(-deltaX * 0.001, deltaY * 0.001);
+                    // Mobile gesture control with separate yaw sensitivity
+                    const yawSensitivity = 0.01;
+                    const pitchSensitivity = 0.001;
+                    this.onLook(-deltaX * yawSensitivity, deltaY * pitchSensitivity);
                 }
                 
                 this.lastLookTouch = {
