@@ -369,105 +369,6 @@ export class UI {
     }
     
     /**
-     * Update HP UI in top-left corner
-     */
-    updateHPUI(gameMode, playerHP) {
-        // Only show HP in play mode
-        if (gameMode !== 'play') {
-            const existingHP = document.getElementById('hp-ui');
-            if (existingHP) existingHP.remove();
-            return;
-        }
-        
-        let hpUI = document.getElementById('hp-ui');
-        if (!hpUI) {
-            hpUI = document.createElement('div');
-            hpUI.id = 'hp-ui';
-            hpUI.style.cssText = `
-                position: absolute;
-                top: 20px;
-                left: 20px;
-                background: rgba(0, 0, 0, 0.8);
-                border: 2px solid #00ff88;
-                border-radius: 8px;
-                padding: ${window.innerWidth <= 768 ? '8px 12px' : '10px 15px'};
-                font-family: 'Courier New', monospace;
-                font-size: ${window.innerWidth <= 768 ? '12px' : '14px'};
-                color: #00ff88;
-                z-index: 1000;
-                text-align: center;
-                min-width: ${window.innerWidth <= 768 ? '80px' : '120px'};
-            `;
-            document.body.appendChild(hpUI);
-        }
-        
-        // Calculate health percentage and color
-        const healthPercent = Math.round((playerHP.current / playerHP.maximum) * 100);
-        let healthColor = '#00ff88'; // Green
-        let borderColor = '#00ff88';
-        
-        if (healthPercent <= 25) {
-            healthColor = '#ff4444'; // Red
-            borderColor = '#ff4444';
-        } else if (healthPercent <= 50) {
-            healthColor = '#ffaa00'; // Orange
-            borderColor = '#ffaa00';
-        } else if (healthPercent <= 75) {
-            healthColor = '#ffff00'; // Yellow
-            borderColor = '#ffff00';
-        }
-        
-        // Update border color
-        hpUI.style.borderColor = borderColor;
-        hpUI.style.color = healthColor;
-        
-        // Create health bar visual
-        const barWidth = window.innerWidth <= 768 ? 60 : 80;
-        const fillWidth = Math.round((healthPercent / 100) * barWidth);
-        
-        // Add pulsing effect if health is low
-        const pulseClass = healthPercent <= 25 ? 'animation: pulse 1s infinite;' : '';
-        
-        hpUI.innerHTML = `
-            <div style="font-size: 10px; margin-bottom: 3px;">HEALTH</div>
-            <div style="font-size: 16px; font-weight: bold; margin-bottom: 3px;">💖 ${Math.round(playerHP.current)}/${playerHP.maximum}</div>
-            <div style="
-                width: ${barWidth}px;
-                height: 8px;
-                background: rgba(255,255,255,0.2);
-                border: 1px solid ${healthColor};
-                border-radius: 4px;
-                overflow: hidden;
-                margin: 0 auto;
-            ">
-                <div style="
-                    width: ${fillWidth}px;
-                    height: 100%;
-                    background: ${healthColor};
-                    transition: all 0.3s ease;
-                    ${pulseClass}
-                "></div>
-            </div>
-            <div style="font-size: 10px; margin-top: 3px; opacity: 0.7;">${Math.round(healthPercent)}%</div>
-            ${playerHP.isRegenerating ? '<div style="font-size: 8px; color: #00ff88; margin-top: 2px;">✨ REGEN</div>' : ''}
-            ${playerHP.invulnerable ? '<div style="font-size: 8px; color: #ffff00; margin-top: 2px;">🛡️ SHIELD</div>' : ''}
-        `;
-        
-        // Add CSS for pulse animation if not already added
-        if (healthPercent <= 25 && !document.getElementById('hp-pulse-style')) {
-            const style = document.createElement('style');
-            style.id = 'hp-pulse-style';
-            style.textContent = `
-                @keyframes pulse {
-                    0%, 100% { opacity: 1; }
-                    50% { opacity: 0.5; }
-                }
-            `;
-            document.head.appendChild(style);
-        }
-    }
-    
-    /**
      * Show notification message in top-right
      */
     showNotification(message, color = '#00ff00', duration = 2000) {
@@ -538,6 +439,100 @@ export class UI {
     }
     
     /**
+     * Update HP UI display
+     */
+    updateHPUI(gameMode, playerHP) {
+        // Only show HP in play mode
+        if (gameMode !== 'play') {
+            const hpUI = document.getElementById('hp-ui');
+            if (hpUI) {
+                hpUI.style.display = 'none';
+            }
+            return;
+        }
+        
+        // Create or update HP UI (top left corner)
+        let hpUI = document.getElementById('hp-ui');
+        if (!hpUI) {
+            hpUI = document.createElement('div');
+            hpUI.id = 'hp-ui';
+            hpUI.style.position = 'absolute';
+            hpUI.style.top = '20px';
+            hpUI.style.left = '20px';
+            hpUI.style.zIndex = '1000';
+            
+            // Mobile gets minimal styling
+            if (window.innerWidth <= 768) {
+                hpUI.style.background = 'rgba(0,0,0,0.2)';
+                hpUI.style.border = '1px solid rgba(255,0,0,0.3)';
+                hpUI.style.borderRadius = '6px';
+                hpUI.style.padding = '6px 10px';
+                hpUI.style.fontSize = '14px';
+            } else {
+                hpUI.style.background = 'linear-gradient(135deg, rgba(0,0,0,0.9), rgba(40,0,0,0.9))';
+                hpUI.style.border = '2px solid #ff4444';
+                hpUI.style.borderRadius = '12px';
+                hpUI.style.padding = '15px 20px';
+                hpUI.style.fontSize = '18px';
+            }
+            
+            hpUI.style.fontFamily = "'Courier New', monospace";
+            hpUI.style.color = '#ff4444';
+            hpUI.style.fontWeight = 'bold';
+            hpUI.style.textShadow = '0 0 10px rgba(255, 68, 68, 0.7)';
+            hpUI.style.boxShadow = '0 0 20px rgba(255, 68, 68, 0.3)';
+            hpUI.style.display = 'block';
+            
+            document.body.appendChild(hpUI);
+        }
+        
+        // Calculate HP percentage for color coding
+        const maxHP = 100;
+        const hpPercentage = playerHP / maxHP;
+        
+        // Color based on HP level
+        let hpColor = '#ff4444'; // Red
+        if (hpPercentage > 0.6) {
+            hpColor = '#44ff44'; // Green
+        } else if (hpPercentage > 0.3) {
+            hpColor = '#ffaa44'; // Orange
+        }
+        
+        // Update color
+        hpUI.style.color = hpColor;
+        hpUI.style.textShadow = `0 0 10px ${hpColor}90`;
+        hpUI.style.borderColor = hpColor;
+        hpUI.style.boxShadow = `0 0 20px ${hpColor}40`;
+        
+        // Create HP bar visualization
+        const hpBars = Math.ceil(playerHP / 10); // Each bar represents 10 HP
+        const maxBars = 10;
+        const fullBars = '█'.repeat(hpBars);
+        const emptyBars = '░'.repeat(maxBars - hpBars);
+        
+        // Mobile gets compact display, desktop gets full display
+        if (window.innerWidth <= 768) {
+            hpUI.innerHTML = `HP ${playerHP}`;
+        } else {
+            hpUI.innerHTML = `
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <span>HP</span>
+                    <div style="display: flex; flex-direction: column; gap: 2px;">
+                        <div style="font-family: monospace; font-size: 16px; letter-spacing: 1px;">
+                            ${fullBars}${emptyBars}
+                        </div>
+                        <div style="font-size: 12px; text-align: center;">
+                            ${playerHP}/100
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+        
+        hpUI.style.display = 'block';
+    }
+    
+    /**
      * Show modal content
      */
     updateModalContent(translations, language) {
@@ -552,7 +547,7 @@ export class UI {
         this.clearAllUI();
         
         // Remove dynamically created elements
-        const dynamicElements = document.querySelectorAll('#timer-ui, #inventory-ui, #new-crosshair, #flash-styles, #notification, #notification-styles, #flag-ui');
+        const dynamicElements = document.querySelectorAll('#timer-ui, #inventory-ui, #new-crosshair, #flash-styles, #notification, #notification-styles, #flag-ui, #hp-ui, #damage-overlay, #death-overlay, #game-over-overlay');
         dynamicElements.forEach(el => el.remove());
     }
 }

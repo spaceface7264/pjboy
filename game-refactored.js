@@ -1184,6 +1184,8 @@ class Game3D extends EventEmitter {
                 // Create damage effect
                 this.createPlayerDamageEffect();
                 
+                console.log(`💀 Player hit by ${userData.enemyType} enemy! Damage: ${damage}, HP: ${this.gameState.playerHP}`);
+                
                 if (playerDied) {
                     this.handlePlayerDeath();
                 }
@@ -1359,7 +1361,7 @@ class Game3D extends EventEmitter {
                 left: 0;
                 width: 100%;
                 height: 100%;
-                background: rgba(255, 0, 0, 0.3);
+                background: rgba(255, 0, 0, 0.4);
                 pointer-events: none;
                 z-index: 9999;
                 opacity: 0;
@@ -1372,13 +1374,13 @@ class Game3D extends EventEmitter {
         damageOverlay.style.opacity = '1';
         setTimeout(() => {
             damageOverlay.style.opacity = '0';
-        }, 200);
+        }, 150);
         
         // Screen shake effect (if camera exists)
         if (this.camera) {
             const originalPosition = this.camera.position.clone();
-            const shakeIntensity = 0.1;
-            const shakeDuration = 300;
+            const shakeIntensity = 0.15;
+            const shakeDuration = 400;
             const startTime = Date.now();
             
             const shakeCamera = () => {
@@ -1469,11 +1471,65 @@ class Game3D extends EventEmitter {
         // Reset player position
         this.positionPlayerAtEntrance();
         
+        // Reset health
+        this.gameState.resetHealth();
+        
         // Resume game
         this.gameState.gameState = 'playing';
         
         // Show respawn notification
         this.ui.showNotification(`RESPAWNED! Lives: ${this.gameState.playerLives}`, '#00ff88', 3000);
+    }
+    
+    /**
+     * Show game over screen
+     */
+    showGameOverScreen() {
+        console.log('☠️ Game Over!');
+        
+        // Create game over overlay
+        let gameOverOverlay = document.getElementById('game-over-overlay');
+        if (!gameOverOverlay) {
+            gameOverOverlay = document.createElement('div');
+            gameOverOverlay.id = 'game-over-overlay';
+            gameOverOverlay.style.cssText = `
+                position: fixed;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                background: rgba(0, 0, 0, 0.8);
+                display: flex;
+                flex-direction: column;
+                justify-content: center;
+                align-items: center;
+                z-index: 10000;
+                color: white;
+                font-family: Arial, sans-serif;
+            `;
+            
+            gameOverOverlay.innerHTML = `
+                <h1 style="font-size: 4em; margin: 0; color: #ff4444;">GAME OVER</h1>
+                <p style="font-size: 1.5em; margin: 20px 0;">Final Score: ${this.gameState.totalScore}</p>
+                <button id="restart-btn" style="
+                    padding: 15px 30px;
+                    font-size: 1.2em;
+                    background: #4CAF50;
+                    color: white;
+                    border: none;
+                    border-radius: 5px;
+                    cursor: pointer;
+                ">Play Again</button>
+            `;
+            
+            document.body.appendChild(gameOverOverlay);
+            
+            // Add restart functionality
+            document.getElementById('restart-btn').addEventListener('click', () => {
+                gameOverOverlay.remove();
+                this.startNewGame();
+            });
+        }
     }
     
     /**
@@ -1541,7 +1597,7 @@ class Game3D extends EventEmitter {
             const damage = userData.damage || 10;
             const playerDied = this.gameState.takeDamage(damage);
             
-            console.log(`💀 Player hit by enemy projectile! Damage: ${damage}`);
+            console.log(`💀 Player hit by enemy projectile! Damage: ${damage}, HP: ${this.gameState.playerHP}`);
             
             // Create hit effect and player damage effect
             this.createCollisionEffect(proj.position, 'enemy');
