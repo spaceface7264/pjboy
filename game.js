@@ -5426,9 +5426,23 @@ class Game3D {
         if (isBoss && this.arena && this.arena.active) {
             this.onArenaBossKilled();
         }
-        // Skip the standard random drop for the boss — wave-complete drops are handled separately
-        if (!isBoss && Math.random() < this.dropChance) {
-            this.spawnPickup(deathPos.x, deathPos.z);
+        // Skip the standard random drop for the boss — wave-complete drops are
+        // handled separately. Bigger enemies drop more loot; chicks/chickens
+        // drop almost nothing.
+        if (!isBoss) {
+            const kind = (e.userData && e.userData.enemyKind) || 'zombie';
+            const dropCounts = { giant: 4, demon: 2, goblin: 1, zombie: 1, chick: 0, chicken: 0 };
+            const dropProb   = { giant: 1.0, demon: 0.9, goblin: this.dropChance, zombie: this.dropChance, chick: 0.25, chicken: 0.3 };
+            const count = dropCounts[kind] != null ? dropCounts[kind] : 1;
+            const prob  = dropProb[kind]   != null ? dropProb[kind]   : this.dropChance;
+            for (let i = 0; i < count; i++) {
+                if (Math.random() < prob) {
+                    // Spread multi-drops in a small ring so they don't stack on one spot.
+                    const ang = (count > 1) ? (Math.PI * 2 * i / count) + Math.random() * 0.4 : 0;
+                    const r = (count > 1) ? 0.6 + Math.random() * 0.5 : 0;
+                    this.spawnPickup(deathPos.x + Math.cos(ang) * r, deathPos.z + Math.sin(ang) * r);
+                }
+            }
         }
         // Clone every material first — the GLTF is cloned via SkeletonUtils, which
         // shares materials across all instances. Fading the shared mats would fade
