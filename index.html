@@ -10,7 +10,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>3D Second-Person Game - 128-bit Style</title>
-    <link rel="stylesheet" href="style.css?v=8">
+    <link rel="stylesheet" href="style.css?v=15">
 </head>
 <body>
     <div id="gameContainer">
@@ -65,11 +65,13 @@
                 <div class="mm-label">MAP</div>
             </div>
 
-            <!-- Bottom-left segmented health bar -->
+            <!-- Top-right segmented health bar -->
             <div id="health-bar">
-                <div class="hb-label">HEALTH</div>
+                <div class="hb-row">
+                    <div class="hb-label">HEALTH</div>
+                    <div class="hb-text">100 / 100</div>
+                </div>
                 <div class="hb-pips"></div>
-                <div class="hb-text">100 / 100</div>
             </div>
         </div>
         
@@ -156,6 +158,29 @@
                     </div>
 
                     <div class="settings-section">
+                        <h3 id="multiplayer-title">Multiplayer</h3>
+                        <div class="mp-status" id="mp-status">Not connected</div>
+                        <div class="mp-row">
+                            <label class="mp-label" for="mp-name">Display name</label>
+                            <input id="mp-name" class="mp-input" type="text" maxlength="24" placeholder="Player" />
+                        </div>
+                        <div class="mp-actions">
+                            <button id="mp-host-btn" class="mp-btn">Host Room</button>
+                            <input id="mp-code" class="mp-input mp-code" type="text" maxlength="12" placeholder="ROOM CODE" />
+                            <button id="mp-join-btn" class="mp-btn">Join</button>
+                            <button id="mp-disconnect-btn" class="mp-btn mp-btn-danger" style="display:none;">Disconnect</button>
+                        </div>
+                        <div class="mp-room" id="mp-room-display" style="display:none;">
+                            Room code: <span id="mp-room-code"></span>
+                            <button id="mp-copy-btn" class="mp-btn mp-btn-small" type="button">Copy</button>
+                        </div>
+                        <div class="mp-roster">
+                            <div class="mp-roster-title">Players</div>
+                            <ul id="mp-roster-list"></ul>
+                        </div>
+                    </div>
+
+                    <div class="settings-section">
                         <h3 id="audio-title">Audio</h3>
                         <div class="audio-row">
                             <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
@@ -238,6 +263,8 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/utils/SkeletonUtils.js"></script>
-    <script src="game.js?v=32"></script>
+    <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+    <script src="multiplayer.js?v=1"></script>
+    <script src="game.js?v=43"></script>
 </body>
 </html>

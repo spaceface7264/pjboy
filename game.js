@@ -284,7 +284,6 @@ class Game3D {
                 jJump: 'J - Hop',
                 pSettings: 'P - Indstillinger',
                 tToolbox: 'T - Værktøjskasse',
-                iInventory: 'I - Inventar',
                 qWall: 'Q - Væg',
                 eErase: 'E - Slet',
                 shiftLine: 'SHIFT - Lige Linje',
@@ -406,14 +405,7 @@ class Game3D {
                 asciiMazeDesc: 'Genereret ASCII perfekt labyrint (sværhedsgrad-drevet)',
                 
                 // Instructions
-                instructions: 'Instruktioner',
-                iToClose: 'I for at lukke',
-                tabArrowsNavigate: 'TAB/Pile for at navigere',
-                enterClickUse: 'Enter/Klik for at bruge',
-                iClose: 'I for at lukke',
-                tabNavigate: 'TAB for at navigere',
-                enterUse: 'Enter for at bruge',
-                escapeClose: 'Escape for at lukke'
+                instructions: 'Instruktioner'
             },
             english: {
                 // Game modes
@@ -431,7 +423,6 @@ class Game3D {
                 jJump: 'J - Jump',
                 pSettings: 'P - Settings',
                 tToolbox: 'T - Toolbox',
-                iInventory: 'I - Inventory',
                 qWall: 'Q - Wall',
                 eErase: 'E - Erase',
                 shiftLine: 'SHIFT - Straight Line',
@@ -553,14 +544,7 @@ class Game3D {
                 asciiMazeDesc: 'Generated ASCII perfect maze (difficulty-driven)',
                 
                 // Instructions
-                instructions: 'Instructions',
-                iToClose: 'I to close',
-                tabArrowsNavigate: 'TAB/Arrows to navigate',
-                enterClickUse: 'Enter/Click to use',
-                iClose: 'I to close',
-                tabNavigate: 'TAB to navigate',
-                enterUse: 'Enter to use',
-                escapeClose: 'Escape to close'
+                instructions: 'Instructions'
             }
         };
         
@@ -676,6 +660,7 @@ class Game3D {
         // initializeWeapons) builds the default layout from both registries.
         this.initializePickups();
         this.initializeWeapons();
+        this.initMultiplayer();
         this.animate();
     }
 
@@ -819,6 +804,10 @@ class Game3D {
         // Toast notifications
         this.toasts = [];
         this.toastId = 0;
+
+        // Jetpack control mode. Space jumps unless the player has explicitly
+        // armed the jetpack from the quickbar (and there's fuel).
+        this.jetpackArmed = false;
 
         this.createWeaponModel();
         this.loadQuickbarLayout();
@@ -1494,7 +1483,9 @@ class Game3D {
     // Update all UI elements with current language
     updateAllUI() {
         this.updateModalContent();
-        this.updateInventoryUI();
+        this._qbSig = null;
+        this.updateInventoryGridUI && this.updateInventoryGridUI();
+        if (this.isDrawerOpen) this.updateDrawerUI();
     }
 
     // Single source of truth for "is the player model visible?". Call this whenever
@@ -5126,7 +5117,9 @@ class Game3D {
                         this.updateInventoryGridUI && this.updateInventoryGridUI();
                     } else {
                         this.inventory.items.push(item);
-                        this.updateInventoryUI();
+                        this._qbSig = null;
+                        this.updateInventoryGridUI && this.updateInventoryGridUI();
+                        if (this.isDrawerOpen) this.updateDrawerUI();
                     }
                     this.spawnImpact(p.position.clone(), 0x66ffcc);
                     this.showMessage(`Picked up: ${item.label}`);
@@ -5202,32 +5195,7 @@ class Game3D {
         }
     }
     
-    // ===== Inventory UI and Activation =====
-    ensureInventoryUI() {
-        let ui = document.getElementById('inventory-ui');
-        if (!ui) {
-            ui = document.createElement('div');
-            ui.id = 'inventory-ui';
-            ui.style.position = 'absolute';
-            ui.style.left = '50%';
-            ui.style.top = '50%';
-            ui.style.transform = 'translate(-50%, -50%)';
-            ui.style.background = 'rgba(0,0,0,0.9)';
-            ui.style.border = '3px solid #ffb347';
-            ui.style.borderRadius = '8px';
-            ui.style.padding = '16px';
-            ui.style.color = '#ffb347';
-            ui.style.fontFamily = 'Courier New, monospace';
-            ui.style.fontSize = '14px';
-            ui.style.zIndex = '3000';
-            ui.style.minWidth = '320px';
-            ui.style.display = 'none';
-            ui.style.boxShadow = '0 0 20px rgba(0,255,0,0.3)';
-            document.body.appendChild(ui);
-        }
-        return ui;
-    }
-
+    // ===== Item Activation =====
     // Create 32-bit style icons for inventory items
     createItemIcon(type, size = 24) {
         const canvas = document.createElement('canvas');
@@ -5292,182 +5260,34 @@ class Game3D {
         return canvas.toDataURL();
     }
 
-    updateInventoryUI() {
-        const ui = this.ensureInventoryUI();
-        const items = this.inventory.items;
-        const sel = this.inventory.selectedIndex;
-        
-        let html = `
-            <div style="margin-bottom:12px; font-weight:bold; text-align:center; font-size:16px;">
-                ${this.t('inventory').toUpperCase()}
-            </div>
-            <div style="margin-bottom:8px; font-size:12px; opacity:0.8; text-align:center;">
-                ${this.t('iToClose')} | ${this.t('tabArrowsNavigate')} | ${this.t('enterClickUse')}
-            </div>
-        `;
-        
-        // Power-ups section
-        const powerUpItems = [
-            { type: 'speed', label: this.t('speedBoost'), count: this.powerUps.speedBoost },
-            { type: 'healthRegen', label: this.t('healthRegen'), count: this.powerUps.healthRegen },
-            { type: 'weaponBuff', label: this.t('weaponBuff'), count: this.powerUps.weaponBuff },
-            { type: 'jetpack', label: this.t('jetpackFuel'), count: Math.floor(this.powerUps.jetpackFuel) }
-        ].filter(item => item.count > 0);
-        
-        if (powerUpItems.length > 0) {
-            html += `
-                <div style="margin-bottom: 12px;">
-                    <div style="font-weight: bold; color: #ffb347; margin-bottom: 8px; text-align: center;">
-                        ${this.t('powerUps').toUpperCase()}
-                    </div>
-                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 6px;">
-            `;
-            powerUpItems.forEach(item => {
-                const icon = this.createItemIcon(item.type, 24);
-                html += `
-                    <div style="
-                        background: rgba(0,255,0,0.1); 
-                        border: 1px solid #ffb347; 
-                        border-radius: 4px; 
-                        padding: 6px; 
-                        text-align: center;
-                    ">
-                        <img src="${icon}" 
-                             style="
-                                 width: 24px; 
-                                 height: 24px; 
-                                 image-rendering: pixelated;
-                                 margin-bottom: 2px;
-                             " />
-                        <div style="font-size: 10px; font-weight: bold;">${item.label}</div>
-                        <div style="font-size: 9px; opacity: 0.8;">${item.count} ${this.t('stacks')}</div>
-                    </div>
-                `;
-            });
-            html += '</div></div>';
-        }
-        
-        // Regular items section
-        if (!items.length) {
-            html += `<div style="text-align:center; padding:20px; opacity:0.6;">(${this.t('empty')})</div>`;
-        } else {
-            html += `
-                <div style="margin-bottom: 12px;">
-                    <div style="font-weight: bold; color: #ffb347; margin-bottom: 8px; text-align: center;">
-                        ${this.t('items').toUpperCase()}
-                    </div>
-                    <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap:8px; max-height:300px; overflow-y:auto;">
-            `;
-            items.forEach((it, idx) => {
-                const isSelected = idx === sel;
-                const icon = this.createItemIcon(it.type, 32);
-                const borderColor = isSelected ? '#ffb347' : '#4a3018';
-                const bgColor = isSelected ? 'rgba(0,255,0,0.2)' : 'rgba(0,255,0,0.05)';
-                
-                html += `
-                    <div class="inventory-item" 
-                         data-index="${idx}"
-                         style="
-                             border: 2px solid ${borderColor};
-                             background: ${bgColor};
-                             padding: 8px;
-                             border-radius: 4px;
-                             cursor: pointer;
-                             transition: all 0.2s;
-                             text-align: center;
-                         "
-                         onmouseover="this.style.background='rgba(0,255,0,0.15)'"
-                         onmouseout="this.style.background='${bgColor}'"
-                         onclick="game.selectInventoryItem(${idx}); game.activateSelectedItem();">
-                        <img src="${icon}" 
-                             style="
-                                 width: 32px; 
-                                 height: 32px; 
-                                 image-rendering: pixelated;
-                                 margin-bottom: 4px;
-                             " />
-                        <div style="font-size: 12px; font-weight: bold;">${it.label}</div>
-                    </div>
-                `;
-            });
-            html += '</div></div>';
-        }
-        
-        // Stats line
-        const jetpackStatus = this.isJetpackActive ? 
-            ` | ${this.t('jetpack')}: ${Math.round(this.inventory.jetpackFuel)}/${this.inventory.maxJetpackFuel}` : '';
-        const playerHpColor = this.player.hp < this.player.maxHp * 0.3 ? '#ff6666' : 
-                             this.player.hp < this.player.maxHp * 0.6 ? '#ffff66' : '#66ff66';
-        html += `
-            <div style="
-                margin-top: 12px; 
-                padding: 8px; 
-                background: rgba(0,255,0,0.1); 
-                border-radius: 4px; 
-                font-size: 12px; 
-                text-align: center;
-            ">
-                <span style="color: ${playerHpColor};">${this.t('playerHp')}: ${this.player.hp}/${this.player.maxHp}</span> | 
-                ${this.t('health')}: ${this.inventory.health}/${this.inventory.maxHealth} | 
-                ${this.t('ammo')}: ${this.inventory.ammo} | 
-                ${this.t('flags')}: ${this.inventory.flags}${jetpackStatus}
-            </div>
-        `;
-        
-        ui.innerHTML = html;
-        
-        // Add click handlers for items
-        ui.querySelectorAll('.inventory-item').forEach((item, idx) => {
-            item.addEventListener('click', () => {
-                this.selectInventoryItem(idx);
-                this.activateSelectedItem();
-            });
-        });
-    }
-
-    toggleInventory() {
-        const ui = this.ensureInventoryUI();
-        if (ui.style.display === 'none') {
-            this.updateInventoryUI();
-            ui.style.display = 'block';
-            this.modalOpen = true; // pause pointer lock interactions
-        } else {
-            ui.style.display = 'none';
-            this.modalOpen = false;
-        }
-    }
-
-    selectInventory(delta) {
-        if (!this.inventory.items.length) return;
-        const n = this.inventory.items.length;
-        this.inventory.selectedIndex = (this.inventory.selectedIndex + delta + n) % n;
-        this.updateInventoryUI();
-    }
-
-    selectInventoryItem(index) {
-        if (!this.inventory.items.length || index < 0 || index >= this.inventory.items.length) return;
-        this.inventory.selectedIndex = index;
-        this.updateInventoryUI();
-    }
-
-    activateSelectedItem() {
-        const items = this.inventory.items;
-        const idx = this.inventory.selectedIndex;
-        if (!items.length || idx < 0 || idx >= items.length) return;
-
-        const it = items[idx];
-        const def = this.ITEM_DEFS[it.type];
+    // Consume one stack of `itemId` from the player's inventory and apply it.
+    // autoApply pickups (ammo/jetpack/flag) don't sit in items, so we just
+    // surface a hint when the player clicks them in the quickbar.
+    activateSelectedItem(itemId) {
+        if (!itemId) return;
+        const def = this.ITEM_DEFS[itemId];
         if (!def) return;
 
+        if (def.autoApply) {
+            this.showMessage(`${this.itemLabel(itemId)} (auto)`);
+            return;
+        }
+
+        const items = this.inventory.items;
+        const idx = items.findIndex(i => i.type === itemId);
+        if (idx === -1) {
+            this.showMessage(`No ${this.t(def.labelKey)} stacks available`);
+            return;
+        }
+
         def.apply();
-        this.showMessage(this.itemLabel(it.type));
-        this.showToast(this.pickupToast(it.type), 'success');
+        this.showMessage(this.itemLabel(itemId));
+        this.showToast(this.pickupToast(itemId), 'success');
 
         items.splice(idx, 1);
-        if (this.inventory.selectedIndex >= items.length) {
-            this.inventory.selectedIndex = Math.max(0, items.length - 1);
-        }
-        this.updateInventoryUI();
+        this._qbSig = null;
+        this.updateInventoryGridUI && this.updateInventoryGridUI();
+        if (this.isDrawerOpen) this.updateDrawerUI();
     }
 
     placeFlagAtPlayer() {
@@ -5529,7 +5349,9 @@ class Game3D {
         this.placedFlags.push(flagGroup);
 
         this.inventory.flags = Math.max(0, this.inventory.flags - 1);
-        this.updateInventoryUI();
+        this._qbSig = null;
+        this.updateInventoryGridUI && this.updateInventoryGridUI();
+        if (this.isDrawerOpen) this.updateDrawerUI();
         this.updateControlsUI();
         this.showToast('🏁 Flag placed', 'success');
         if (this.inventory.flags > 0) {
@@ -5576,7 +5398,9 @@ class Game3D {
         }
 
         this.inventory.flags += 1;
-        this.updateInventoryUI();
+        this._qbSig = null;
+        this.updateInventoryGridUI && this.updateInventoryGridUI();
+        if (this.isDrawerOpen) this.updateDrawerUI();
         this.updateControlsUI();
         this.showToast('🏳️ Flag removed', 'info');
         this.showMessage(`${this.t('flagsCount')}: ${this.inventory.flags} - Press F to place`);
@@ -6090,6 +5914,8 @@ class Game3D {
         
         // Click handler
         document.addEventListener('click', (event) => {
+            // Drawer is a modal-ish overlay — don't grab pointer-lock or fire.
+            if (this.isDrawerOpen) return;
             if (this.gameMode === 'create' && !this.modalOpen) {
                 this.handleCreateModeClick(event);
             } else if (this.gameMode === 'play' && !this.modalOpen) {
@@ -6108,6 +5934,7 @@ class Game3D {
         // Right-click melee
         document.addEventListener('contextmenu', (e) => e.preventDefault());
         document.addEventListener('mousedown', (event) => {
+            if (this.isDrawerOpen) return;
             if (this.gameMode === 'play' && !this.modalOpen && event.button === 2) {
                 if (this.isTouchDevice) return;
                 if (!this.isPointerLocked) {
@@ -6120,6 +5947,13 @@ class Game3D {
         
         document.addEventListener('pointerlockchange', () => {
             this.isPointerLocked = document.pointerLockElement === document.body;
+            // If lock is re-acquired while the drawer is open (e.g. stray click
+            // racing the drawer open), release it immediately so the cursor stays usable.
+            if (this.isPointerLocked && this.isDrawerOpen) {
+                document.exitPointerLock();
+                document.body.style.cursor = 'default';
+                return;
+            }
             // Cursor visibility based on mode/lock
             if (this.isPointerLocked && this.gameMode === 'play') {
                 document.body.style.cursor = 'none';
@@ -6558,53 +6392,54 @@ class Game3D {
             }
         }
         
-        // Jumping (only if jetpack not active)
-        if (this.keys['Space'] && this.player.onGround && !this.isJetpackActive) {
+        // Space behaves like a jump unless the jetpack is explicitly armed AND
+        // has fuel. This keeps weapons firable mid-flight (mouse only) and lets
+        // the player jump normally when they're not in jetpack mode.
+        const jetpackReady = this.jetpackArmed && this.powerUps.jetpackFuel > 0;
+
+        if (this.keys['Space'] && this.player.onGround && !jetpackReady) {
             this.player.velocity.y = jumpForce;
             this.player.onGround = false;
         }
-        
-        // Jetpack activation (when Space is pressed and player has fuel)
-        if (this.keys['Space'] && this.powerUps.jetpackFuel > 0 && !this.isJetpackActive) {
+
+        if (this.keys['Space'] && jetpackReady && !this.isJetpackActive) {
             this.isJetpackActive = true;
             this.showMessage(this.t('jetpackOnline'));
         }
-        
-        // Jetpack deactivation (when Space is released)
-        if (!this.keys['Space'] && this.isJetpackActive) {
+        if ((!this.keys['Space'] || !this.jetpackArmed) && this.isJetpackActive) {
             this.isJetpackActive = false;
         }
-        
+
         // Apply gravity first
         this.player.velocity.y += gravity * deltaTime;
-        
-        // Jetpack controls (override gravity when active)
-        if (this.isJetpackActive && this.powerUps.jetpackFuel > 0) {
-            const jetpackForce = 40; // Increased force to overcome gravity
-            const fuelConsumption = 15; // per second
-            
+
+        // Jetpack thrust — only when armed, fueled, and Space is held.
+        if (this.isJetpackActive && jetpackReady) {
+            const jetpackForce = 40;       // overcomes gravity
+            const fuelConsumption = 15;    // per second
+
             if (this.keys['Space']) {
-                // Apply upward thrust (stronger than gravity)
                 this.player.velocity.y += jetpackForce * deltaTime;
                 this.powerUps.jetpackFuel -= fuelConsumption * deltaTime;
                 this.jetpackThrust = Math.min(this.jetpackThrust + deltaTime * 3, 1);
-                
-                // Create jetpack particles
                 this.createJetpackParticles();
-                
-                // Debug logging
-                if (Math.random() < 0.01) { // Log occasionally to avoid spam
-                }
             } else {
                 this.jetpackThrust = Math.max(this.jetpackThrust - deltaTime * 2, 0);
             }
-            
-            // Check if fuel is depleted
+
+            // Auto-disarm when fuel runs out so Space stops feeling broken.
             if (this.powerUps.jetpackFuel <= 0) {
                 this.powerUps.jetpackFuel = 0;
                 this.isJetpackActive = false;
+                this.jetpackArmed = false;
                 this.showMessage(this.t('jetpackDepleted'));
+                this._qbSig = null;
+                if (this.isDrawerOpen) this.updateDrawerUI();
             }
+        } else if (this.jetpackThrust > 0) {
+            // Decay residual thrust value even when not actively engaging
+            // (e.g., just disarmed) so particle generation stops cleanly.
+            this.jetpackThrust = Math.max(this.jetpackThrust - deltaTime * 2, 0);
         }
         
         // Update vertical position only here; horizontal was applied above for play mode
@@ -7020,6 +6855,9 @@ class Game3D {
         // Per-frame visual updates that should run at display rate (smooth animation).
         this.updateSwordViewmodel(clampedDeltaTime);
 
+        // Multiplayer: send our state at ~15 Hz, interpolate remote players each frame
+        this.tickMultiplayer(clampedDeltaTime);
+
         this.render();
     }
     
@@ -7134,7 +6972,7 @@ class Game3D {
             if (i >= filledCount) pip.classList.add('lost');
             else if (statusClass) pip.classList.add(statusClass);
         }
-        textEl.textContent = `${hp} / ${maxHp}`;
+        textEl.innerHTML = `<b>${hp}</b> / ${maxHp}`;
     }
 
     updateDamageVignetteUI() {
@@ -7333,9 +7171,10 @@ class Game3D {
     
     clearAllUI() {
         // Remove ALL possible UI elements (except modals, inventory, and crosshair)
+        // NOTE: do not list 'weapon-hud' here — it's the live ammo readout.
         const allUIElements = [
             // Old HUD elements
-            'player-hp-hud', 'weapon-hud', 'top-center-ui', 
+            'player-hp-hud', 'top-center-ui',
             'jetpack-hud', 'enemy-count-hud', 'compass-hud',
             'player-pos', 'player-facing', 'camera-info',
             // Any other possible UI elements
@@ -7360,18 +7199,24 @@ class Game3D {
         // Remove any elements positioned in top-right area that might be interfering
         const allDivs = document.querySelectorAll('div');
         allDivs.forEach(div => {
+            // Never touch the drawer or anything inside it — the inv-panel uses
+            // left:50% and would otherwise be nuked every frame.
+            if (div.closest && div.closest('#inventory-drawer')) return;
+            // Also leave anything inside protected wrappers alone.
+            if (div.closest && div.closest('#settings-modal, #toolbox-modal, #inventory-grid-ui')) return;
+
             const style = window.getComputedStyle(div);
-            if ((style.position === 'absolute' || style.position === 'fixed') && 
+            if ((style.position === 'absolute' || style.position === 'fixed') &&
                 (style.top === '20px' || style.top === '10px' || style.top === '0px' || style.top === '50%') &&
                 (style.right === '20px' || style.right === '10px' || style.right === '0px' || style.left === '50%')) {
-                // Check if it's not one of our protected UI elements
                 if (!div.id || (!div.id.includes('health-ui') &&
                     !div.id.includes('health-bar') &&
                     !div.id.includes('compass-ui') &&
                     !div.id.includes('weapon-powerup-ui') &&
                     !div.id.includes('settings-modal') &&
                     !div.id.includes('toolbox-modal') &&
-                    !div.id.includes('inventory-ui') &&
+                    !div.id.includes('inventory-drawer') &&
+                    !div.id.includes('inventory-grid-ui') &&
                     !div.id.includes('minimap') &&
                     !div.id.includes('objective-banner') &&
                     !div.id.includes('damage-vignette') &&
@@ -7379,7 +7224,8 @@ class Game3D {
                     !div.id.includes('arena-hud') &&
                     !div.id.includes('arena-countdown') &&
                     !div.id.includes('lava-vignette') &&
-                    !div.id.includes('crosshair'))) {
+                    !div.id.includes('crosshair') &&
+                    !div.id.includes('drawer-cursor'))) {
                     div.remove();
                 }
             }
@@ -7434,339 +7280,73 @@ class Game3D {
         hud.style.display = 'block';
     }
     
-    updateWeaponPowerUpUI() {
-        // Only show in play mode
-        if (this.gameMode !== 'play') {
-            return;
-        }
-        
-        const currentWeapon = this.getCurrentWeapon();
-        if (!currentWeapon) return;
-        
-        // Create or update weapon and power-up UI (bottom left)
-        let hud = document.getElementById('weapon-powerup-ui');
-        if (!hud) {
-            hud = document.createElement('div');
-            hud.id = 'weapon-powerup-ui';
-            hud.style.position = 'absolute';
-            hud.style.bottom = '20px';
-            hud.style.left = '20px';
-            hud.style.background = 'linear-gradient(135deg, rgba(0,0,0,0.9), rgba(42,24,8,0.9))';
-            hud.style.border = '2px solid #ffb347';
-            hud.style.borderRadius = '12px';
-            hud.style.padding = '16px 20px';
-            hud.style.color = '#ffb347';
-            hud.style.fontFamily = 'Courier New, monospace';
-            hud.style.fontSize = '14px';
-            hud.style.fontWeight = 'bold';
-            hud.style.zIndex = '1000';
-            hud.style.minWidth = '280px';
-            hud.style.boxShadow = '0 4px 20px rgba(255,179,71,0.3)';
-            document.body.appendChild(hud);
-        }
-        
-        // Weapon stats
-        const weaponStats = [];
-        weaponStats.push(`DMG: ${currentWeapon.damage}`);
-        weaponStats.push(`RNG: ${currentWeapon.range}`);
-        weaponStats.push(`CD: ${currentWeapon.cooldown}s`);
-        if (currentWeapon.ammoCost > 0) {
-            weaponStats.push(`AMMO: ${currentWeapon.ammoCost}`);
-        }
-        
-        // Ammo count
-        const ammoCount = this.inventory.ammo || 0;
-        let ammoStatus, ammoColor;
-        if (this.isReloading) {
-            ammoStatus = 'RELOADING...';
-            ammoColor = '#ffaa00';
-        } else if (ammoCount > 0) {
-            ammoStatus = `${ammoCount}`;
-            ammoColor = '#ffb347';
-        } else {
-            ammoStatus = 'NO AMMO';
-            ammoColor = '#ff4444';
-        }
-        
-        // Active power-ups
-        const activePowerUps = [];
-        if (this.powerUps.speedBoost > 0) {
-            activePowerUps.push(`⚡ ${this.t('speedBoost')} (${this.powerUps.speedBoost})`);
-        }
-        if (this.powerUps.healthRegen > 0) {
-            activePowerUps.push(`❤️ ${this.t('healthRegen')} (${this.powerUps.healthRegen})`);
-        }
-        if (this.powerUps.weaponBuff > 0) {
-            activePowerUps.push(`⚔️ ${this.t('weaponBuff')} (${this.powerUps.weaponBuff})`);
-        }
-        if (this.powerUps.jetpackFuel > 0) {
-            activePowerUps.push(`🚀 ${this.t('jetpackFuel')} (${Math.floor(this.powerUps.jetpackFuel)})`);
-        }
-        
-        // Weapon cooldown indicator
-        const cooldown = this.weaponCooldowns[currentWeapon.name] || 0;
-        const cooldownPercent = Math.max(0, (cooldown / currentWeapon.cooldown) * 100);
-        const cooldownColor = cooldown > 0 ? '#ff4444' : '#ffb347';
-        
-        hud.innerHTML = `
-            <div style="margin-bottom: 16px;">
-                <div style="text-align: center; margin-bottom: 8px; font-size: 12px; opacity: 0.8; letter-spacing: 1px;">${this.t('currentWeapon').toUpperCase()}</div>
-                <div style="text-align: center; font-size: 20px; color: #ffb347; margin-bottom: 4px;">${currentWeapon.icon} ${currentWeapon.name}</div>
-                <div style="text-align: center; font-size: 11px; opacity: 0.7; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px;">${currentWeapon.type}</div>
-                
-                <!-- Weapon Stats -->
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-bottom: 8px; font-size: 11px;">
-                    ${weaponStats.map(stat => `<div style="text-align: center; padding: 2px 4px; background: rgba(255,179,71,0.1); border-radius: 4px;">${stat}</div>`).join('')}
-                </div>
-                
-                <!-- Ammo Status -->
-                <div style="text-align: center; margin-bottom: 8px;">
-                    <div style="font-size: 12px; opacity: 0.8; margin-bottom: 2px;">AMMO</div>
-                    <div style="font-size: 16px; color: ${ammoColor}; font-weight: bold;">${ammoStatus}</div>
-                </div>
-                
-                <!-- Cooldown/Reload Bar -->
-                <div style="margin-bottom: 8px;">
-                    <div style="font-size: 10px; opacity: 0.7; margin-bottom: 2px; text-align: center;">
-                        ${this.isReloading ? 'RELOADING' : 'READY'}
-                    </div>
-                    <div style="width: 100%; height: 4px; background: rgba(0,0,0,0.5); border-radius: 2px; overflow: hidden;">
-                        ${this.isReloading ? `
-                            <div style="width: ${((2.0 - this.reloadTime) / 2.0) * 100}%; height: 100%; background: #ffaa00; transition: width 0.1s;"></div>
-                        ` : `
-                            <div style="width: ${100 - cooldownPercent}%; height: 100%; background: ${cooldownColor}; transition: width 0.1s;"></div>
-                        `}
-                    </div>
-                </div>
-            </div>
-            
-            ${activePowerUps.length > 0 ? `
-                <div style="border-top: 1px solid rgba(255,179,71,0.3); padding-top: 12px;">
-                    <div style="text-align: center; margin-bottom: 8px; font-size: 12px; opacity: 0.8; letter-spacing: 1px;">${this.t('active')} ${this.t('powerUps')}</div>
-                    <div style="font-size: 12px; line-height: 1.6;">
-                        ${activePowerUps.map(powerup => `
-                            <div style="display: flex; justify-content: space-between; align-items: center; padding: 2px 0; border-bottom: 1px solid rgba(255,179,71,0.1);">
-                                <span>${powerup.split(' (')[0]}</span>
-                                <span style="opacity: 0.7;">${powerup.split(' (')[1]?.replace(')', '') || ''}</span>
-                            </div>
-                        `).join('')}
-                    </div>
-                </div>
-            ` : ''}
-        `;
-        hud.style.display = 'block';
-    }
-    
+    // Stub kept because the ammo-pickup apply() calls it; the real HUD is the
+    // event-driven one rendered by renderHUD().
+    updateWeaponPowerUpUI() { /* deprecated — see renderHUD */ }
+
     // ===== New HUD System with Cached DOM References =====
-    
+
     mountHUD() {
-        // Create and cache DOM references for weapon HUD
+        // Minimal weapon HUD: a big ammo count (or ∞ for free-fire) with a
+        // tiny weapon name underneath. Everything else moved out — weapon
+        // stats, cooldown bar, power-up list, etc. — they were noise.
         this.hudElements = {};
-        
-        // Create weapon HUD container
+
         const hud = document.createElement('div');
         hud.id = 'weapon-hud';
-        hud.style.position = 'absolute';
-        hud.style.bottom = '20px';
-        hud.style.left = '20px';
-        hud.style.background = 'linear-gradient(135deg, rgba(0,0,0,0.9), rgba(42,24,8,0.9))';
-        hud.style.border = '2px solid #ffb347';
-        hud.style.borderRadius = '12px';
-        hud.style.padding = '16px 20px';
-        hud.style.color = '#ffb347';
-        hud.style.fontFamily = 'Courier New, monospace';
-        hud.style.fontSize = '14px';
-        hud.style.fontWeight = 'bold';
-        hud.style.zIndex = '1000';
-        hud.style.minWidth = '280px';
-        hud.style.boxShadow = '0 4px 20px rgba(255,179,71,0.3)';
         hud.style.display = 'none';
         document.body.appendChild(hud);
-        
-        this.hudElements.container = hud;
-        this.hudElements.weaponName = document.createElement('div');
-        this.hudElements.weaponType = document.createElement('div');
-        this.hudElements.weaponStats = document.createElement('div');
-        this.hudElements.ammoStatus = document.createElement('div');
-        this.hudElements.cooldownBar = document.createElement('div');
-        this.hudElements.powerUps = document.createElement('div');
-        
-        // Set up initial structure
+
         hud.innerHTML = `
-            <div class="weapon-header">
-                <div class="weapon-title"></div>
-                <div class="weapon-name"></div>
-                <div class="weapon-type"></div>
-            </div>
-            <div class="weapon-stats"></div>
-            <div class="ammo-section">
-                <div class="ammo-label">AMMO</div>
-                <div class="ammo-status"></div>
-            </div>
-            <div class="cooldown-section">
-                <div class="cooldown-label"></div>
-                <div class="cooldown-bar"></div>
-            </div>
-            <div class="powerups-section"></div>
+            <div class="wh-ammo"></div>
+            <div class="wh-name"></div>
         `;
-        
-        // Cache references to the actual elements
-        this.hudElements.weaponTitle = hud.querySelector('.weapon-title');
-        this.hudElements.weaponName = hud.querySelector('.weapon-name');
-        this.hudElements.weaponType = hud.querySelector('.weapon-type');
-        this.hudElements.weaponStats = hud.querySelector('.weapon-stats');
-        this.hudElements.ammoStatus = hud.querySelector('.ammo-status');
-        this.hudElements.cooldownLabel = hud.querySelector('.cooldown-label');
-        this.hudElements.cooldownBar = hud.querySelector('.cooldown-bar');
-        this.hudElements.powerUps = hud.querySelector('.powerups-section');
-        
-        // Add CSS styles
-        const style = document.createElement('style');
-        style.textContent = `
-            .weapon-header { margin-bottom: 16px; }
-            .weapon-title { text-align: center; margin-bottom: 8px; font-size: 12px; opacity: 0.8; letter-spacing: 1px; }
-            .weapon-name { text-align: center; font-size: 20px; color: #ffb347; margin-bottom: 4px; }
-            .weapon-type { text-align: center; font-size: 11px; opacity: 0.7; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
-            .weapon-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-bottom: 8px; font-size: 11px; }
-            .stat-item { text-align: center; padding: 2px 4px; background: rgba(255,179,71,0.1); border-radius: 4px; }
-            .ammo-section { text-align: center; margin-bottom: 8px; }
-            .ammo-label { font-size: 12px; opacity: 0.8; margin-bottom: 2px; }
-            .ammo-status { font-size: 16px; font-weight: bold; }
-            .cooldown-section { margin-bottom: 8px; }
-            .cooldown-label { font-size: 10px; opacity: 0.7; margin-bottom: 2px; text-align: center; }
-            .cooldown-bar { width: 100%; height: 4px; background: rgba(0,0,0,0.5); border-radius: 2px; overflow: hidden; }
-            .cooldown-fill { height: 100%; transition: width 0.1s; }
-            .powerups-section { border-top: 1px solid rgba(255,179,71,0.3); padding-top: 12px; }
-            .powerup-item { display: flex; justify-content: space-between; align-items: center; padding: 2px 0; border-bottom: 1px solid rgba(255,179,71,0.1); font-size: 12px; line-height: 1.6; }
-        `;
-        document.head.appendChild(style);
-        
-        // Set up event listener for UI updates
+
+        this.hudElements.container = hud;
+        this.hudElements.ammo = hud.querySelector('.wh-ammo');
+        this.hudElements.name = hud.querySelector('.wh-name');
+
+        // CSS lives in style.css; ID #weapon-hud is the selector hook.
+
         this.on('ui:update', (model) => {
             this.renderHUD(model);
         });
     }
-    
+
     renderHUD(model) {
         if (!model || !this.hudElements.container) return;
-        
-        // Only show in play mode
+
         if (model.gameMode !== 'play') {
             this.hudElements.container.style.display = 'none';
             return;
         }
-        
-        this.hudElements.container.style.display = 'block';
-        
-        // Update weapon info
-        this.hudElements.weaponTitle.textContent = this.t('currentWeapon').toUpperCase();
-        this.hudElements.weaponName.textContent = `${model.weapon.icon} ${model.weapon.name}`;
-        this.hudElements.weaponType.textContent = model.weapon.type;
-        
-        // Update weapon stats
-        const weaponStats = [];
-        weaponStats.push(`DMG: ${model.weapon.damage}`);
-        weaponStats.push(`RNG: ${model.weapon.range}`);
-        weaponStats.push(`CD: ${model.weapon.cooldown}s`);
-        if (model.weapon.ammoCost > 0) {
-            // The carry cap is the meaningful number for the player, not the
-            // per-shot cost (always 1 for the current arsenal).
-            weaponStats.push(`MAX: ${this.AMMO_MAX}`);
-        }
 
-        this.hudElements.weaponStats.innerHTML = weaponStats.map(stat =>
-            `<div class="stat-item">${stat}</div>`
-        ).join('');
+        const w = model.weapon;
+        const isRanged = w.type === 'ranged' && w.ammoCost > 0;
+        const isFreeRanged = w.type === 'ranged' && w.ammoCost === 0;
 
-        // Update ammo status. Melee = "—", free-fire ranged = "∞", real ranged = "n / max".
-        let ammoStatus, ammoColor;
-        const isRanged = model.weapon.type === 'ranged' && model.weapon.ammoCost > 0;
-        const isFreeRanged = model.weapon.type === 'ranged' && model.weapon.ammoCost === 0;
+        let ammoText, stateClass;
         if (model.isReloading) {
-            ammoStatus = 'RELOADING…';
-            ammoColor = '#ffaa00';
-        } else if (isFreeRanged) {
-            ammoStatus = '∞';
-            ammoColor = '#ffd28a';
-        } else if (!isRanged) {
-            ammoStatus = '—';
-            ammoColor = 'rgba(255,179,71,0.55)';
+            ammoText = '…';
+            stateClass = 'wh-reload';
+        } else if (isFreeRanged || !isRanged) {
+            // Sword (melee) and free-fire ranged both show ∞ — neither tracks ammo.
+            ammoText = '∞';
+            stateClass = 'wh-infinite';
         } else if (model.ammoCount > 0) {
-            ammoStatus = `${model.ammoCount} / ${this.AMMO_MAX}`;
+            ammoText = String(model.ammoCount);
             const pct = model.ammoCount / this.AMMO_MAX;
-            ammoColor = pct > 0.5 ? '#ffd28a' : pct > 0.2 ? '#ffd34a' : '#ff8a5a';
+            stateClass = pct > 0.5 ? 'wh-full' : pct > 0.2 ? 'wh-low' : 'wh-crit';
         } else {
-            ammoStatus = 'NO AMMO';
-            ammoColor = '#ff5a5a';
+            ammoText = '0';
+            stateClass = 'wh-empty';
         }
 
-        this.hudElements.ammoStatus.textContent = ammoStatus;
-        this.hudElements.ammoStatus.style.color = ammoColor;
-        
-        // Update cooldown bar — three states: reloading, cooling down, ready,
-        // and a fourth: ranged weapon with zero ammo (looks identical to "ready"
-        // in the old code, which lies to the player).
-        const rangedDry = isRanged && model.ammoCount <= 0 && !model.isReloading;
-        if (model.isReloading) {
-            this.hudElements.cooldownLabel.textContent = 'RELOADING';
-        } else if (rangedDry) {
-            this.hudElements.cooldownLabel.textContent = 'EMPTY — PRESS R';
-        } else if (model.cooldown > 0) {
-            this.hudElements.cooldownLabel.textContent = 'COOLDOWN';
-        } else {
-            this.hudElements.cooldownLabel.textContent = 'READY';
-        }
-
-        const cooldownFill = this.hudElements.cooldownBar.querySelector('.cooldown-fill') ||
-            (() => {
-                const fill = document.createElement('div');
-                fill.className = 'cooldown-fill';
-                this.hudElements.cooldownBar.appendChild(fill);
-                return fill;
-            })();
-
-        if (model.isReloading) {
-            cooldownFill.style.width = `${model.reloadProgress * 100}%`;
-            cooldownFill.style.background = '#ffaa00';
-        } else if (rangedDry) {
-            cooldownFill.style.width = '0%';
-            cooldownFill.style.background = '#ff5a5a';
-        } else if (model.cooldown > 0) {
-            cooldownFill.style.width = `${100 - model.cooldownPercent}%`;
-            cooldownFill.style.background = '#ff4444';
-        } else {
-            cooldownFill.style.width = '100%';
-            cooldownFill.style.background = '#ffb347';
-        }
-        
-        // Update power-ups
-        const activePowerUps = [];
-        if (model.powerUps.speedBoost > 0) {
-            activePowerUps.push(`⚡ ${this.t('speedBoost')} (${model.powerUps.speedBoost})`);
-        }
-        if (model.powerUps.healthRegen > 0) {
-            activePowerUps.push(`❤️ ${this.t('healthRegen')} (${model.powerUps.healthRegen})`);
-        }
-        if (model.powerUps.weaponBuff > 0) {
-            activePowerUps.push(`⚔️ ${this.t('weaponBuff')} (${model.powerUps.weaponBuff})`);
-        }
-        if (model.powerUps.jetpackFuel > 0) {
-            activePowerUps.push(`🚀 ${this.t('jetpackFuel')} (${model.powerUps.jetpackFuel})`);
-        }
-        
-        if (activePowerUps.length > 0) {
-            this.hudElements.powerUps.innerHTML = `
-                <div style="text-align: center; margin-bottom: 8px; font-size: 12px; opacity: 0.8; letter-spacing: 1px;">${this.t('active')} ${this.t('powerUps')}</div>
-                ${activePowerUps.map(powerup => `
-                    <div class="powerup-item">
-                        <span>${powerup.split(' (')[0]}</span>
-                        <span style="opacity: 0.7;">${powerup.split(' (')[1]?.replace(')', '') || ''}</span>
-                    </div>
-                `).join('')}
-            `;
-        } else {
-            this.hudElements.powerUps.innerHTML = '';
-        }
+        const hud = this.hudElements.container;
+        hud.style.display = 'block';
+        hud.className = stateClass;
+        this.hudElements.ammo.textContent = ammoText;
+        this.hudElements.name.textContent = w.name;
     }
     
     updateControlsUI() {
@@ -7810,7 +7390,7 @@ class Game3D {
         const movementControls = [
             'WASD - Move',
             'Mouse - Look Around',
-            'Space - Jump/Fly'
+            this.jetpackArmed ? 'Space - Jetpack (hold)' : 'Space - Jump'
         ];
         
         // Weapon controls
@@ -7854,7 +7434,9 @@ class Game3D {
         // Special states
         const specialStates = [];
         if (isJetpackActive) {
-            specialStates.push('🚀 Jetpack Active');
+            specialStates.push('🚀 Jetpack thrusting');
+        } else if (this.jetpackArmed) {
+            specialStates.push('🚀 Jetpack armed (Space to fly)');
         }
         if (isReloading) {
             specialStates.push('🔄 Reloading...');
@@ -7918,7 +7500,7 @@ class Game3D {
         // and rebuilding clobbers in-flight drag operations.
         const layout = this.quickbarLayout || this.defaultQuickbarLayout();
         const activeWeaponId = this.player.weapons[this.player.currentWeaponIndex];
-        const sigParts = [activeWeaponId || ''];
+        const sigParts = [activeWeaponId || '', this.jetpackArmed ? 'J' : '-'];
         for (const id of layout) {
             if (!id) { sigParts.push('_'); continue; }
             sigParts.push(`${id}:${this.getItemCount(id)}:${this.isItemOwned(id) ? 1 : 0}`);
@@ -7969,6 +7551,8 @@ class Game3D {
 
             const isOwned = item.type !== 'empty' && this.isItemOwned(item.id);
             const isSelected = item.type === 'weapon' && item.id === activeWeaponId;
+            const isArmed = item.id === 'jetpack' && this.jetpackArmed;
+            if (isArmed) slot.classList.add('qb-armed');
 
             if (item.type === 'empty') {
                 slot.classList.add('qb-empty');
@@ -7993,34 +7577,15 @@ class Game3D {
                 }
             });
 
-            // Drag & drop reordering
-            slot.addEventListener('dragstart', (e) => {
-                if (!slot.draggable) return;
-                this.dragStartSlot = index;
-                this.draggedItem = item.id;
-                e.dataTransfer.effectAllowed = 'move';
-                slot.style.opacity = '0.5';
-            });
-            slot.addEventListener('dragend', () => {
-                slot.style.opacity = '';
-                this.draggedItem = null;
-                this.dragStartSlot = null;
-            });
-            slot.addEventListener('dragover', (e) => {
+            // Right-click clears the slot.
+            slot.addEventListener('contextmenu', (e) => {
                 e.preventDefault();
-                e.dataTransfer.dropEffect = 'move';
-                slot.classList.add('qb-drop-target');
+                e.stopPropagation();
+                if (item.type === 'empty') return;
+                this.clearQuickbarSlot(index);
             });
-            slot.addEventListener('dragleave', () => {
-                slot.classList.remove('qb-drop-target');
-            });
-            slot.addEventListener('drop', (e) => {
-                e.preventDefault();
-                slot.classList.remove('qb-drop-target');
-                if (this.draggedItem && this.dragStartSlot !== null) {
-                    this.swapQuickbarItems(this.dragStartSlot, index);
-                }
-            });
+
+            this.wireQuickbarDnD(slot, index, item.type !== 'empty');
 
             hud.appendChild(slot);
         });
@@ -8038,6 +7603,13 @@ class Game3D {
     }
     
     selectGridItem(item) {
+        // Jetpack is a utility "mode" — clicking it toggles arm without
+        // changing the active weapon. Space then engages thrust (when fuel > 0).
+        if (item.id === 'jetpack') {
+            this.toggleJetpackArmed();
+            return;
+        }
+
         if (item.type === 'weapon') {
             const weaponIndex = this.player.weapons.indexOf(item.id);
             if (weaponIndex !== -1) {
@@ -8051,6 +7623,24 @@ class Game3D {
             this.activateSelectedItem(item.id);
             this.updateInventoryGridUI && this.updateInventoryGridUI();
         }
+    }
+
+    toggleJetpackArmed() {
+        this.jetpackArmed = !this.jetpackArmed;
+        if (!this.jetpackArmed) {
+            // Disarming mid-flight cuts thrust so the player falls naturally.
+            this.isJetpackActive = false;
+            this.jetpackThrust = 0;
+            this.showMessage('Jetpack disarmed — Space jumps');
+        } else if (this.powerUps.jetpackFuel <= 0) {
+            this.showMessage('Jetpack armed — no fuel');
+        } else {
+            this.showMessage('Jetpack armed — hold Space to fly');
+        }
+        this.audio && this.audio.play('uiClick');
+        this._qbSig = null;
+        this.updateInventoryGridUI && this.updateInventoryGridUI();
+        if (this.isDrawerOpen) this.updateDrawerUI();
     }
     
     selectGridItemByShortcut(shortcut) {
@@ -8074,190 +7664,373 @@ class Game3D {
     toggleMoreDrawer() {
         this.isDrawerOpen = !this.isDrawerOpen;
         this.updateDrawerUI();
-        
+
         if (this.isDrawerOpen) {
-            // Exit pointer lock when drawer opens
-            if (document.pointerLockElement) {
-                document.exitPointerLock();
-            }
-            // Show cursor and style it
-            this.showDrawerCursor();
-            this.showMessage('Drawer opened - Click items to assign to quickbar');
+            // Release pointer lock so the cursor is visible and usable.
+            if (document.pointerLockElement) document.exitPointerLock();
+            document.body.style.cursor = 'default';
+            this.showMessage('Drawer opened — drag items to a quickbar slot');
         } else {
-            this.hideDrawerCursor();
+            document.body.style.cursor = '';
             this.showMessage('Drawer closed');
         }
     }
     
     updateDrawerUI() {
-        // Create or update drawer UI
         let drawer = document.getElementById('inventory-drawer');
         if (!drawer) {
             drawer = document.createElement('div');
             drawer.id = 'inventory-drawer';
-            drawer.style.position = 'fixed';
-            drawer.style.bottom = this.isDrawerOpen ? '0px' : '-400px';
-            drawer.style.left = '0';
-            drawer.style.right = '0';
-            drawer.style.height = '400px';
-            drawer.style.background = 'linear-gradient(135deg, rgba(0,0,0,0.95), rgba(42,24,8,0.95))';
-            drawer.style.borderTop = '3px solid #ffb347';
-            drawer.style.zIndex = '2000';
-            drawer.style.transition = 'bottom 0.3s ease';
-            drawer.style.overflowY = 'auto';
-            drawer.style.padding = '20px';
+            drawer.classList.add('inv-drawer');
             document.body.appendChild(drawer);
+
+            // Click outside the inner panel closes the drawer.
+            drawer.addEventListener('click', (e) => {
+                if (e.target === drawer) {
+                    this.isDrawerOpen = false;
+                    this.hideDrawerCursor();
+                    this.updateDrawerUI();
+                }
+            });
         }
-        
-        // Update position
-        const newBottom = this.isDrawerOpen ? '0px' : '-400px';
-        drawer.style.bottom = newBottom;
-        
-        if (!this.isDrawerOpen) {
-            return;
-        }
-        
-        // Pull from the shared registry — no separate item table to drift.
+
+        drawer.classList.toggle('inv-drawer-open', this.isDrawerOpen);
+        if (!this.isDrawerOpen) return;
+
+        if (!this.drawerFilter) this.drawerFilter = 'owned';
+
         const reg = this.getItemRegistry();
         const weaponItems = reg.weapons.map(d => ({ ...d, type: 'weapon' }));
         const consumableItems = reg.consumables.map(d => ({ ...d, type: 'item' }));
-        
+
+        const ownedOnly = this.drawerFilter === 'owned';
+        const filt = (it) => !ownedOnly || this.isItemOwned(it.id);
+        const visibleWeapons = weaponItems.filter(filt);
+        const visibleConsumables = consumableItems.filter(filt);
+
+        // Stats header
+        const hp = this.player.hp ?? 0;
+        const maxHp = this.player.maxHp ?? 100;
+        const ammo = this.inventory.ammo;
+        const ammoMax = this.AMMO_MAX;
+        const fuel = Math.floor(this.powerUps.jetpackFuel);
+        const flags = this.inventory.flags;
+
         drawer.innerHTML = `
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-                <h3 style="color: #ffb347; margin: 0; font-family: 'Courier New', monospace;">${this.t('inventoryDrawer')}</h3>
-                <button id="close-drawer" style="background: #5a3a14; color: #ffb347; border: 1px solid #ffb347; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-family: 'Courier New', monospace;">${this.t('close')}</button>
-            </div>
+            <div class="inv-panel">
+                <div class="drawer-header">
+                    <div class="drawer-title">
+                        <span class="dt-icon">🎒</span>
+                        <h3>${this.t('inventoryDrawer')}</h3>
+                    </div>
+                    <div class="drawer-stats">
+                        <span class="ds-chip ds-hp" title="Health"><b>HP</b> ${hp}/${maxHp}</span>
+                        <span class="ds-chip ds-ammo" title="Ammo"><b>🔸</b> ${ammo}/${ammoMax}</span>
+                        <span class="ds-chip ds-fuel" title="Jetpack fuel"><b>🚀</b> ${fuel}</span>
+                        <span class="ds-chip ds-flags" title="Flags"><b>🏁</b> ${flags}</span>
+                    </div>
+                    <div class="drawer-actions">
+                        <button class="df-pill ${ownedOnly ? '' : 'df-pill-on'}" data-filter="all">All</button>
+                        <button class="df-pill ${ownedOnly ? 'df-pill-on' : ''}" data-filter="owned">Owned</button>
+                        <button class="df-btn" id="reset-quickbar" title="Restore default loadout">↺ Reset</button>
+                        <button class="df-btn df-btn-close" id="close-drawer">${this.t('close')} (Esc)</button>
+                    </div>
+                </div>
 
-            <div style="margin-bottom: 20px;">
-                <h4 style="color: #ffb347; margin: 0 0 10px 0; font-family: 'Courier New', monospace;">${this.t('weapons')}</h4>
-                <div id="weapon-grid" style="display: grid; grid-template-columns: repeat(auto-fill, 50px); gap: 8px; margin-bottom: 20px;"></div>
-            </div>
+                <div class="drawer-strip-wrap">
+                    <div class="drawer-strip-label">
+                        <span>Quickbar — target slot <b>${this.selectedDrawerSlot + 1}</b></span>
+                        <span class="dsl-hint">drag onto a slot · right-click to clear · drag out to store</span>
+                    </div>
+                    <div id="drawer-slot-strip" class="drawer-slot-strip"></div>
+                </div>
 
-            <div>
-                <h4 style="color: #ffb347; margin: 0 0 10px 0; font-family: 'Courier New', monospace;">${this.t('consumables')}</h4>
-                <div id="consumable-grid" style="display: grid; grid-template-columns: repeat(auto-fill, 50px); gap: 8px;"></div>
-            </div>
+                <div class="drawer-body">
+                    <div class="drawer-section">
+                        <h4>${this.t('weapons')} <span class="ds-count">${visibleWeapons.length}/${weaponItems.length}</span></h4>
+                        <div id="weapon-grid" class="drawer-grid">
+                            ${visibleWeapons.length ? '' : `<div class="drawer-empty">No weapons${ownedOnly ? ' picked up yet' : ''}.</div>`}
+                        </div>
+                    </div>
 
-            <div style="margin-top: 20px; padding: 10px; background: rgba(255,179,71,0.08); border: 1px solid rgba(255,179,71,0.3); border-radius: 8px; font-size: 12px; color: #ffb347;">
-                <strong>Instructions:</strong><br>
-                • Click items to assign to selected quickbar slot<br>
-                • Drag items to quickbar to assign<br>
-                • Drag items in quickbar to rearrange<br>
-                • Use Tab/Arrow keys to navigate, Enter to assign
+                    <div class="drawer-section">
+                        <h4>${this.t('consumables')} <span class="ds-count">${visibleConsumables.length}/${consumableItems.length}</span></h4>
+                        <div id="consumable-grid" class="drawer-grid">
+                            ${visibleConsumables.length ? '' : `<div class="drawer-empty">No consumables${ownedOnly ? ' picked up yet' : ''}.</div>`}
+                        </div>
+                    </div>
+                </div>
+
+                <div class="drawer-help">
+                    <span><kbd>1</kbd>–<kbd>9</kbd> pick target slot · <kbd>Tab</kbd>/<kbd>⇧Tab</kbd> cycle · <kbd>Del</kbd> clear · <kbd>Esc</kbd>/<kbd>M</kbd> close</span>
+                </div>
             </div>
         `;
-        
-        // Add close button handler
-        const closeBtn = drawer.querySelector('#close-drawer');
-        closeBtn.addEventListener('click', () => {
+
+        // Wire up
+        drawer.querySelector('#close-drawer').addEventListener('click', () => {
             this.isDrawerOpen = false;
             this.hideDrawerCursor();
             this.updateDrawerUI();
         });
-        
-        // Create weapon items
+
+        drawer.querySelector('#reset-quickbar').addEventListener('click', () => {
+            this.audio && this.audio.play('uiClick');
+            this.quickbarLayout = this.defaultQuickbarLayout();
+            this.saveQuickbarLayout();
+            this._qbSig = null;
+            this.updateInventoryGridUI();
+            this.updateDrawerUI();
+            this.showMessage('Quickbar reset to default');
+        });
+
+        drawer.querySelectorAll('.df-pill').forEach(btn => {
+            btn.addEventListener('click', () => {
+                this.drawerFilter = btn.dataset.filter;
+                this.audio && this.audio.play('uiClick');
+                this.updateDrawerUI();
+            });
+        });
+
+        this.renderDrawerSlotStrip(drawer.querySelector('#drawer-slot-strip'));
+
         const weaponGrid = drawer.querySelector('#weapon-grid');
-        weaponItems.forEach(item => {
-            const itemEl = this.createDrawerItem(item);
-            weaponGrid.appendChild(itemEl);
-        });
-        
-        // Create consumable items
+        visibleWeapons.forEach(item => weaponGrid.appendChild(this.createDrawerItem(item)));
+
         const consumableGrid = drawer.querySelector('#consumable-grid');
-        consumableItems.forEach(item => {
-            const itemEl = this.createDrawerItem(item);
-            consumableGrid.appendChild(itemEl);
-        });
-        
-        // Add keyboard navigation
+        visibleConsumables.forEach(item => consumableGrid.appendChild(this.createDrawerItem(item)));
+
         this.setupDrawerKeyboardNavigation();
+    }
+
+    // Short effect blurb for an item card (e.g. "+25 HP", "15 dmg · range 2.5").
+    itemEffectText(item) {
+        if (item.type === 'weapon') {
+            const w = this.WEAPON_STATS[item.id];
+            if (!w) return '';
+            return `${w.damage} dmg · ${w.type === 'melee' ? `reach ${w.range}` : `range ${w.range}`}`;
+        }
+        const def = this.ITEM_DEFS[item.id];
+        if (!def) return '';
+        const suffix = (def.labelSuffix || '').trim();
+        return suffix || (def.autoApply ? 'auto' : '');
+    }
+
+    renderDrawerSlotStrip(container) {
+        if (!container) return;
+        container.innerHTML = '';
+        const reg = this.getItemRegistry();
+        const byId = Object.fromEntries(reg.all.map(d => [d.id, d]));
+        const activeWeaponId = this.player.weapons[this.player.currentWeaponIndex];
+
+        for (let i = 0; i < 9; i++) {
+            const itemId = this.quickbarLayout[i];
+            const def = itemId ? byId[itemId] : null;
+            const slot = document.createElement('div');
+            slot.className = 'qb-slot qb-strip';
+            slot.dataset.slot = String(i);
+
+            if (!def) slot.classList.add('qb-empty');
+            else if (!this.isItemOwned(itemId)) slot.classList.add('qb-unavail');
+
+            if (def && def.category === 'weapon' && itemId === activeWeaponId) {
+                slot.classList.add('qb-selected');
+            }
+            if (itemId === 'jetpack' && this.jetpackArmed) {
+                slot.classList.add('qb-armed');
+            }
+            if (i === this.selectedDrawerSlot) {
+                slot.classList.add('qb-target');
+            }
+
+            const count = def ? this.getItemCount(itemId) : 0;
+            const showCount = def && def.category !== 'weapon' && count > 0;
+
+            slot.innerHTML = `
+                <span class="qb-key">${i + 1}</span>
+                <span class="qb-icon">${def ? def.icon : ''}</span>
+                ${showCount ? `<span class="qb-count">${count}</span>` : ''}
+            `;
+            slot.title = def ? def.name : `Empty slot ${i + 1}`;
+
+            // Click selects this slot as the assignment target.
+            slot.addEventListener('click', () => {
+                this.selectedDrawerSlot = i;
+                this.audio && this.audio.play('uiClick');
+                this.renderDrawerSlotStrip(container);
+                this.updateDrawerSelection();
+            });
+            slot.addEventListener('contextmenu', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                if (!def) return;
+                this.clearQuickbarSlot(i);
+            });
+
+            this.wireQuickbarDnD(slot, i, !!def);
+            container.appendChild(slot);
+        }
     }
     
     createDrawerItem(item) {
         const itemEl = document.createElement('div');
         itemEl.className = 'drawer-item';
         itemEl.dataset.itemId = item.id;
-        itemEl.style.width = '50px';
-        itemEl.style.height = '50px';
-        itemEl.style.border = '2px solid #ffb347';
-        itemEl.style.borderRadius = '8px';
-        itemEl.style.background = 'linear-gradient(135deg, rgba(0,0,0,0.8), rgba(42,24,8,0.8))';
-        itemEl.style.display = 'flex';
-        itemEl.style.alignItems = 'center';
-        itemEl.style.justifyContent = 'center';
-        itemEl.style.cursor = 'pointer';
-        itemEl.style.transition = 'all 0.2s ease';
-        itemEl.style.position = 'relative';
         itemEl.draggable = true;
-        
+
         const isOwned = this.isItemOwned(item.id);
         const count = this.getItemCount(item.id);
+        const inBar = this.quickbarLayout.includes(item.id);
+        const slotIdx = inBar ? this.quickbarLayout.indexOf(item.id) : -1;
+        const effect = this.itemEffectText(item);
 
         if (!isOwned) {
-            itemEl.style.opacity = '0.3';
-            itemEl.style.filter = 'grayscale(100%)';
-            itemEl.style.cursor = 'not-allowed';
+            itemEl.classList.add('drawer-item-locked');
             itemEl.draggable = false;
         }
+        if (inBar) itemEl.classList.add('drawer-item-assigned');
+        if (item.type === 'weapon') itemEl.classList.add('drawer-item-weapon');
 
         const showCount = item.type !== 'weapon' && count > 0;
-        itemEl.title = `${item.name}${showCount ? ` (${count})` : ''}`;
+        const slotLabel = slotIdx >= 0 ? `slot ${slotIdx + 1}` : '';
+        itemEl.title = `${item.name}${effect ? ` — ${effect}` : ''}${showCount ? ` (${count})` : ''}${inBar ? ` · in ${slotLabel}` : ''}${!isOwned ? ' · not picked up' : ''}`;
+
         itemEl.innerHTML = `
-            <div style="font-size: 24px; opacity: ${isOwned ? '1' : '0.3'};">
-                ${item.icon}
+            <div class="di-row">
+                <div class="di-icon">${item.icon}</div>
+                ${showCount ? `<div class="di-count">×${count}</div>` : ''}
+                ${inBar ? `<div class="di-pin" title="In quickbar ${slotLabel}">${slotIdx + 1}</div>` : ''}
             </div>
-            ${showCount ? `<div style="position: absolute; bottom: 2px; right: 4px; color: #ffb347; font-size: 11px; font-weight: bold; font-family: monospace; text-shadow: 0 0 2px #000;">${count}</div>` : ''}
+            <div class="di-name">${item.name}</div>
+            ${effect ? `<div class="di-effect">${effect}</div>` : ''}
+            ${!isOwned ? `<div class="di-locked">locked</div>` : ''}
         `;
-        
-        // Add click handler
+
         itemEl.addEventListener('click', () => {
-            if (isOwned) {
-                this.assignItemToQuickbar(item.id);
+            if (!isOwned) {
+                this.showMessage(`${item.name} — find one in the world first`);
+                return;
             }
+            this.audio && this.audio.play('uiClick');
+            this.assignItemToQuickbar(item.id);
+        });
+        itemEl.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (!inBar) return;
+            this.clearQuickbarSlot(slotIdx);
         });
         
         // Add drag handlers
         itemEl.addEventListener('dragstart', (e) => {
             if (isOwned) {
                 this.draggedItem = item.id;
-                e.dataTransfer.effectAllowed = 'move';
+                this.dragSource = 'drawer';
+                this.dragStartSlot = null;
+                try { e.dataTransfer.effectAllowed = 'move'; } catch (_) {}
+                try { e.dataTransfer.setData('text/plain', item.id); } catch (_) {}
                 itemEl.style.opacity = '0.5';
             }
         });
-        
+
         itemEl.addEventListener('dragend', () => {
-            itemEl.style.opacity = isOwned ? '1' : '0.3';
+            itemEl.style.opacity = '';
             this.draggedItem = null;
+            this.dragSource = null;
+            document.querySelectorAll('.qb-drop-target').forEach(el => el.classList.remove('qb-drop-target'));
         });
-        
-        // Add hover effects
-        itemEl.addEventListener('mouseenter', () => {
-            if (isOwned) {
-                itemEl.style.transform = 'scale(1.1)';
-                itemEl.style.background = 'linear-gradient(135deg, rgba(255,179,71,0.3), rgba(74,48,24,0.3))';
-            }
-        });
-        
-        itemEl.addEventListener('mouseleave', () => {
-            itemEl.style.transform = 'scale(1)';
-            itemEl.style.background = 'linear-gradient(135deg, rgba(0,0,0,0.8), rgba(42,24,8,0.8))';
-        });
-        
+
         return itemEl;
     }
     
-    assignItemToQuickbar(itemId) {
-        // Find the first empty slot or replace the selected slot
-        let targetSlot = this.selectedDrawerSlot;
-        if (targetSlot >= 9) targetSlot = 0; // Default to first slot
-        
-        // Update quickbar layout
-        this.quickbarLayout[targetSlot] = itemId;
+    assignItemToQuickbar(itemId, slotIndex = null) {
+        let targetSlot = (slotIndex !== null) ? slotIndex : this.selectedDrawerSlot;
+        if (targetSlot < 0 || targetSlot >= 9) targetSlot = 0;
+
+        // If the item already lives in another slot, move it (don't duplicate).
+        const existing = this.quickbarLayout.indexOf(itemId);
+        if (existing !== -1 && existing !== targetSlot) {
+            const displaced = this.quickbarLayout[targetSlot];
+            this.quickbarLayout[targetSlot] = itemId;
+            this.quickbarLayout[existing] = displaced;
+        } else {
+            this.quickbarLayout[targetSlot] = itemId;
+        }
+
+        this.selectedDrawerSlot = targetSlot;
         this.saveQuickbarLayout();
-        
-        // Update UI
+        this._qbSig = null;
         this.updateInventoryGridUI();
-        this.showMessage(`Assigned ${itemId} to slot ${targetSlot + 1}`);
+        if (this.isDrawerOpen) this.updateDrawerUI();
+
+        const def = this.getItemRegistry().all.find(d => d.id === itemId);
+        this.showMessage(`${def ? def.name : itemId} → ${this.t('slot') || 'Slot'} ${targetSlot + 1}`);
+    }
+
+    clearQuickbarSlot(slotIndex) {
+        if (slotIndex < 0 || slotIndex >= this.quickbarLayout.length) return;
+        if (!this.quickbarLayout[slotIndex]) return;
+        this.quickbarLayout[slotIndex] = null;
+        this.saveQuickbarLayout();
+        this._qbSig = null;
+        this.updateInventoryGridUI();
+        if (this.isDrawerOpen) this.updateDrawerUI();
+        this.audio && this.audio.play('uiClick');
+        this.showMessage(`Cleared slot ${slotIndex + 1}`);
+    }
+
+    // Wires HTML5 drag handlers on a slot element (used by both the HUD quickbar
+    // and the slot strip inside the drawer). `draggable` controls whether the
+    // slot itself can be the source of a drag.
+    wireQuickbarDnD(slot, index, draggable) {
+        slot.draggable = !!draggable;
+
+        slot.addEventListener('dragstart', (e) => {
+            if (!slot.draggable) return;
+            this.dragStartSlot = index;
+            this.draggedItem = this.quickbarLayout[index];
+            this.dragSource = 'quickbar';
+            this.dropHandled = false;
+            try { e.dataTransfer.effectAllowed = 'move'; } catch (_) {}
+            try { e.dataTransfer.setData('text/plain', this.draggedItem || ''); } catch (_) {}
+            slot.style.opacity = '0.5';
+            document.body.classList.add('qb-dragging');
+        });
+        slot.addEventListener('dragend', () => {
+            slot.style.opacity = '';
+            document.body.classList.remove('qb-dragging');
+            document.querySelectorAll('.qb-drop-target').forEach(el => el.classList.remove('qb-drop-target'));
+
+            // Dropped outside any valid target → store (clear) the source slot.
+            if (!this.dropHandled && this.dragSource === 'quickbar' && this.dragStartSlot !== null) {
+                this.clearQuickbarSlot(this.dragStartSlot);
+            }
+
+            this.draggedItem = null;
+            this.dragStartSlot = null;
+            this.dragSource = null;
+            this.dropHandled = false;
+        });
+        slot.addEventListener('dragover', (e) => {
+            if (!this.draggedItem) return;
+            e.preventDefault();
+            try { e.dataTransfer.dropEffect = 'move'; } catch (_) {}
+            slot.classList.add('qb-drop-target');
+        });
+        slot.addEventListener('dragleave', () => {
+            slot.classList.remove('qb-drop-target');
+        });
+        slot.addEventListener('drop', (e) => {
+            e.preventDefault();
+            slot.classList.remove('qb-drop-target');
+            if (!this.draggedItem) return;
+            this.dropHandled = true;
+            if (this.dragSource === 'quickbar' && this.dragStartSlot !== null) {
+                this.swapQuickbarItems(this.dragStartSlot, index);
+            } else {
+                this.assignItemToQuickbar(this.draggedItem, index);
+            }
+        });
     }
     
     setupDrawerKeyboardNavigation() {
@@ -8267,24 +8040,31 @@ class Game3D {
         // Create new handler
         this.drawerKeyHandler = (e) => {
             if (!this.isDrawerOpen) return;
-            
+
+            // Number keys 1-9 select target slot directly.
+            if (e.key >= '1' && e.key <= '9') {
+                e.preventDefault();
+                this.selectedDrawerSlot = parseInt(e.key, 10) - 1;
+                this.updateDrawerSelection();
+                return;
+            }
+
             switch(e.key) {
                 case 'Tab':
                     e.preventDefault();
-                    this.selectedDrawerSlot = (this.selectedDrawerSlot + 1) % 9;
+                    this.selectedDrawerSlot = e.shiftKey
+                        ? (this.selectedDrawerSlot + 8) % 9
+                        : (this.selectedDrawerSlot + 1) % 9;
                     this.updateDrawerSelection();
                     break;
-                case 'Enter':
+                case 'Delete':
+                case 'Backspace':
                     e.preventDefault();
-                    // Find the currently selected item in drawer
-                    const selectedItem = document.querySelector('.drawer-item.selected');
-                    if (selectedItem) {
-                        const itemId = selectedItem.dataset.itemId;
-                        this.assignItemToQuickbar(itemId);
-                    }
+                    this.clearQuickbarSlot(this.selectedDrawerSlot);
                     break;
                 case 'Escape':
                     this.isDrawerOpen = false;
+                    this.hideDrawerCursor();
                     this.updateDrawerUI();
                     break;
             }
@@ -8294,18 +8074,12 @@ class Game3D {
     }
     
     updateDrawerSelection() {
-        // Remove previous selection
-        document.querySelectorAll('.drawer-item').forEach(item => {
-            item.classList.remove('selected');
-            item.style.border = '2px solid #ffb347';
+        // Highlight the currently targeted slot in the drawer strip.
+        const strip = document.getElementById('drawer-slot-strip');
+        if (!strip) return;
+        strip.querySelectorAll('.qb-strip').forEach((el, i) => {
+            el.classList.toggle('qb-target', i === this.selectedDrawerSlot);
         });
-        
-        // Add selection to current slot
-        const items = document.querySelectorAll('.drawer-item');
-        if (items[this.selectedDrawerSlot]) {
-            items[this.selectedDrawerSlot].classList.add('selected');
-            items[this.selectedDrawerSlot].style.border = '3px solid #ff6600';
-        }
     }
     
     loadQuickbarLayout() {
@@ -8441,104 +8215,26 @@ class Game3D {
         });
     }
     
-    showDrawerCursor() {
-        // Hide default cursor
-        document.body.style.cursor = 'none';
-        
-        // Create custom cursor element
-        const cursor = document.createElement('div');
-        cursor.id = 'drawer-cursor';
-        cursor.style.position = 'fixed';
-        cursor.style.width = '20px';
-        cursor.style.height = '20px';
-        cursor.style.background = 'radial-gradient(circle, #000000 0%, #000000 30%, transparent 30%)';
-        cursor.style.border = '2px solid #ffb347';
-        cursor.style.borderRadius = '50%';
-        cursor.style.pointerEvents = 'none';
-        cursor.style.zIndex = '999999';
-        cursor.style.transform = 'translate(-50%, -50%)';
-        cursor.style.boxShadow = `
-            0 0 10px #ffb347,
-            0 0 20px #ffb347,
-            0 0 30px #ffb347,
-            inset 0 0 10px rgba(0, 255, 0, 0.3)
-        `;
-        cursor.style.animation = 'drawerCursorPulse 2s ease-in-out infinite alternate';
-        
-        // Add CSS animation
-        const style = document.createElement('style');
-        style.id = 'drawer-cursor-style';
-        style.textContent = `
-            @keyframes drawerCursorPulse {
-                0% {
-                    box-shadow: 
-                        0 0 10px #ffb347,
-                        0 0 20px #ffb347,
-                        0 0 30px #ffb347,
-                        inset 0 0 10px rgba(0, 255, 0, 0.3);
-                }
-                100% {
-                    box-shadow: 
-                        0 0 15px #ffb347,
-                        0 0 25px #ffb347,
-                        0 0 35px #ffb347,
-                        inset 0 0 15px rgba(0, 255, 0, 0.5);
-                }
-            }
-        `;
-        document.head.appendChild(style);
-        document.body.appendChild(cursor);
-        
-        // Add mouse tracking
-        document.addEventListener('mousemove', this.updateDrawerCursorPosition);
-    }
-    
-    hideDrawerCursor() {
-        // Remove custom cursor element
-        const cursor = document.getElementById('drawer-cursor');
-        if (cursor) {
-            cursor.remove();
-        }
-        
-        // Remove custom cursor styles
-        const style = document.getElementById('drawer-cursor-style');
-        if (style) {
-            style.remove();
-        }
-        
-        // Remove mouse tracking
-        document.removeEventListener('mousemove', this.updateDrawerCursorPosition);
-        
-        // Reset cursor to default
-        document.body.style.cursor = 'default';
-    }
-    
-    updateDrawerCursorPosition = (event) => {
-        if (!this.isDrawerOpen) return;
-        
-        // Update cursor position
-        const cursor = document.getElementById('drawer-cursor');
-        if (cursor) {
-            cursor.style.left = event.clientX + 'px';
-            cursor.style.top = event.clientY + 'px';
-        }
-    }
-    
+    // The drawer used to hide the system cursor and overlay a glowing ring.
+    // That made the cursor invisible (and confusing) while interacting with
+    // drawer items, so we now keep the OS cursor visible at all times.
+    showDrawerCursor() { document.body.style.cursor = 'default'; }
+    hideDrawerCursor() { document.body.style.cursor = ''; }
+    updateDrawerCursorPosition = () => {};
+
     swapQuickbarItems(fromSlot, toSlot) {
         if (fromSlot === toSlot) return;
-        
-        // Swap items in quickbar layout
+
         const temp = this.quickbarLayout[fromSlot];
         this.quickbarLayout[fromSlot] = this.quickbarLayout[toSlot];
         this.quickbarLayout[toSlot] = temp;
-        
-        // Save layout
+
         this.saveQuickbarLayout();
-        
-        // Update UI
+        this._qbSig = null;
         this.updateInventoryGridUI();
-        
-        this.showMessage(`Swapped items between slots ${fromSlot + 1} and ${toSlot + 1}`);
+        if (this.isDrawerOpen) this.updateDrawerUI();
+
+        this.showMessage(`Swapped slots ${fromSlot + 1} ↔ ${toSlot + 1}`);
     }
     
     updateCompassUI() {
@@ -9588,6 +9284,396 @@ class Game3D {
             }
         }
     }
+
+    // ========================================================================
+    // ===== Online multiplayer (PeerJS / WebRTC P2P) ==========================
+    // ========================================================================
+
+    initMultiplayer() {
+        this.remotePlayers = new Map(); // peerId -> { model, mixer, clips, currentClipName, targetPos, targetRot, lastUpdate, character, namePlate }
+        this._mpSendAccum = 0;
+        this._mpSendInterval = 1 / 15; // 15 Hz
+        this._mpSavedName = (localStorage.getItem('pjboy.mp.name') || '').slice(0, 24);
+
+        if (typeof MultiplayerNet === 'undefined') {
+            console.warn('[mp] MultiplayerNet not loaded — multiplayer disabled');
+            return;
+        }
+        this.net = new MultiplayerNet({
+            onStatus: (text, kind) => this._mpUpdateStatusUI(text, kind),
+            onRoster: (list) => this._mpUpdateRosterUI(list),
+            onPeerState: (id, state) => this._mpOnPeerState(id, state),
+            onPeerLeave: (id) => this._mpRemoveRemotePlayer(id),
+        });
+
+        this._mpBindUI();
+    }
+
+    _mpBindUI() {
+        const nameInput = document.getElementById('mp-name');
+        const hostBtn = document.getElementById('mp-host-btn');
+        const joinBtn = document.getElementById('mp-join-btn');
+        const codeInput = document.getElementById('mp-code');
+        const disconnectBtn = document.getElementById('mp-disconnect-btn');
+        const copyBtn = document.getElementById('mp-copy-btn');
+
+        if (!nameInput || !hostBtn || !joinBtn) return; // UI not present
+
+        if (this._mpSavedName) nameInput.value = this._mpSavedName;
+        nameInput.addEventListener('change', () => {
+            const v = nameInput.value.trim().slice(0, 24);
+            if (v) {
+                this._mpSavedName = v;
+                localStorage.setItem('pjboy.mp.name', v);
+            }
+        });
+
+        const getName = () => (nameInput.value || '').trim().slice(0, 24) || 'Player';
+
+        hostBtn.addEventListener('click', async () => {
+            hostBtn.disabled = true;
+            joinBtn.disabled = true;
+            try {
+                const code = await this.net.host(getName());
+                this._mpShowRoomCode(code);
+            } catch (err) {
+                console.error('[mp] host failed', err);
+            } finally {
+                hostBtn.disabled = false;
+                joinBtn.disabled = false;
+            }
+        });
+
+        joinBtn.addEventListener('click', async () => {
+            const code = (codeInput.value || '').trim();
+            if (!code) return;
+            hostBtn.disabled = true;
+            joinBtn.disabled = true;
+            try {
+                await this.net.join(code, getName());
+                this._mpShowRoomCode(this.net.roomCode);
+            } catch (err) {
+                console.error('[mp] join failed', err);
+                alert('Could not join: ' + (err.message || err));
+            } finally {
+                hostBtn.disabled = false;
+                joinBtn.disabled = false;
+            }
+        });
+
+        // Enter key on the code field triggers join
+        codeInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); joinBtn.click(); }
+        });
+
+        disconnectBtn.addEventListener('click', () => {
+            this.net.disconnect();
+            this._mpHideRoomCode();
+            // Wipe any lingering remote models
+            Array.from(this.remotePlayers.keys()).forEach((id) => this._mpRemoveRemotePlayer(id));
+        });
+
+        if (copyBtn) {
+            copyBtn.addEventListener('click', () => {
+                const code = document.getElementById('mp-room-code')?.textContent;
+                if (!code) return;
+                if (navigator.clipboard) {
+                    navigator.clipboard.writeText(code).catch(() => {});
+                }
+                copyBtn.textContent = 'Copied!';
+                setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1200);
+            });
+        }
+    }
+
+    _mpShowRoomCode(code) {
+        const wrap = document.getElementById('mp-room-display');
+        const codeEl = document.getElementById('mp-room-code');
+        const discBtn = document.getElementById('mp-disconnect-btn');
+        if (wrap && codeEl) {
+            codeEl.textContent = code;
+            wrap.style.display = 'flex';
+        }
+        if (discBtn) discBtn.style.display = '';
+    }
+
+    _mpHideRoomCode() {
+        const wrap = document.getElementById('mp-room-display');
+        const discBtn = document.getElementById('mp-disconnect-btn');
+        if (wrap) wrap.style.display = 'none';
+        if (discBtn) discBtn.style.display = 'none';
+    }
+
+    _mpUpdateStatusUI(text, kind) {
+        const el = document.getElementById('mp-status');
+        if (!el) return;
+        el.textContent = text;
+        el.classList.remove('is-connected', 'is-connecting', 'is-error');
+        if (kind === 'connected') el.classList.add('is-connected');
+        else if (kind === 'connecting') el.classList.add('is-connecting');
+        else if (kind === 'error') el.classList.add('is-error');
+
+        if (kind === 'idle' || kind === 'error') this._mpHideRoomCode();
+    }
+
+    _mpUpdateRosterUI(list) {
+        const ul = document.getElementById('mp-roster-list');
+        if (!ul) return;
+        ul.innerHTML = '';
+        list.forEach((p) => {
+            const li = document.createElement('li');
+            const nameSpan = document.createElement('span');
+            nameSpan.textContent = p.name + (p.self ? ' (you)' : '');
+            if (p.self) nameSpan.classList.add('mp-self');
+            li.appendChild(nameSpan);
+            if (p.host) {
+                const tag = document.createElement('span');
+                tag.className = 'mp-tag is-host';
+                tag.textContent = 'HOST';
+                li.appendChild(tag);
+            }
+            ul.appendChild(li);
+        });
+        if (list.length <= 1) {
+            const li = document.createElement('li');
+            li.style.opacity = '0.5';
+            li.textContent = 'Waiting for others to join…';
+            ul.appendChild(li);
+        }
+    }
+
+    tickMultiplayer(deltaTime) {
+        if (!this.net) return;
+
+        // Send local snapshot at fixed rate
+        if (this.net.isConnected && this.player && this.player.position) {
+            this._mpSendAccum += deltaTime;
+            if (this._mpSendAccum >= this._mpSendInterval) {
+                this._mpSendAccum = 0;
+                const p = this.player.position;
+                this.net.broadcast({
+                    pos: [+p.x.toFixed(3), +p.y.toFixed(3), +p.z.toFixed(3)],
+                    rotY: +(this.characterRotation || 0).toFixed(3),
+                    anim: this.player.currentClipName || 'Idle',
+                    char: this.currentCharacterKey,
+                    hp: Math.max(0, Math.floor(this.player.hp || 0)),
+                    name: this._mpSavedName || 'Player',
+                });
+            }
+        }
+
+        // Smoothly interpolate every remote player toward its latest snapshot
+        if (this.remotePlayers.size > 0) {
+            const lerpAlpha = 1 - Math.exp(-deltaTime * 12); // ~12/s pull
+            this.remotePlayers.forEach((rp) => {
+                if (!rp.model) return;
+                if (rp.targetPos) {
+                    rp.model.position.lerp(rp.targetPos, lerpAlpha);
+                }
+                if (typeof rp.targetRot === 'number') {
+                    // shortest-arc angle lerp
+                    let diff = rp.targetRot - rp.model.rotation.y;
+                    while (diff > Math.PI) diff -= Math.PI * 2;
+                    while (diff < -Math.PI) diff += Math.PI * 2;
+                    rp.model.rotation.y += diff * lerpAlpha;
+                }
+                if (rp.mixer) rp.mixer.update(deltaTime);
+            });
+        }
+    }
+
+    _mpOnPeerState(id, state) {
+        if (!state) return;
+        if (state.type === 'event') return; // reserved for future
+        const pos = state.pos;
+        const rotY = state.rotY;
+        const charKey = state.char || 'skeleton';
+
+        let rp = this.remotePlayers.get(id);
+        if (!rp) {
+            rp = {
+                model: null,
+                mixer: null,
+                clips: null,
+                currentClipName: 'Idle',
+                targetPos: new THREE.Vector3(pos ? pos[0] : 0, pos ? pos[1] : 0, pos ? pos[2] : 0),
+                targetRot: typeof rotY === 'number' ? rotY : 0,
+                character: charKey,
+                pending: true,
+                name: state.name || 'Player',
+            };
+            this.remotePlayers.set(id, rp);
+            this._mpLoadRemoteCharacter(id, charKey);
+        }
+
+        // If character changed mid-session, reload the model
+        if (rp.character !== charKey && !rp.pending) {
+            rp.character = charKey;
+            this._mpDisposeModel(rp);
+            rp.pending = true;
+            this._mpLoadRemoteCharacter(id, charKey);
+        }
+
+        if (pos) {
+            if (!rp.targetPos) rp.targetPos = new THREE.Vector3();
+            rp.targetPos.set(pos[0], pos[1], pos[2]);
+        }
+        if (typeof rotY === 'number') rp.targetRot = rotY;
+        if (state.name) rp.name = state.name;
+
+        // Drive remote animation
+        if (rp.clips && state.anim && state.anim !== rp.currentClipName) {
+            const next = rp.clips[state.anim];
+            if (next) {
+                const prev = rp.clips[rp.currentClipName];
+                if (prev) prev.fadeOut(0.18);
+                next.reset().fadeIn(0.18).play();
+                rp.currentClipName = state.anim;
+            }
+        }
+    }
+
+    _mpLoadRemoteCharacter(id, charKey) {
+        if (!this.characters || !this.characters[charKey]) charKey = 'skeleton';
+        const filePath = this.characters[charKey].path;
+        const loader = new THREE.GLTFLoader();
+        loader.load(filePath, (gltf) => {
+            const rp = this.remotePlayers.get(id);
+            if (!rp) return; // peer left before model loaded
+
+            const character = gltf.scene;
+            character.traverse((child) => {
+                if (child.isMesh) {
+                    const src = child.material;
+                    child.material = new THREE.MeshLambertMaterial({
+                        map: src.map || null,
+                        color: src.color ? src.color.clone() : new THREE.Color(0xffffff),
+                        side: src.side,
+                        skinning: child.isSkinnedMesh === true
+                    });
+                    child.castShadow = true;
+                    child.receiveShadow = true;
+                }
+            });
+            const box = new THREE.Box3().setFromObject(character);
+            const height = box.max.y - box.min.y;
+            if (height > 0) character.scale.setScalar(2.5 / height);
+            const scaledBox = new THREE.Box3().setFromObject(character);
+            character.position.y -= scaledBox.min.y;
+
+            const wrap = new THREE.Group();
+            wrap.add(character);
+            if (rp.targetPos) wrap.position.copy(rp.targetPos);
+            if (typeof rp.targetRot === 'number') wrap.rotation.y = rp.targetRot;
+
+            // Shadow disc to anchor them to the ground
+            const shadowMat = new THREE.MeshBasicMaterial({
+                color: 0x000000, transparent: true, opacity: 0.45,
+                depthWrite: false, side: THREE.DoubleSide
+            });
+            const shadow = new THREE.Mesh(new THREE.CircleGeometry(0.85, 24), shadowMat);
+            shadow.rotation.x = -Math.PI / 2;
+            shadow.position.y = 0.02;
+            shadow.renderOrder = -1;
+            wrap.add(shadow);
+
+            // Floating name tag above the head
+            const namePlate = this._mpMakeNamePlate(rp.name || 'Player');
+            namePlate.position.set(0, 3.0, 0);
+            wrap.add(namePlate);
+
+            this.scene.add(wrap);
+            rp.model = wrap;
+            rp.namePlate = namePlate;
+            rp.pending = false;
+
+            if (gltf.animations && gltf.animations.length > 0) {
+                const mixer = new THREE.AnimationMixer(character);
+                rp.mixer = mixer;
+                rp.clips = {};
+                gltf.animations.forEach((clip) => {
+                    const action = mixer.clipAction(clip);
+                    action.enabled = true;
+                    action.setEffectiveWeight(0);
+                    action.play();
+                    rp.clips[clip.name] = action;
+                });
+                const startClip = rp.clips[rp.currentClipName] || rp.clips['Idle'];
+                if (startClip) {
+                    startClip.setEffectiveWeight(1);
+                    rp.currentClipName = startClip === rp.clips['Idle'] ? 'Idle' : rp.currentClipName;
+                }
+            }
+        }, undefined, (error) => {
+            console.error('[mp] remote character load failed', error);
+        });
+    }
+
+    _mpMakeNamePlate(name) {
+        const canvas = document.createElement('canvas');
+        const w = 256, h = 64;
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = 'rgba(0,0,0,0.55)';
+        // rounded backdrop
+        const r = 10;
+        ctx.beginPath();
+        ctx.moveTo(r, 0);
+        ctx.lineTo(w - r, 0);
+        ctx.quadraticCurveTo(w, 0, w, r);
+        ctx.lineTo(w, h - r);
+        ctx.quadraticCurveTo(w, h, w - r, h);
+        ctx.lineTo(r, h);
+        ctx.quadraticCurveTo(0, h, 0, h - r);
+        ctx.lineTo(0, r);
+        ctx.quadraticCurveTo(0, 0, r, 0);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = '#9ad7ff';
+        ctx.font = 'bold 32px Courier New, monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(String(name).slice(0, 16), w / 2, h / 2 + 2);
+
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.minFilter = THREE.LinearFilter;
+        const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false });
+        const sprite = new THREE.Sprite(mat);
+        sprite.scale.set(2.0, 0.5, 1);
+        sprite.renderOrder = 1000;
+        return sprite;
+    }
+
+    _mpDisposeModel(rp) {
+        if (!rp) return;
+        if (rp.model) {
+            this.scene.remove(rp.model);
+            rp.model.traverse((child) => {
+                if (child.isMesh) {
+                    if (child.geometry) child.geometry.dispose();
+                    if (child.material) {
+                        if (child.material.map) child.material.map.dispose();
+                        child.material.dispose();
+                    }
+                }
+                if (child.isSprite && child.material) {
+                    if (child.material.map) child.material.map.dispose();
+                    child.material.dispose();
+                }
+            });
+        }
+        rp.model = null;
+        rp.mixer = null;
+        rp.clips = null;
+        rp.namePlate = null;
+    }
+
+    _mpRemoveRemotePlayer(id) {
+        const rp = this.remotePlayers.get(id);
+        if (!rp) return;
+        this._mpDisposeModel(rp);
+        this.remotePlayers.delete(id);
+    }
 }
 
 // Start the game
@@ -9617,33 +9703,4 @@ window.addEventListener('load', () => {
     } else {
     }
 
-    // Global inventory hotkeys
-    document.addEventListener('keydown', (event) => {
-        if (event.code === 'KeyI') {
-            game.toggleInventory();
-        }
-        const inv = document.getElementById('inventory-ui');
-        if (game.modalOpen && inv && inv.style.display === 'block') {
-            if (event.code === 'ArrowRight') {
-                game.selectInventory(1);
-                event.preventDefault();
-            }
-            if (event.code === 'ArrowLeft') {
-                game.selectInventory(-1);
-                event.preventDefault();
-            }
-            if (event.code === 'Tab') {
-                game.selectInventory(event.shiftKey ? -1 : 1);
-                event.preventDefault();
-            }
-            if (event.code === 'Enter') {
-                game.activateSelectedItem();
-                event.preventDefault();
-            }
-            if (event.code === 'Escape') {
-                game.toggleInventory();
-                event.preventDefault();
-            }
-        }
-    });
 });
