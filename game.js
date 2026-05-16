@@ -349,6 +349,8 @@ class Game3D {
                 diamondSwordDesc: 'Et kraftfuldt diamant sværd med høj skade',
                 gun: 'Pistol',
                 gunDesc: 'En præcis pistol med høj skade',
+                machineGun: 'Maskingevær',
+                machineGunDesc: 'Hurtig automatisk affyring, lavere skade per skud',
                 currentWeapon: 'Aktuelt Våben',
                 switchWeapon: 'Skift Våben',
                 damage: 'Skade',
@@ -488,6 +490,8 @@ class Game3D {
                 diamondSwordDesc: 'A powerful diamond sword with high damage',
                 gun: 'Pistol',
                 gunDesc: 'A precise pistol with high damage',
+                machineGun: 'Machine Gun',
+                machineGunDesc: 'Rapid automatic fire, lower damage per shot',
                 currentWeapon: 'Current Weapon',
                 switchWeapon: 'Switch Weapon',
                 damage: 'Damage',
@@ -587,6 +591,7 @@ class Game3D {
             rotateLerp: 12, // radians/s for turn smoothing toward aim
             projectiles: [],
             projectileSpeed: 30,
+            enemyProjectiles: [],
             enemies: [],
             enemiesGroup: new THREE.Group(),
             cameraOffset: new THREE.Vector3(-8, 10, -8), // isometric offset (closer 2nd-person)
@@ -761,9 +766,11 @@ class Game3D {
         // Static weapon stats — single source of truth for tuning.
         // Names/descriptions are filled in by `weaponDefinitions` getter so language switches update them.
         this.WEAPON_STATS = {
-            diamondSword: { damage: 15, range: 2.5, cooldown: 0.8, type: 'melee',  icon: '⚔️', color: 0x00aaff, ammoCost: 0 },
+            diamondSword: { damage: 15, range: 3.5, cooldown: 0.25, type: 'melee',  icon: '⚔️', color: 0x00aaff, ammoCost: 0 },
             // ammoCost = 0 means free-fire (canFire/fireGun skip ammo checks).
-            gun:          { damage: 25, range: 15,  cooldown: 0.1, type: 'ranged', icon: '🔫', color: 0x8B4513, ammoCost: 0 }
+            gun:          { damage: 25, range: 15,  cooldown: 0.30, type: 'ranged', icon: '🔫', color: 0x8B4513, ammoCost: 0 },
+            // Machine gun: rapid fire, lower per-shot damage, slightly longer range. Auto-fire on mouse hold.
+            machineGun:   { damage: 12, range: 22,  cooldown: 0.08, type: 'ranged', icon: '🔫', color: 0x222a33, ammoCost: 0, isContinuous: true }
         };
 
         // Tuning constants
@@ -773,7 +780,7 @@ class Game3D {
         this.WEAPON_BUFF_PER_STACK = 0.2;
 
         // Player loadout
-        this.player.weapons = ['diamondSword', 'gun'];
+        this.player.weapons = ['diamondSword', 'gun', 'machineGun'];
         this.player.currentWeaponIndex = 0;
         this.inventory.ammo = 12;      // starting clip
 
@@ -1060,6 +1067,15 @@ class Game3D {
         this.player.gunPivot.add(heldGun);
         this.player.gunPivot.userData.muzzle = heldGun.userData.muzzle;
 
+        // Machine gun — built once, swapped in on selection.
+        this.player.machineGunPivot = new THREE.Group();
+        const heldMG = this._buildMachineGunMesh();
+        heldMG.scale.setScalar(0.95);
+        heldMG.rotation.set(0, Math.PI, 0);
+        heldMG.position.set(0, 0, 0.05);
+        this.player.machineGunPivot.add(heldMG);
+        this.player.machineGunPivot.userData.muzzle = heldMG.userData.muzzle;
+
         // Active 3rd-person weapon model — populated by attachActiveWeaponToHand
         this.player.weaponModel = null;
 
@@ -1080,13 +1096,18 @@ class Game3D {
             rot: { x: 0, y: 0, z: 0 } // pivot's own rotation is rest; sword tilt lives on the inner mesh
         };
 
-        // Swing animation state
+        // Swing animation state — kept slightly shorter than the weapon
+        // cooldown so there's a brief rest frame between consecutive swings.
         this.swingTimer = 0;
-        this.swingDuration = 0.25;
+        this.swingDuration = 0.18;
 
         this.fpvGun = this._buildFpvGun();
         this.camera.add(this.fpvGun);
         this.fpvGun.visible = false;
+
+        this.fpvMachineGun = this._buildFpvMachineGun();
+        this.camera.add(this.fpvMachineGun);
+        this.fpvMachineGun.visible = false;
 
         this._gunRecoilT = 0;
         this._gunRecoilDur = 0.12;
@@ -1136,13 +1157,20 @@ class Game3D {
     // no socket is available yet.
     attachActiveWeaponToHand() {
         if (!this.player || !this.player.swordPivot || !this.player.gunPivot) return;
-        const cur = this.getCurrentWeapon && this.getCurrentWeapon();
-        const isRanged = cur && cur.type === 'ranged';
-        const active = isRanged ? this.player.gunPivot : this.player.swordPivot;
-        const inactive = isRanged ? this.player.swordPivot : this.player.gunPivot;
-        // Remove inactive from scene graph
-        if (inactive.parent) inactive.parent.remove(inactive);
-        // Attach active to socket (or player model root as fallback)
+        const weaponId = this.player.weapons[this.player.currentWeaponIndex];
+        let active;
+        if (weaponId === 'machineGun' && this.player.machineGunPivot) {
+            active = this.player.machineGunPivot;
+        } else if (weaponId === 'gun') {
+            active = this.player.gunPivot;
+        } else {
+            active = this.player.swordPivot;
+        }
+        // Remove all pivots that aren't the active one from the scene graph.
+        const allPivots = [this.player.swordPivot, this.player.gunPivot, this.player.machineGunPivot];
+        for (const p of allPivots) {
+            if (p && p !== active && p.parent) p.parent.remove(p);
+        }
         const target = this.player.handSocket || this.player.model;
         if (!target) return;
         if (active.parent !== target) {
@@ -1207,6 +1235,93 @@ class Game3D {
         return gun;
     }
 
+    _buildMachineGunMesh() {
+        // Distinctive bulkier ranged weapon: longer barrel + foregrip + drum magazine.
+        const gun = new THREE.Group();
+        const matBody = new THREE.MeshLambertMaterial({ color: 0x1a1f26, emissive: 0x03050a });
+        const matAccent = new THREE.MeshLambertMaterial({ color: 0x444a55, emissive: 0x080a10 });
+        const matGrip = new THREE.MeshLambertMaterial({ color: 0x2a1a10, emissive: 0x080403 });
+        const matBarrel = new THREE.MeshLambertMaterial({ color: 0x202428, emissive: 0x05060a });
+
+        // Receiver / body
+        const body = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.18, 0.62), matBody);
+        body.position.set(0, 0, -0.10);
+        gun.add(body);
+
+        // Top rail / sight
+        const rail = new THREE.Mesh(new THREE.BoxGeometry(0.10, 0.05, 0.50), matAccent);
+        rail.position.set(0, 0.12, -0.10);
+        gun.add(rail);
+        const rearSight = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.06, 0.05), matAccent);
+        rearSight.position.set(0, 0.17, 0.06);
+        gun.add(rearSight);
+        const frontSight = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.06, 0.04), matAccent);
+        frontSight.position.set(0, 0.17, -0.38);
+        gun.add(frontSight);
+
+        // Long barrel — segmented for a heavy-weapon silhouette.
+        const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.55, 14), matBarrel);
+        barrel.rotation.x = Math.PI / 2;
+        barrel.position.set(0, 0.02, -0.55);
+        gun.add(barrel);
+
+        // Barrel shroud (vented look via thin rings)
+        for (let i = 0; i < 4; i++) {
+            const ring = new THREE.Mesh(new THREE.TorusGeometry(0.055, 0.012, 6, 14), matAccent);
+            ring.rotation.y = Math.PI / 2;
+            ring.position.set(0, 0.02, -0.34 - i * 0.10);
+            gun.add(ring);
+        }
+
+        // Muzzle brake
+        const brake = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.05, 0.10, 8), matAccent);
+        brake.rotation.x = Math.PI / 2;
+        brake.position.set(0, 0.02, -0.85);
+        gun.add(brake);
+
+        // Foregrip (vertical, under the barrel)
+        const foregrip = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.16, 0.07), matGrip);
+        foregrip.position.set(0, -0.13, -0.30);
+        gun.add(foregrip);
+
+        // Trigger guard
+        const guard = new THREE.Mesh(new THREE.TorusGeometry(0.075, 0.013, 6, 14, Math.PI), matAccent);
+        guard.rotation.z = Math.PI;
+        guard.position.set(0, -0.09, 0.06);
+        gun.add(guard);
+
+        // Main grip (angled, behind trigger)
+        const grip = new THREE.Mesh(new THREE.BoxGeometry(0.10, 0.24, 0.13), matGrip);
+        grip.position.set(0, -0.20, 0.10);
+        grip.rotation.x = 0.22;
+        gun.add(grip);
+
+        // Drum magazine — instantly reads as "machine gun".
+        const drum = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.13, 0.10, 18), matBody);
+        drum.rotation.x = Math.PI / 2;
+        drum.position.set(0, -0.22, -0.06);
+        gun.add(drum);
+        const drumCap = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.13, 0.015, 18), matAccent);
+        drumCap.rotation.x = Math.PI / 2;
+        drumCap.position.set(0, -0.22, -0.115);
+        gun.add(drumCap);
+
+        // Stock (extends backward from receiver)
+        const stock = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.10, 0.26), matGrip);
+        stock.position.set(0, 0.02, 0.30);
+        gun.add(stock);
+        const stockPad = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.13, 0.04), matAccent);
+        stockPad.position.set(0, 0.02, 0.44);
+        gun.add(stockPad);
+
+        // Muzzle anchor — at the brake tip in local space.
+        const muzzle = new THREE.Object3D();
+        muzzle.position.set(0, 0.02, -0.92);
+        gun.add(muzzle);
+        gun.userData.muzzle = muzzle;
+        return gun;
+    }
+
     _buildFpvGun() {
         // Outer pivot positions the whole weapon on screen.
         const pivot = new THREE.Group();
@@ -1231,6 +1346,34 @@ class Game3D {
 
         // Tilt the gun slightly inward toward screen center for that classic FPS "carried" pose.
         gun.rotation.set(0.02, 0.18, -0.04);
+
+        pivot.add(gun);
+        pivot.userData.gun = gun;
+        return pivot;
+    }
+
+    _buildFpvMachineGun() {
+        // Heavier weapon sits a touch lower-left and angled inward more aggressively.
+        const pivot = new THREE.Group();
+        pivot.position.set(0.32, -0.36, -0.7);
+        pivot.rotation.set(0, -0.10, 0);
+
+        const gun = this._buildMachineGunMesh();
+        pivot.userData.muzzle = gun.userData.muzzle;
+
+        const flashGeo = new THREE.PlaneGeometry(0.42, 0.42);
+        const flashMat = new THREE.MeshBasicMaterial({
+            color: 0xffe1a0, transparent: true, opacity: 0,
+            blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide
+        });
+        const flash = new THREE.Mesh(flashGeo, flashMat);
+        flash.position.copy(gun.userData.muzzle.position);
+        flash.position.z -= 0.04;
+        flash.userData.t = 0;
+        gun.add(flash);
+        pivot.userData.flash = flash;
+
+        gun.rotation.set(0.02, 0.16, -0.03);
 
         pivot.add(gun);
         pivot.userData.gun = gun;
@@ -1266,37 +1409,40 @@ class Game3D {
             }
         }
 
-        // ---- Gun viewmodel ----
-        if (this.fpvGun) {
-            const wieldingGun = cur && cur.type === 'ranged';
-            this.fpvGun.visible = wieldingGun && inFPV && inPlay;
+        // ---- Ranged viewmodels (pistol + machine gun share the same animation logic) ----
+        const weaponId = this.player.weapons[this.player.currentWeaponIndex];
+        const rangedModels = [
+            { pivot: this.fpvGun,        id: 'gun',        baseY: -0.32, baseX: 0.36, baseZ: -0.6, kickZ: 0.18, kickRotX: 0.45 },
+            { pivot: this.fpvMachineGun, id: 'machineGun', baseY: -0.36, baseX: 0.32, baseZ: -0.7, kickZ: 0.10, kickRotX: 0.22 }
+        ];
+        for (const r of rangedModels) {
+            if (!r.pivot) continue;
+            const isActive = cur && cur.type === 'ranged' && weaponId === r.id;
+            r.pivot.visible = isActive && inFPV && inPlay;
 
-            // Recoil tween: kick back along +Z (toward camera), ease back to rest.
-            const baseZ = -0.6;
-            const baseRotX = 0;
-            if (this._gunRecoilT > 0) {
-                this._gunRecoilT = Math.max(0, this._gunRecoilT - deltaTime);
-                const k = this._gunRecoilT / this._gunRecoilDur; // 1 → 0 over duration
-                const ease = k * k; // ease-out
-                this.fpvGun.position.z = baseZ + ease * 0.18;
-                this.fpvGun.rotation.x = baseRotX - ease * 0.45;
+            if (this._gunRecoilT > 0 && isActive) {
+                const k = this._gunRecoilT / this._gunRecoilDur;
+                const ease = k * k;
+                r.pivot.position.z = r.baseZ + ease * r.kickZ;
+                r.pivot.rotation.x = -ease * r.kickRotX;
             } else {
-                this.fpvGun.position.z = baseZ;
-                this.fpvGun.rotation.x = baseRotX;
+                r.pivot.position.z = r.baseZ;
+                r.pivot.rotation.x = 0;
             }
 
-            // Slight idle bob on the gun when moving (only when visible)
-            if (this.fpvGun.visible && this.player && this.player.velocity) {
+            if (r.pivot.visible && this.player && this.player.velocity) {
                 const v = this.player.velocity;
                 const speed = Math.hypot(v.x, v.z);
                 this._gunBobT = (this._gunBobT || 0) + deltaTime * (speed * 1.5 + 1.5);
                 const bobAmt = Math.min(1, speed / 6);
-                this.fpvGun.position.y = -0.32 + Math.sin(this._gunBobT * 2) * 0.012 * bobAmt;
-                this.fpvGun.position.x = 0.36 + Math.cos(this._gunBobT) * 0.008 * bobAmt;
+                r.pivot.position.y = r.baseY + Math.sin(this._gunBobT * 2) * 0.012 * bobAmt;
+                r.pivot.position.x = r.baseX + Math.cos(this._gunBobT) * 0.008 * bobAmt;
+            } else {
+                r.pivot.position.y = r.baseY;
+                r.pivot.position.x = r.baseX;
             }
 
-            // Muzzle flash sprite fade
-            const flash = this.fpvGun.userData.flash;
+            const flash = r.pivot.userData.flash;
             if (flash) {
                 flash.userData.t = Math.max(0, (flash.userData.t || 0) - deltaTime);
                 const k2 = flash.userData.t / 0.06;
@@ -1310,10 +1456,18 @@ class Game3D {
         }
     }
 
+    _getActiveFpvRanged() {
+        const weaponId = this.player.weapons[this.player.currentWeaponIndex];
+        if (weaponId === 'machineGun') return this.fpvMachineGun;
+        if (weaponId === 'gun') return this.fpvGun;
+        return null;
+    }
+
     triggerGunRecoil() {
         this._gunRecoilT = this._gunRecoilDur;
-        if (this.fpvGun && this.fpvGun.userData.flash) {
-            this.fpvGun.userData.flash.userData.t = 0.06;
+        const active = this._getActiveFpvRanged();
+        if (active && active.userData.flash) {
+            active.userData.flash.userData.t = 0.06;
         }
     }
     
@@ -1484,6 +1638,11 @@ class Game3D {
             }
         }
 
+        // Snap the body to the aim direction immediately so the swing visual
+        // and the strike line up — without this the body can be 90° off when a
+        // strafing player suddenly clicks.
+        this.characterRotation = Math.atan2(fx, fz);
+
         const arcCos = Math.cos(Math.PI / 3); // ±60° → 120° total swing arc
 
         let best = null;
@@ -1498,36 +1657,85 @@ class Game3D {
             if (distXZ < bestDist) { bestDist = distXZ; best = e; }
         }
 
+        // Always render a slash sweep in front of the player so the swing reads
+        // as a real arc, not a ground sparkle.
+        this._spawnMeleeSlash(fx, fz, range);
+
         if (best) {
             best.userData.hp -= damage;
             const hitPos = best.position.clone();
             hitPos.y += 1.0;
             this.spawnImpact(hitPos, hitColor);
             this.audio && this.audio.play('swordHit');
+            // Small forward lunge — "step into" the strike, capped so it can't
+            // shove the player through a wall.
+            this.player.velocity.x += fx * 3.5;
+            this.player.velocity.z += fz * 3.5;
+            this._triggerHitShake(0.12, 0.1);
             if (best.userData.hp <= 0) {
                 this.killEnemy(best);
             } else {
-                this.applyEnemyKnockback(best, this.player.position, 6);
+                this.applyEnemyKnockback(best, this.player.position, 9);
                 this.flashEnemy(best);
                 this.showEnemyHPBar(best, 3.0);
             }
             return true;
         }
 
-        // Miss — sparkle at the aim cursor if it's within reach, else at the
-        // edge of the swing arc in front of the player.
-        let slashPos;
+        // Miss — keep the slash; add a faint ground ping at the aim cursor if
+        // it's in reach so the player gets a clear "where did the swing land" cue.
         if (aimGround && Math.hypot(aimGround.x - px, aimGround.z - pz) <= range) {
-            slashPos = new THREE.Vector3(aimGround.x, this.player.position.y + 0.1, aimGround.z);
-        } else {
-            slashPos = new THREE.Vector3(
-                px + fx * range * 0.6,
-                this.player.position.y + 1.0,
-                pz + fz * range * 0.6
-            );
+            this.spawnImpact(aimGround, missColor);
         }
-        this.spawnImpact(slashPos, missColor);
         return false;
+    }
+
+    // Translucent wedge that pops in front of the player and fades over ~140ms.
+    // Sized to the weapon range and oriented along the aim direction.
+    _spawnMeleeSlash(fx, fz, range) {
+        const arcRadians = (2 * Math.PI) / 3; // 120°
+        const segments = 18;
+        const inner = range * 0.35;
+        const outer = range * 1.0;
+        const geo = new THREE.RingGeometry(inner, outer, segments, 1, -arcRadians / 2, arcRadians);
+        const mat = new THREE.MeshBasicMaterial({
+            color: 0xeaf6ff,
+            transparent: true,
+            opacity: 0.55,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending
+        });
+        const slash = new THREE.Mesh(geo, mat);
+        slash.position.set(this.player.position.x, this.player.position.y + 0.9, this.player.position.z);
+        // The ring is built in the XY plane with its arc opening along +X.
+        // Lay it flat (XZ) and rotate so its center aligns with (fx, fz).
+        slash.rotation.x = -Math.PI / 2;
+        slash.rotation.z = -Math.atan2(fx, fz) + Math.PI / 2;
+        this.scene.add(slash);
+
+        const start = performance.now();
+        const dur = 140;
+        const animate = () => {
+            const t = (performance.now() - start) / dur;
+            if (t >= 1) { this.scene.remove(slash); geo.dispose(); mat.dispose(); return; }
+            mat.opacity = 0.55 * (1 - t);
+            const s = 1 + t * 0.12;
+            slash.scale.set(s, s, s);
+            requestAnimationFrame(animate);
+        };
+        requestAnimationFrame(animate);
+    }
+
+    _triggerHitShake(intensity, duration) {
+        // Piggyback on the arena shake channel — same camera, same updater.
+        const s = (this.arena && this.arena.shake) || null;
+        if (!s) return;
+        // Don't stomp a stronger ongoing shake (e.g., boss eruption).
+        if (s.intensity > intensity && s.elapsed < s.duration) return;
+        s.intensity = intensity;
+        s.duration = duration;
+        s.elapsed = 0;
     }
 
     applyEnemyKnockback(e, sourcePos, strength = 7) {
@@ -2227,17 +2435,34 @@ class Game3D {
     }
 
     preloadZombieTemplate() {
+        // Roster of all enemy types. The original `zombieTemplate` field is kept
+        // for back-compat with anything that still reads it; new code reads
+        // `this.enemyTemplates[typeKey]` instead.
+        this.enemyTypes = {
+            zombie:  { path: 'Zombie.gltf',                          scale: 0.9, hp: [50, 150],  speed: [1.2, 2.0], damage: 10, color: 0x6aa84f },
+            giant:   { path: 'assets/Blocks/enemies/Giant.gltf',     scale: 1.8, hp: [260, 360], speed: [0.7, 1.0], damage: 20, color: 0xd6b88a, meleeOnly: true },
+            demon:   { path: 'assets/Blocks/enemies/Demon.gltf',     scale: 1.1, hp: [90, 140],  speed: [1.0, 1.4], damage: 12, color: 0xc73a2a,
+                       ranged: { cooldown: 2.0, range: 14, projectileSpeed: 18, damage: 10, color: 0xff5522 } },
+            goblin:  { path: 'assets/Blocks/enemies/Goblin.gltf',    scale: 0.85, hp: [45, 90],  speed: [1.6, 2.4], damage: 8,  color: 0x4d8a3a },
+            chick:   { path: 'assets/Blocks/Animals/Chick.gltf',     scale: 0.7, hp: [10, 18],   speed: [1.8, 2.6], damage: 3,  color: 0xffd84d },
+            chicken: { path: 'assets/Blocks/Animals/Chicken.gltf',   scale: 0.8, hp: [18, 28],   speed: [1.4, 2.0], damage: 4,  color: 0xeeeeee },
+        };
+        this.enemyTemplates = {};
+
         const loader = new THREE.GLTFLoader();
-        loader.load('Zombie.gltf', (gltf) => {
-            this.zombieTemplate = { scene: gltf.scene, animations: gltf.animations };
-            console.log('Zombie template loaded:', gltf.animations.map(a => a.name).join(', '));
-            // If enemies already spawned as sphere fallbacks, swap them for zombies
-            if (this.playMode && this.playMode.enemies.length > 0) {
-                this.respawnEnemies();
-            }
-        }, undefined, (error) => {
-            console.error('Error loading Zombie.gltf:', error);
-        });
+        const onAnyLoad = () => {
+            // Swap fallback spheres → real models once their template arrives.
+            if (this.playMode && this.playMode.enemies.length > 0) this.respawnEnemies();
+        };
+        for (const [key, cfg] of Object.entries(this.enemyTypes)) {
+            loader.load(cfg.path, (gltf) => {
+                this.enemyTemplates[key] = { scene: gltf.scene, animations: gltf.animations || [] };
+                if (key === 'zombie') this.zombieTemplate = this.enemyTemplates[key];
+                onAnyLoad();
+            }, undefined, (err) => {
+                console.error(`Error loading enemy template "${key}" from ${cfg.path}:`, err);
+            });
+        }
     }
 
     createEnvironment() {
@@ -2260,8 +2485,10 @@ class Game3D {
         // Arena assets (platforms + decor)
         this.loadPixelBlockTemplates();
         this.loadArenaDecorTemplates();
-        // Crystal "sky" — a tiled ceiling above the tallest walls
-        this.roofTileSize = 2;
+        // Crystal "sky" — a tiled ceiling above the tallest walls. Tile size is
+        // tuned so each block reads as a discrete glowing cube from the ground
+        // (smaller tiles dissolved into speckle at the 20u viewing distance).
+        this.roofTileSize = 4;
         this.roofSize = 200;
         this.roofY = 20; // bottom face of ceiling blocks
         this.loadCrystalRoof();
@@ -2456,9 +2683,14 @@ class Game3D {
             geom.applyMatrix4(sourceMesh.matrixWorld);
             geom.computeBoundingBox();
             const srcMat = sourceMesh.material;
+            // Pink/magenta self-illumination so the roof reads as a glowing
+            // crystal cube from below (matches the create-mode block preview),
+            // not just dimly-lit speckle.
             const mat = new THREE.MeshLambertMaterial({
                 map: srcMat.map || null,
                 color: srcMat.color ? srcMat.color.clone() : new THREE.Color(0xffffff),
+                emissive: new THREE.Color(0xff66ff),
+                emissiveIntensity: 0.55,
                 side: srcMat.side
             });
             this.roofSourceGeometry = geom;
@@ -4177,14 +4409,23 @@ class Game3D {
         }
     }
 
-    createEnemyAt(x, z) {
-        const bodyColor = 0x6aa84f; // zombie green — used by death-fragment particles
+    createEnemyAt(x, z, typeKey = null) {
+        // Pick an enemy type. If no template for that type has loaded yet, we
+        // still set the metadata + spawn a fallback sphere; respawnEnemies()
+        // re-creates the enemy with the real mesh once the GLTF arrives.
+        if (!typeKey) {
+            const keys = Object.keys(this.enemyTypes || { zombie: null });
+            typeKey = keys[Math.floor(Math.random() * keys.length)];
+        }
+        const cfg = (this.enemyTypes && this.enemyTypes[typeKey]) || { scale: 0.9, hp: [50, 150], speed: [1.2, 2.0], damage: 10, color: 0x6aa84f };
+        const bodyColor = cfg.color;
         const m = new THREE.Group();
         m.position.set(x, 0, z);
 
-        if (this.zombieTemplate && THREE.SkeletonUtils) {
-            const clone = THREE.SkeletonUtils.clone(this.zombieTemplate.scene);
-            clone.scale.set(0.9, 0.9, 0.9);
+        const template = this.enemyTemplates && this.enemyTemplates[typeKey];
+        if (template && THREE.SkeletonUtils) {
+            const clone = THREE.SkeletonUtils.clone(template.scene);
+            clone.scale.set(cfg.scale, cfg.scale, cfg.scale);
             clone.traverse((child) => {
                 if (child.isMesh) {
                     child.castShadow = true;
@@ -4194,21 +4435,21 @@ class Game3D {
             m.add(clone);
             clone.updateMatrixWorld(true);
 
-            // Derive hit box from the actual scaled model so it adapts to whatever size we pick
             const bbox = new THREE.Box3().setFromObject(clone);
             const size = bbox.getSize(new THREE.Vector3());
             m.userData.hitHeight = size.y;
             m.userData.hitRadius = Math.max(size.x, size.z) * 0.5 + 0.1;
             m.userData.hpBarY = size.y + 0.4;
 
-            const mixer = new THREE.AnimationMixer(clone);
-            const anims = this.zombieTemplate.animations;
-            const walk = anims.find(c => /walk/i.test(c.name)) || anims[0];
-            if (walk) mixer.clipAction(walk).play();
-            m.userData.zombieClone = clone;
-            m.userData.mixer = mixer;
+            if (template.animations && template.animations.length) {
+                const mixer = new THREE.AnimationMixer(clone);
+                const anims = template.animations;
+                const walk = anims.find(c => /walk|move|run/i.test(c.name)) || anims[0];
+                if (walk) mixer.clipAction(walk).play();
+                m.userData.mixer = mixer;
+            }
+            m.userData.zombieClone = clone; // legacy field name still read elsewhere
         } else {
-            // Fallback sphere if zombie template hasn't finished loading yet
             const fallback = new THREE.Mesh(
                 new THREE.SphereGeometry(0.5, 12, 12),
                 new THREE.MeshLambertMaterial({ color: bodyColor, emissive: 0x081808 })
@@ -4221,17 +4462,24 @@ class Game3D {
             m.userData.hpBarY = 1.4;
         }
 
-        const maxHp = Math.round(50 + Math.random() * 100); // 50–150
+        const [hpMin, hpMax] = cfg.hp;
+        const [spdMin, spdMax] = cfg.speed;
+        const maxHp = Math.round(THREE.MathUtils.lerp(hpMin, hpMax, Math.random()));
         m.userData = Object.assign(m.userData || {}, {
             type: 'enemy',
+            enemyKind: typeKey,
             hp: maxHp,
             hpMax: maxHp,
             bodyColor,
-            speed: 1.2 + Math.random() * 0.8,
+            contactDamage: cfg.damage,
+            speed: THREE.MathUtils.lerp(spdMin, spdMax, Math.random()),
             dir: new THREE.Vector2(Math.cos(Math.random()*Math.PI*2), Math.sin(Math.random()*Math.PI*2)),
             changeT: 1 + Math.random() * 2,
             stunT: 0,
-            knockback: null
+            knockback: null,
+            // Ranged config (demon). null on melee-only / meleeOnly types.
+            ranged: cfg.ranged ? Object.assign({}, cfg.ranged) : null,
+            rangedTimer: cfg.ranged ? Math.random() * (cfg.ranged.cooldown || 2) : 0,
         });
         // Add simple health bar (initially hidden)
         const barW = 1.4, barH = 0.15;
@@ -4314,6 +4562,23 @@ class Game3D {
                 if (ud.flinchT <= 0) {
                     e.rotation.x = 0;
                     e.scale.set(1, 1, 1);
+                }
+            }
+            // Ranged enemies (demon): fire a projectile at the player when in
+            // range, on a per-enemy cooldown. Skipped while stunned/knocked back.
+            if (ud.ranged && ud.stunT <= 0) {
+                ud.rangedTimer -= deltaTime;
+                if (ud.rangedTimer <= 0) {
+                    const dx = this.player.position.x - e.position.x;
+                    const dz = this.player.position.z - e.position.z;
+                    const distXZ = Math.hypot(dx, dz);
+                    if (distXZ <= ud.ranged.range && distXZ > 0.1) {
+                        this.spawnEnemyProjectile(e, this.player.position);
+                        ud.rangedTimer = ud.ranged.cooldown;
+                    } else {
+                        // Try again soon instead of waiting the full cooldown.
+                        ud.rangedTimer = 0.4;
+                    }
                 }
             }
             // Tick zombie animation
@@ -4651,6 +4916,12 @@ class Game3D {
             this.playMode.dyingEnemies.forEach(e => this.playMode.enemiesGroup.remove(e));
             this.playMode.dyingEnemies = [];
         }
+        // Drop any in-flight enemy fireballs/etc — otherwise demon shots
+        // outlive the demons that fired them across resets.
+        if (this.playMode.enemyProjectiles && this.playMode.enemyProjectiles.length) {
+            this.playMode.enemyProjectiles.forEach(p => this.scene.remove(p));
+            this.playMode.enemyProjectiles = [];
+        }
     }
 
     respawnEnemies() {
@@ -4725,9 +4996,10 @@ class Game3D {
         // Compute spawn position — from gun muzzle in FPV, from in front of the
         // player in iso/third-person.
         let spawn;
-        if (this.viewMode === 'fpv' && this.fpvGun && this.fpvGun.userData.muzzle) {
+        const activeFpv = this._getActiveFpvRanged && this._getActiveFpvRanged();
+        if (this.viewMode === 'fpv' && activeFpv && activeFpv.userData.muzzle) {
             spawn = new THREE.Vector3();
-            this.fpvGun.userData.muzzle.getWorldPosition(spawn);
+            activeFpv.userData.muzzle.getWorldPosition(spawn);
         } else {
             const forward = new THREE.Vector3(
                 Math.sin(this.characterRotation), 0,
@@ -4803,12 +5075,19 @@ class Game3D {
     }
 
     handleMelee(event) {
+        // Cooldown gate — handlePlayClick bypasses attackWithWeapon for melee,
+        // so we have to enforce the cooldown here ourselves (otherwise mashing
+        // left-click fires every frame).
+        if (!this.canFire()) return;
+        const weapon = this.getCurrentWeapon();
+        const weaponId = this.player.weapons[this.player.currentWeaponIndex];
+        if (weapon) this.weaponCooldowns[weaponId] = weapon.cooldown;
+
         this.triggerSwordSwing();
         this.playOneShotAnimation('Attack', 0.4);
         this.triggerAttackPose && this.triggerAttackPose();
         this.audio && this.audio.play('swordSwing');
 
-        const weapon = this.getCurrentWeapon();
         const damage = weapon ? weapon.damage : 2;
         const range = (weapon && weapon.type === 'melee') ? weapon.range : 2.5;
 
@@ -5019,6 +5298,91 @@ class Game3D {
                 this.scene.remove(p);
                 this.playMode.projectiles.splice(i, 1);
                 continue;
+            }
+        }
+    }
+
+    // ----- Enemy-fired projectiles (e.g. demon fireballs) -----
+    spawnEnemyProjectile(enemy, targetPos) {
+        const cfg = enemy.userData.ranged;
+        if (!cfg) return;
+        const origin = enemy.position.clone();
+        origin.y += (enemy.userData.hitHeight || 1.5) * 0.6;
+        const dir = new THREE.Vector3(
+            targetPos.x - origin.x,
+            (targetPos.y + 1.0) - origin.y,
+            targetPos.z - origin.z
+        );
+        if (dir.lengthSq() < 0.001) return;
+        dir.normalize();
+
+        const color = cfg.color || 0xff5522;
+        const group = new THREE.Group();
+        const core = new THREE.Mesh(
+            new THREE.SphereGeometry(0.18, 12, 12),
+            new THREE.MeshBasicMaterial({ color })
+        );
+        const halo = new THREE.Mesh(
+            new THREE.SphereGeometry(0.3, 12, 12),
+            new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.4, blending: THREE.AdditiveBlending, depthWrite: false })
+        );
+        group.add(core); group.add(halo);
+        group.add(new THREE.PointLight(color, 0.6, 4, 2));
+        group.position.copy(origin);
+        group.userData = {
+            dir, speed: cfg.projectileSpeed || 18, ttl: 4,
+            radius: 0.22, damage: cfg.damage || 8, color
+        };
+        this.scene.add(group);
+        this.playMode.enemyProjectiles.push(group);
+        this.audio && this.audio.play && this.audio.play('shoot');
+    }
+
+    updateEnemyProjectiles(deltaTime) {
+        const list = this.playMode.enemyProjectiles;
+        if (!list || list.length === 0) return;
+        const playerHitR = 0.7;
+        for (let i = list.length - 1; i >= 0; i--) {
+            const p = list[i];
+            const d = p.userData;
+            const step = d.dir.clone().multiplyScalar(d.speed * deltaTime);
+            const next = p.position.clone().add(step);
+
+            // Wall collision — despawn with a small impact ping.
+            let hitWall = false;
+            for (const w of this.walls) {
+                const wp = w.position; const s = w.size; const r = d.radius;
+                if (next.x + r > wp.x - s.x/2 && next.x - r < wp.x + s.x/2 &&
+                    next.y + r > wp.y - s.y/2 && next.y - r < wp.y + s.y/2 &&
+                    next.z + r > wp.z - s.z/2 && next.z - r < wp.z + s.z/2) {
+                    hitWall = true; break;
+                }
+            }
+            if (hitWall) {
+                this.spawnImpact(next, d.color);
+                this.scene.remove(p);
+                list.splice(i, 1);
+                continue;
+            }
+
+            p.position.copy(next);
+            d.ttl -= deltaTime;
+
+            // Player collision (cylinder around player).
+            const dx = p.position.x - this.player.position.x;
+            const dz = p.position.z - this.player.position.z;
+            const dy = p.position.y - this.player.position.y;
+            if (dx*dx + dz*dz < (playerHitR + d.radius) * (playerHitR + d.radius) && dy >= -0.1 && dy <= 2.2) {
+                this.spawnImpact(p.position.clone(), d.color);
+                this.damagePlayer(d.damage);
+                this.scene.remove(p);
+                list.splice(i, 1);
+                continue;
+            }
+
+            if (d.ttl <= 0) {
+                this.scene.remove(p);
+                list.splice(i, 1);
             }
         }
     }
@@ -6615,12 +6979,14 @@ class Game3D {
             }
         }
         
-        // Check collision with enemies
+        // Check collision with enemies — use the enemy's per-type contactDamage
+        // (giants smash for 20, chicks peck for 3, etc).
         if (this.gameMode === 'play' && this.playMode.enemies) {
             for (const enemy of this.playMode.enemies) {
                 const distance = this.player.position.distanceTo(enemy.position);
-                if (distance < 1.5) { // Collision radius
-                    this.damagePlayer(10); // 10 damage per hit
+                const hitR = (enemy.userData.hitRadius || 0.6) + 0.6;
+                if (distance < hitR) {
+                    this.damagePlayer(enemy.userData.contactDamage || 10);
                     break; // Only damage once per frame
                 }
             }
@@ -7044,6 +7410,7 @@ class Game3D {
             // animals are registered into playMode.enemies so these are the same
             // pipes that make them shootable.
             this.updateProjectiles(deltaTime);
+            this.updateEnemyProjectiles(deltaTime);
             this.updateDyingEnemies(deltaTime);
             this.updateMuzzleFlash(deltaTime);
             this.updatePickupCollectFx(deltaTime);
@@ -7060,8 +7427,10 @@ class Game3D {
                 this.updatePickups(deltaTime);
                 if (this.arena && this.arena.active) this.updateArena(deltaTime);
             }
+            // Camera shake is used outside arena too (melee hits, etc.) — run it every frame.
+            if (this.arena && !this.arena.active) this._updateCameraShake(deltaTime);
         }
-        
+
         // Update facing indicator position/target
         this.updateFacingIndicator();
         // Update objectives (start/end checks)
@@ -7110,47 +7479,74 @@ class Game3D {
         this.renderer.render(this.scene, this.camera);
     }
 
-    // ===== HUD: segmented health bar =====
+    // ===== HUD: simple top-right health bar (HP number + thin fill bar) =====
+    _ensureHealthBarEl() {
+        let el = document.getElementById('health-bar');
+        if (el) return el;
+        el = document.createElement('div');
+        el.id = 'health-bar';
+        el.innerHTML = `
+            <div class="hb-text">100</div>
+            <div class="hb-track"><div class="hb-fill"></div></div>
+        `;
+        Object.assign(el.style, {
+            position: 'fixed',
+            top: '14px',
+            right: '14px',
+            // Explicitly clear properties that older cached CSS may set,
+            // otherwise top+bottom and left+right both apply and the panel
+            // stretches across the whole viewport.
+            bottom: 'auto',
+            left: 'auto',
+            transform: 'none',
+            width: '160px',
+            height: 'auto',
+            background: 'rgba(0,0,0,0.55)',
+            border: '1px solid rgba(255,118,118,0.6)',
+            borderRadius: '8px',
+            padding: '6px 10px 8px',
+            color: '#fff',
+            fontFamily: 'Courier New, monospace',
+            zIndex: '2000',
+            pointerEvents: 'none',
+            display: 'none',
+            boxShadow: 'none',
+        });
+        const text = el.querySelector('.hb-text');
+        Object.assign(text.style, {
+            fontSize: '14px', fontWeight: '700', textAlign: 'right', lineHeight: '1',
+            color: '#fff', textShadow: '0 0 4px rgba(255,90,90,0.7)', marginBottom: '4px'
+        });
+        const track = el.querySelector('.hb-track');
+        Object.assign(track.style, {
+            height: '6px', width: '100%', background: 'rgba(255,255,255,0.12)', borderRadius: '3px', overflow: 'hidden'
+        });
+        const fill = el.querySelector('.hb-fill');
+        Object.assign(fill.style, {
+            height: '100%', width: '100%', background: '#6dff7a',
+            boxShadow: '0 0 6px rgba(109,255,122,0.6)',
+            transition: 'width 0.15s ease-out, background 0.2s'
+        });
+        document.body.appendChild(el);
+        return el;
+    }
+
     updateHealthBarUI() {
-        const el = document.getElementById('health-bar');
-        if (!el) return;
+        const el = this._ensureHealthBarEl();
         if (this.gameMode !== 'play') { el.style.display = 'none'; return; }
         el.style.display = 'block';
 
-        const pipsEl = el.querySelector('.hb-pips');
-        const textEl = el.querySelector('.hb-text');
         const hp = Math.max(0, Math.floor(this.player.hp));
         const maxHp = this.player.maxHp || 100;
-        const pipsTotal = 10;
-        const perPip = maxHp / pipsTotal;
-        const filledCount = Math.ceil(hp / perPip);
-        const pct = hp / maxHp;
+        const pct = Math.max(0, Math.min(1, hp / maxHp));
+        const color = pct < 0.3 ? '#ff5a5a' : pct < 0.6 ? '#ffd34a' : '#6dff7a';
 
-        const lastHp = this._lastHpForBar;
-        if (typeof lastHp === 'number' && hp < lastHp) {
-            el.classList.remove('pulse');
-            // force reflow to restart animation
-            void el.offsetWidth;
-            el.classList.add('pulse');
-        }
-        this._lastHpForBar = hp;
-
-        if (!pipsEl.children.length || pipsEl.children.length !== pipsTotal) {
-            pipsEl.innerHTML = '';
-            for (let i = 0; i < pipsTotal; i++) {
-                const p = document.createElement('div');
-                p.className = 'hb-pip';
-                pipsEl.appendChild(p);
-            }
-        }
-        const statusClass = pct < 0.3 ? 'crit' : pct < 0.6 ? 'low' : '';
-        for (let i = 0; i < pipsTotal; i++) {
-            const pip = pipsEl.children[i];
-            pip.classList.remove('low', 'crit', 'lost');
-            if (i >= filledCount) pip.classList.add('lost');
-            else if (statusClass) pip.classList.add(statusClass);
-        }
-        textEl.innerHTML = `<b>${hp}</b> / ${maxHp}`;
+        const textEl = el.querySelector('.hb-text');
+        const fillEl = el.querySelector('.hb-fill');
+        textEl.textContent = `${hp} / ${maxHp}`;
+        fillEl.style.width = `${(pct * 100).toFixed(1)}%`;
+        fillEl.style.background = color;
+        fillEl.style.boxShadow = `0 0 6px ${color}`;
     }
 
     updateDamageVignetteUI() {
@@ -8265,7 +8661,7 @@ class Game3D {
 
         // Versioned storage key so old saved layouts (with machineGun, etc.)
         // are discarded instead of silently shown.
-        const saved = localStorage.getItem('pjboy_quickbar_layout_v2');
+        const saved = localStorage.getItem('pjboy_quickbar_layout_v3');
         if (saved) {
             try {
                 const parsed = JSON.parse(saved);
@@ -8282,13 +8678,13 @@ class Game3D {
     // Curated default. Slot 3 is reserved for jetpack so the fuel stack is
     // always visible at a fixed key when the player is carrying any.
     defaultQuickbarLayout() {
-        const layout = ['diamondSword', 'gun', 'jetpack', 'health', 'ammo', 'speed', 'weaponBuff', 'healthRegen', 'flag'];
+        const layout = ['diamondSword', 'gun', 'machineGun', 'jetpack', 'health', 'ammo', 'speed', 'weaponBuff', 'healthRegen'];
         const valid = new Set([...Object.keys(this.WEAPON_STATS), ...Object.keys(this.ITEM_DEFS)]);
         return layout.map(id => (valid.has(id) ? id : null));
     }
 
     saveQuickbarLayout() {
-        localStorage.setItem('pjboy_quickbar_layout_v2', JSON.stringify(this.quickbarLayout));
+        localStorage.setItem('pjboy_quickbar_layout_v3', JSON.stringify(this.quickbarLayout));
     }
     
     showToast(message, type = 'info', duration = 3000) {
@@ -8694,21 +9090,26 @@ class Game3D {
     
     handleContinuousFiring(deltaTime) {
         if (!this.isFiring || this.gameMode !== 'play') return;
-        
+
         const weapon = this.getCurrentWeapon();
         if (!weapon || !weapon.isContinuous) return;
-        
+
         // Check if we can fire (cooldown and ammo)
         const weaponId = this.player.weapons[this.player.currentWeaponIndex];
         if (this.weaponCooldowns[weaponId] && this.weaponCooldowns[weaponId] > 0) return;
-        
+
         if (weapon.ammoCost > 0 && this.inventory.ammo < weapon.ammoCost) {
             this.isFiring = false; // Stop firing if no ammo
             return;
         }
-        
-        // Fire the weapon
-        this.attackWithWeapon();
+
+        // Route ranged through fireGun so we spawn a projectile from the muzzle
+        // (matches single-click feel); melee falls back to the legacy attack path.
+        if (weapon.type === 'ranged') {
+            this.fireGun();
+        } else {
+            this.attackWithWeapon();
+        }
     }
 
     ensureMessageElement() {
@@ -8780,7 +9181,7 @@ class Game3D {
         this.player.invulnerabilityTimer = 0;
         this.characterRotation = 0;
         if (this.player.weapons) {
-            this.player.weapons = ['diamondSword', 'gun'];
+            this.player.weapons = ['diamondSword', 'gun', 'machineGun'];
             this.player.currentWeaponIndex = 0;
         }
         if (this.inventory) this.inventory.ammo = 100;
