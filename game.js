@@ -9295,9 +9295,25 @@ class Game3D {
         this._mpSendInterval = 1 / 15; // 15 Hz
         this._mpSavedName = (localStorage.getItem('pjboy.mp.name') || '').slice(0, 24);
 
+        // Always bind the UI so the buttons give visible feedback even when
+        // PeerJS / multiplayer.js failed to load. Otherwise the button click
+        // only triggers the delegated "blip" sound and the user has no idea why.
+        this._mpBindUI();
+
         if (typeof MultiplayerNet === 'undefined') {
-            console.warn('[mp] MultiplayerNet not loaded — multiplayer disabled');
+            console.warn('[mp] multiplayer.js did not load — multiplayer disabled');
+            this._mpUpdateStatusUI('Multiplayer module failed to load (multiplayer.js)', 'error');
             return;
+        }
+        if (typeof Peer === 'undefined') {
+            console.warn('[mp] PeerJS did not load — multiplayer disabled');
+            this._mpUpdateStatusUI('PeerJS failed to load — check network / blockers', 'error');
+            return;
+        }
+        if (!window.isSecureContext && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
+            // WebRTC requires HTTPS (or localhost). file:// and plain http on a LAN IP won't work.
+            this._mpUpdateStatusUI('Multiplayer needs HTTPS or localhost (current origin is insecure)', 'error');
+            // Don't return — let the user try anyway, but they've been warned.
         }
         this.net = new MultiplayerNet({
             onStatus: (text, kind) => this._mpUpdateStatusUI(text, kind),
@@ -9305,8 +9321,6 @@ class Game3D {
             onPeerState: (id, state) => this._mpOnPeerState(id, state),
             onPeerLeave: (id) => this._mpRemoveRemotePlayer(id),
         });
-
-        this._mpBindUI();
     }
 
     _mpBindUI() {
@@ -9330,7 +9344,21 @@ class Game3D {
 
         const getName = () => (nameInput.value || '').trim().slice(0, 24) || 'Player';
 
+        const ensureNet = () => {
+            if (!this.net) {
+                const reason = (typeof MultiplayerNet === 'undefined')
+                    ? 'Multiplayer module did not load (multiplayer.js).'
+                    : (typeof Peer === 'undefined')
+                        ? 'PeerJS did not load. Reload the page; if it still fails, your network may be blocking unpkg.com.'
+                        : 'Multiplayer is unavailable.';
+                this._mpUpdateStatusUI(reason, 'error');
+                return false;
+            }
+            return true;
+        };
+
         hostBtn.addEventListener('click', async () => {
+            if (!ensureNet()) return;
             hostBtn.disabled = true;
             joinBtn.disabled = true;
             try {
@@ -9338,6 +9366,7 @@ class Game3D {
                 this._mpShowRoomCode(code);
             } catch (err) {
                 console.error('[mp] host failed', err);
+                this._mpUpdateStatusUI('Host failed: ' + (err.message || err.type || err), 'error');
             } finally {
                 hostBtn.disabled = false;
                 joinBtn.disabled = false;
@@ -9345,8 +9374,12 @@ class Game3D {
         });
 
         joinBtn.addEventListener('click', async () => {
+            if (!ensureNet()) return;
             const code = (codeInput.value || '').trim();
-            if (!code) return;
+            if (!code) {
+                this._mpUpdateStatusUI('Enter a room code first', 'error');
+                return;
+            }
             hostBtn.disabled = true;
             joinBtn.disabled = true;
             try {
@@ -9354,7 +9387,7 @@ class Game3D {
                 this._mpShowRoomCode(this.net.roomCode);
             } catch (err) {
                 console.error('[mp] join failed', err);
-                alert('Could not join: ' + (err.message || err));
+                this._mpUpdateStatusUI('Join failed: ' + (err.message || err.type || err), 'error');
             } finally {
                 hostBtn.disabled = false;
                 joinBtn.disabled = false;
@@ -9367,7 +9400,7 @@ class Game3D {
         });
 
         disconnectBtn.addEventListener('click', () => {
-            this.net.disconnect();
+            if (this.net) this.net.disconnect();
             this._mpHideRoomCode();
             // Wipe any lingering remote models
             Array.from(this.remotePlayers.keys()).forEach((id) => this._mpRemoveRemotePlayer(id));

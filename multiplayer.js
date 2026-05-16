@@ -21,6 +21,23 @@
     const ROOM_PREFIX = 'pjboy-';
     const PROTOCOL_VERSION = 1;
 
+    // ICE servers for WebRTC NAT traversal. Without TURN, ~30% of peer pairs
+    // fail to connect across the open internet (symmetric NAT, mobile carriers,
+    // corporate firewalls). The Open Relay Project offers free public TURN for
+    // small projects: https://www.metered.ca/tools/openrelay/
+    const ICE_SERVERS = [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        // Open Relay (free public TURN — fine for hobby projects, no SLA)
+        { urls: 'turn:openrelay.metered.ca:80',           username: 'openrelayproject', credential: 'openrelayproject' },
+        { urls: 'turn:openrelay.metered.ca:443',          username: 'openrelayproject', credential: 'openrelayproject' },
+        { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+    ];
+    const PEER_OPTIONS = {
+        debug: 1,
+        config: { iceServers: ICE_SERVERS },
+    };
+
     function randomCode(len = 6) {
         const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // unambiguous
         let s = '';
@@ -95,7 +112,7 @@
 
             return new Promise((resolve, reject) => {
                 this._setStatus('Creating room…', 'connecting');
-                const peer = new Peer(peerId, { debug: 1 });
+                const peer = new Peer(peerId, PEER_OPTIONS);
                 this.peer = peer;
 
                 peer.on('open', (id) => {
@@ -238,7 +255,7 @@
 
             return new Promise((resolve, reject) => {
                 this._setStatus('Connecting to ' + code + '…', 'connecting');
-                const peer = new Peer(undefined, { debug: 1 });
+                const peer = new Peer(undefined, PEER_OPTIONS);
                 this.peer = peer;
 
                 let resolved = false;
