@@ -1042,11 +1042,13 @@ class Game3D {
 
         this.player.swordPivot = new THREE.Group();
         const heldSword = this.buildSwordMesh();
-        heldSword.scale.setScalar(0.6);
+        // Template blade ≈ 1.8u; scale to a proportional one-handed weapon for a ~1.8u character.
+        heldSword.scale.setScalar(0.35);
         // The sword's local +Y is the blade. Rotate so the blade points along +Z
-        // (forward of the fist) and lower the handle to sit inside the palm.
+        // (forward of the fist), and shift down so the grip — not the blade base —
+        // sits at the hand origin (otherwise the whole blade floats above the fist).
         heldSword.rotation.set(-Math.PI / 2, 0, 0);
-        heldSword.position.set(0, 0, 0.1);
+        heldSword.position.set(0, 0, -0.25);
         this.player.swordPivot.add(heldSword);
 
         this.player.gunPivot = new THREE.Group();
@@ -1062,15 +1064,21 @@ class Game3D {
         this.player.weaponModel = null;
 
         // ===== FPV viewmodels =====
+        // Classic right-hand grip: blade points up-and-forward, handle sits near
+        // the lower-right corner of the viewport so it reads as held by an unseen fist.
         const fpvSword = this.buildSwordMesh();
         const fpvPivot = new THREE.Group();
-        fpvPivot.position.set(0.45, -0.45, -0.9);
-        fpvSword.rotation.set(-0.5, -0.2, -0.6);
-        fpvSword.scale.setScalar(0.7);
+        fpvPivot.position.set(0.5, -0.55, -0.7);
+        fpvSword.rotation.set(-0.35, 0.3, 0.55);
+        fpvSword.scale.setScalar(0.45);
         fpvPivot.add(fpvSword);
         this.camera.add(fpvPivot);
         this.fpvSword = fpvPivot;
         this.fpvSword.visible = false;
+        this._fpvSwordRest = {
+            pos: fpvPivot.position.clone(),
+            rot: { x: 0, y: 0, z: 0 } // pivot's own rotation is rest; sword tilt lives on the inner mesh
+        };
 
         // Swing animation state
         this.swingTimer = 0;
@@ -1242,17 +1250,19 @@ class Game3D {
         if (this.fpvSword) {
             const wieldingSword = cur && cur.type === 'melee';
             this.fpvSword.visible = wieldingSword && inFPV && inPlay;
+            const rest = this._fpvSwordRest;
             if (this.swingTimer > 0) {
                 this.swingTimer = Math.max(0, this.swingTimer - deltaTime);
                 const t = 1 - (this.swingTimer / this.swingDuration);
                 const arc = Math.sin(t * Math.PI);
-                this.fpvSword.rotation.z = -arc * 1.4;
-                this.fpvSword.rotation.x = arc * 0.6;
-                this.fpvSword.position.z = -0.9 - arc * 0.25;
+                // Pivot swings diagonally down-left from the rest grip.
+                this.fpvSword.rotation.z = -arc * 1.1;
+                this.fpvSword.rotation.x = arc * 0.5;
+                this.fpvSword.position.z = rest.pos.z - arc * 0.2;
             } else {
                 this.fpvSword.rotation.z = 0;
                 this.fpvSword.rotation.x = 0;
-                this.fpvSword.position.z = -0.9;
+                this.fpvSword.position.z = rest.pos.z;
             }
         }
 
@@ -1408,6 +1418,13 @@ class Game3D {
     }
 
     performAttack({ damage, range, hitColor, missColor, isRanged = false }) {
+        // Third-person melee: do a player-centered arc check. Camera ray is
+        // useless here because the camera sits 8+ units above the player —
+        // every hit ends up beyond the 2.5u melee `range`.
+        if (!isRanged && this.viewMode !== 'fpv') {
+            return this._performMeleeArc({ damage, range, hitColor, missColor });
+        }
+
         const raycaster = new THREE.Raycaster();
         raycaster.setFromCamera(new THREE.Vector2(0, 0), this.camera);
 
@@ -1435,6 +1452,82 @@ class Game3D {
         const dir = raycaster.ray.direction.clone();
         const endPoint = origin.add(dir.multiplyScalar(range));
         this.spawnImpact(endPoint, missColor);
+    }
+
+    // Third-person melee: pick the closest enemy within `range` of the player
+    // that's inside a 120° cone pointed at the *mouse aim* on the ground (so
+    // the swing follows the cursor, not the body's current facing). Falls back
+    // to character facing if the cursor can't be projected. Returns true on hit.
+    _performMeleeArc({ damage, range, hitColor, missColor }) {
+        const enemies = (this.playMode && this.playMode.enemies) || [];
+        const px = this.player.position.x;
+        const pz = this.player.position.z;
+
+        // Aim direction = player → mouse-ground-projection on XZ plane.
+        let fx = Math.sin(this.characterRotation);
+        let fz = Math.cos(this.characterRotation);
+        let aimGround = null;
+        if (this.playMode && this.playMode.mouseNDC) {
+            const ray = new THREE.Raycaster();
+            ray.setFromCamera(this.playMode.mouseNDC, this.camera);
+            const ground = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+            const hit = new THREE.Vector3();
+            if (ray.ray.intersectPlane(ground, hit)) {
+                const ax = hit.x - px;
+                const az = hit.z - pz;
+                const len = Math.hypot(ax, az);
+                if (len > 0.001) {
+                    fx = ax / len;
+                    fz = az / len;
+                    aimGround = hit;
+                }
+            }
+        }
+
+        const arcCos = Math.cos(Math.PI / 3); // ±60° → 120° total swing arc
+
+        let best = null;
+        let bestDist = Infinity;
+        for (const e of enemies) {
+            const dx = e.position.x - px;
+            const dz = e.position.z - pz;
+            const distXZ = Math.hypot(dx, dz);
+            if (distXZ > range || distXZ < 0.001) continue;
+            const dot = (fx * dx + fz * dz) / distXZ;
+            if (dot < arcCos) continue;
+            if (distXZ < bestDist) { bestDist = distXZ; best = e; }
+        }
+
+        if (best) {
+            best.userData.hp -= damage;
+            const hitPos = best.position.clone();
+            hitPos.y += 1.0;
+            this.spawnImpact(hitPos, hitColor);
+            this.audio && this.audio.play('swordHit');
+            if (best.userData.hp <= 0) {
+                this.killEnemy(best);
+            } else {
+                this.applyEnemyKnockback(best, this.player.position, 6);
+                this.flashEnemy(best);
+                this.showEnemyHPBar(best, 3.0);
+            }
+            return true;
+        }
+
+        // Miss — sparkle at the aim cursor if it's within reach, else at the
+        // edge of the swing arc in front of the player.
+        let slashPos;
+        if (aimGround && Math.hypot(aimGround.x - px, aimGround.z - pz) <= range) {
+            slashPos = new THREE.Vector3(aimGround.x, this.player.position.y + 0.1, aimGround.z);
+        } else {
+            slashPos = new THREE.Vector3(
+                px + fx * range * 0.6,
+                this.player.position.y + 1.0,
+                pz + fz * range * 0.6
+            );
+        }
+        this.spawnImpact(slashPos, missColor);
+        return false;
     }
 
     applyEnemyKnockback(e, sourcePos, strength = 7) {
@@ -4710,19 +4803,24 @@ class Game3D {
     }
 
     handleMelee(event) {
-        // Short-range melee from cursor (or center in FPV).
         this.triggerSwordSwing();
         this.playOneShotAnimation('Attack', 0.4);
-        const raycaster = new THREE.Raycaster();
-        const mouse = (this.viewMode === 'fpv')
-            ? new THREE.Vector2(0, 0)
-            : new THREE.Vector2(this.playMode.mouseNDC.x, this.playMode.mouseNDC.y);
-        raycaster.setFromCamera(mouse, this.camera);
+        this.triggerAttackPose && this.triggerAttackPose();
+        this.audio && this.audio.play('swordSwing');
 
         const weapon = this.getCurrentWeapon();
         const damage = weapon ? weapon.damage : 2;
         const range = (weapon && weapon.type === 'melee') ? weapon.range : 2.5;
 
+        // Third-person: arc check around the player (camera ray is wrong here, see performAttack).
+        if (this.viewMode !== 'fpv') {
+            this._performMeleeArc({ damage, range, hitColor: 0xffaa55, missColor: 0xcccccc });
+            return;
+        }
+
+        // FPV: ray from screen center.
+        const raycaster = new THREE.Raycaster();
+        raycaster.setFromCamera(new THREE.Vector2(0, 0), this.camera);
         const hits = raycaster.intersectObjects(this.playMode.enemies, true);
         for (const hit of hits) {
             if (hit.distance > range) break;
@@ -4730,6 +4828,7 @@ class Game3D {
             if (!e) continue;
             e.userData.hp -= damage;
             this.spawnImpact(hit.point.clone(), 0xffaa55);
+            this.audio && this.audio.play('swordHit');
             if (e.userData.hp <= 0) {
                 this.killEnemy(e);
             } else {
@@ -4739,7 +4838,6 @@ class Game3D {
             }
             return;
         }
-        // Whiff effect at range end
         const endPoint = this.camera.position.clone().add(raycaster.ray.direction.clone().multiplyScalar(range));
         this.spawnImpact(endPoint, 0xcccccc);
     }
@@ -6279,22 +6377,39 @@ class Game3D {
                 direction.add(camForward.clone().multiplyScalar(forwardIn));
                 direction.add(camRight.clone().multiplyScalar(strafeIn));
             }
-            // Mouse aim to ground point (isometric only)
+            // Third-person facing:
+            //   - When moving with WASD, the body turns to face the movement
+            //     direction so the character actually walks where it's looking
+            //     (no more sliding sideways/backwards with the body locked to the
+            //     mouse).
+            //   - When idle, the body re-orients toward the mouse aim point so
+            //     you can still face/aim while standing still.
+            //   - The mouse is also the "forward reference" for WASD (W goes away
+            //     from camera, etc.), so movement-facing is implicitly relative
+            //     to the mouse-driven view.
             if (this.viewMode !== 'fpv') {
-                const ray = new THREE.Raycaster();
-                ray.setFromCamera(this.playMode.mouseNDC, this.camera);
-                const ground = new THREE.Plane(new THREE.Vector3(0,1,0), 0);
-                const hit = new THREE.Vector3();
-                if (ray.ray.intersectPlane(ground, hit)) {
-                    const aim = new THREE.Vector3(hit.x - this.player.position.x, 0, hit.z - this.player.position.z);
-                    if (aim.lengthSq() > 0.0001) {
-                        const targetRot = Math.atan2(aim.x, aim.z);
-                        // Smoothly rotate toward aim
-                        const diff = ((targetRot - this.characterRotation + Math.PI) % (Math.PI*2)) - Math.PI;
-                        const maxStep = this.playMode.rotateLerp * deltaTime;
-                        const step = THREE.MathUtils.clamp(diff, -maxStep, maxStep);
-                        this.characterRotation += step;
+                let targetRot = null;
+                const moving = (forwardIn !== 0 || strafeIn !== 0);
+                if (moving) {
+                    // direction is already a camera-relative XZ vector.
+                    targetRot = Math.atan2(direction.x, direction.z);
+                } else {
+                    const ray = new THREE.Raycaster();
+                    ray.setFromCamera(this.playMode.mouseNDC, this.camera);
+                    const ground = new THREE.Plane(new THREE.Vector3(0,1,0), 0);
+                    const hit = new THREE.Vector3();
+                    if (ray.ray.intersectPlane(ground, hit)) {
+                        const aim = new THREE.Vector3(hit.x - this.player.position.x, 0, hit.z - this.player.position.z);
+                        if (aim.lengthSq() > 0.0001) targetRot = Math.atan2(aim.x, aim.z);
                     }
+                }
+                if (targetRot !== null) {
+                    const diff = ((targetRot - this.characterRotation + Math.PI) % (Math.PI*2)) - Math.PI;
+                    // Snappier turn while moving; gentler when re-centering on the mouse.
+                    const lerp = moving ? this.playMode.rotateLerp * 1.6 : this.playMode.rotateLerp;
+                    const maxStep = lerp * deltaTime;
+                    const step = THREE.MathUtils.clamp(diff, -maxStep, maxStep);
+                    this.characterRotation += step;
                 }
             }
             // Normalize desired move direction
