@@ -1561,10 +1561,10 @@ class Game3D {
             alpha: false
         });
         this.renderer.setSize(window.innerWidth, window.innerHeight);
-        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // Limit pixel ratio for retro look
+        this.renderer.setPixelRatio(1);
         this.renderer.setClearColor(0x000000);
         this.renderer.shadowMap.enabled = true;
-        this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        this.renderer.shadowMap.type = THREE.PCFShadowMap;
         
         // Create player (invisible in second-person view)
         this.createPlayer();
@@ -5716,32 +5716,16 @@ class Game3D {
         const directionalLight = new THREE.DirectionalLight(t.sun, 2.4);
         directionalLight.position.set(50, 50, 50);
         directionalLight.castShadow = true;
-        directionalLight.shadow.mapSize.width = 2048;
-        directionalLight.shadow.mapSize.height = 2048;
+        directionalLight.shadow.mapSize.width = 1024;
+        directionalLight.shadow.mapSize.height = 1024;
         directionalLight.shadow.camera.near = 0.5;
-        directionalLight.shadow.camera.far = 500;
-        directionalLight.shadow.camera.left = -100;
-        directionalLight.shadow.camera.right = 100;
-        directionalLight.shadow.camera.top = 100;
-        directionalLight.shadow.camera.bottom = -100;
+        directionalLight.shadow.camera.far = 200;
+        directionalLight.shadow.camera.left = -50;
+        directionalLight.shadow.camera.right = 50;
+        directionalLight.shadow.camera.top = 50;
+        directionalLight.shadow.camera.bottom = -50;
         this.scene.add(directionalLight);
         this.directionalLight = directionalLight;
-        
-        // Warm desert accent lights — gold/amber, scattered like reflected sun
-        for (let i = 0; i < 5; i++) {
-            const hue = 0.08 + Math.random() * 0.04; // amber/gold band
-            const pointLight = new THREE.PointLight(
-                new THREE.Color().setHSL(hue, 0.7, 0.7),
-                1.2,
-                30
-            );
-            pointLight.position.set(
-                (Math.random() - 0.5) * 100,
-                Math.random() * 20 + 5,
-                (Math.random() - 0.5) * 100
-            );
-            this.scene.add(pointLight);
-        }
     }
     
     shouldBlockInput(event) {
