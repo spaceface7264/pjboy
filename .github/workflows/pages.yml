@@ -63,6 +63,7 @@ jobs:
           
           # Copy any additional assets
           cp -r inmaze _site/ 2>/dev/null || true
+          cp -r assets _site/ 2>/dev/null || true
           
       - name: Optimize assets
         run: |

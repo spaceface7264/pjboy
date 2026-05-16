@@ -2,63 +2,74 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <title>3D Second-Person Game - 128-bit Style</title>
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="style.css?v=8">
 </head>
 <body>
-    <!-- Opening Screen -->
-    <div id="opening-screen" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: linear-gradient(135deg, #000428, #004e92); display: flex; flex-direction: column; justify-content: center; align-items: center; z-index: 10000; color: #00ff00; font-family: 'Courier New', monospace;">
-        <div style="text-align: center; max-width: 600px; padding: 40px;">
-            <h1 style="font-size: 48px; margin-bottom: 20px; text-shadow: 0 0 20px #00ff00; letter-spacing: 3px;">PJBOY</h1>
-            <h2 style="font-size: 24px; margin-bottom: 40px; color: #00aaff; text-shadow: 0 0 10px #00aaff;">3D MAZE ADVENTURE</h2>
-            <p style="font-size: 16px; margin-bottom: 40px; line-height: 1.6; opacity: 0.9;">
-                Navigate through 10 challenging maze levels!<br>
-                Use WASD to move, mouse to look around.<br>
-                Find the red exit marker to complete each level.
-            </p>
-            <button id="start-game-btn" style="background: linear-gradient(45deg, #00ff00, #00aaff); border: none; padding: 15px 40px; font-size: 18px; font-weight: bold; color: #000; border-radius: 8px; cursor: pointer; font-family: 'Courier New', monospace; text-transform: uppercase; letter-spacing: 2px; box-shadow: 0 4px 15px rgba(0,255,0,0.3); transition: all 0.3s ease;">
-                START GAME
-            </button>
-        </div>
-    </div>
-
-    <!-- Level Complete Screen -->
-    <div id="level-complete-screen" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); display: none; flex-direction: column; justify-content: center; align-items: center; z-index: 10000; color: #00ff00; font-family: 'Courier New', monospace;">
-        <div style="text-align: center; max-width: 500px; padding: 40px; background: linear-gradient(135deg, rgba(0,0,0,0.8), rgba(0,20,40,0.8)); border: 2px solid #00ff00; border-radius: 12px;">
-            <h2 style="font-size: 32px; margin-bottom: 20px; text-shadow: 0 0 20px #00ff00;">LEVEL COMPLETE!</h2>
-            <p id="level-complete-text" style="font-size: 18px; margin-bottom: 30px; color: #00aaff;"></p>
-            <button id="retry-level-btn" style="background: linear-gradient(45deg, #ff8800, #ffaa00); border: none; padding: 12px 30px; font-size: 16px; font-weight: bold; color: #000; border-radius: 8px; cursor: pointer; font-family: 'Courier New', monospace; text-transform: uppercase; letter-spacing: 1px; margin: 5px;">
-                RETRY LEVEL
-            </button>
-            <button id="next-level-btn" style="background: linear-gradient(45deg, #00ff00, #00aaff); border: none; padding: 12px 30px; font-size: 16px; font-weight: bold; color: #000; border-radius: 8px; cursor: pointer; font-family: 'Courier New', monospace; text-transform: uppercase; letter-spacing: 1px; margin: 5px;">
-                NEXT LEVEL
-            </button>
-            <button id="main-menu-btn" style="background: linear-gradient(45deg, #666, #999); border: none; padding: 12px 30px; font-size: 16px; font-weight: bold; color: #fff; border-radius: 8px; cursor: pointer; font-family: 'Courier New', monospace; text-transform: uppercase; letter-spacing: 1px; margin: 5px;">
-                MAIN MENU
-            </button>
-        </div>
-    </div>
-
-    <!-- Game Over Screen -->
-    <div id="game-over-screen" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); display: none; flex-direction: column; justify-content: center; align-items: center; z-index: 10000; color: #ff0000; font-family: 'Courier New', monospace;">
-        <div style="text-align: center; max-width: 500px; padding: 40px; background: linear-gradient(135deg, rgba(0,0,0,0.8), rgba(40,0,0,0.8)); border: 2px solid #ff0000; border-radius: 12px;">
-            <h2 style="font-size: 32px; margin-bottom: 20px; text-shadow: 0 0 20px #ff0000;">GAME OVER</h2>
-            <p id="game-over-text" style="font-size: 18px; margin-bottom: 30px; color: #ffaa00;"></p>
-            <button id="restart-game-btn" style="background: linear-gradient(45deg, #ff0000, #ff6600); border: none; padding: 12px 30px; font-size: 16px; font-weight: bold; color: #fff; border-radius: 8px; cursor: pointer; font-family: 'Courier New', monospace; text-transform: uppercase; letter-spacing: 1px; margin: 5px;">
-                RESTART LEVEL
-            </button>
-            <button id="game-over-menu-btn" style="background: linear-gradient(45deg, #666, #999); border: none; padding: 12px 30px; font-size: 16px; font-weight: bold; color: #fff; border-radius: 8px; cursor: pointer; font-family: 'Courier New', monospace; text-transform: uppercase; letter-spacing: 1px; margin: 5px;">
-                MAIN MENU
-            </button>
-        </div>
-    </div>
-
     <div id="gameContainer">
         <canvas id="gameCanvas"></canvas>
         <div id="ui">
-            <div id="crosshair" style="position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 18px; height: 18px; pointer-events: none; z-index: 9999999; display: none;">
+            <div id="crosshair" style="position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 18px; height: 18px; pointer-events: none; z-index: 999999; display: none;">
                 <div style="position: absolute; top: 50%; left: 50%; width: 8px; height: 8px; background: #00ff00; box-shadow: 0 0 10px #00ff00, 0 0 20px #00ff00; border-radius: 50%; transform: translate(-50%, -50%);"></div>
+            </div>
+
+            <!-- Damage vignette overlay -->
+            <div id="damage-vignette"></div>
+
+            <!-- Lava warning vignette (arena mode) -->
+            <div id="lava-vignette"></div>
+
+            <!-- Arena intro/wave countdown overlay -->
+            <div id="arena-countdown" style="display:none;">
+                <div class="ac-mode">ARENA MODE</div>
+                <div class="ac-big"></div>
+                <div class="ac-sub"></div>
+            </div>
+
+            <!-- Arena/wave HUD (hidden when not in arena mode) -->
+            <div id="arena-hud" style="display:none;">
+                <div class="ah-wave">WAVE 1</div>
+                <div class="ah-line">Enemies left: <span class="ah-enemies">0</span></div>
+                <div class="ah-phase"></div>
+                <div class="ah-score">Score: 0</div>
+                <div class="ah-boss-wrap" style="display:none;">
+                    <div class="ah-boss-label">⚠ BOSS ⚠</div>
+                    <div class="ah-boss-bar"><div class="ah-boss-fill"></div></div>
+                </div>
+            </div>
+
+            <!-- Muzzle flash overlay (subtle full-screen tint on gunfire) -->
+            <div id="muzzle-flash"></div>
+
+            <!-- Top-center objective banner -->
+            <div id="objective-banner">
+                <span class="ob-level">LVL 1</span>
+                <span class="ob-sep">·</span>
+                <span class="ob-enemies">Enemies: 0</span>
+                <span class="ob-sep">·</span>
+                <span class="ob-flags">Flags: 0/0</span>
+                <span class="ob-sep">·</span>
+                <span class="ob-score">Score: 0</span>
+            </div>
+
+            <!-- Top-right minimap -->
+            <div id="minimap-wrap">
+                <canvas id="minimap" width="160" height="160"></canvas>
+                <div class="mm-label">MAP</div>
+            </div>
+
+            <!-- Bottom-left segmented health bar -->
+            <div id="health-bar">
+                <div class="hb-label">HEALTH</div>
+                <div class="hb-pips"></div>
+                <div class="hb-text">100 / 100</div>
             </div>
         </div>
         
@@ -66,26 +77,40 @@
         <div id="settings-modal" class="modal">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h2 id="settings-title">Instillinger</h2>
+                    <h2 id="settings-title">Game Settings & Map Control</h2>
                     <span class="close">&times;</span>
                 </div>
                 <div class="modal-body">
                     <div class="settings-section">
-                        <h3 id="difficulty-title">Sværhedsgrad</h3>
+                        <h3 id="maze-selection-title">Maze Selection</h3>
+                        <div class="maze-buttons">
+                            <button class="maze-btn" data-maze="0">Wide Halls</button>
+                            <button class="maze-btn" data-maze="1">Classic Small</button>
+                            <button class="maze-btn" data-maze="2">Open Arena</button>
+                            <button class="maze-btn" data-maze="3">Spiral</button>
+                            <button class="maze-btn" data-maze="4">Labyrinth</button>
+                            <button class="maze-btn" data-maze="5">ASCII Maze</button>
+                        </div>
+                        <div class="maze-description">
+                            <p id="maze-desc">Large maze with wide 5-cell halls</p>
+                        </div>
+                    </div>
+                    
+                    <div class="settings-section">
+                        <h3 id="difficulty-title">Difficulty</h3>
                         <div>
                             <input id="maze-difficulty" type="range" min="1" max="10" value="5" style="width:100%" />
                             <div style="text-align:right; font-size:12px; opacity:0.8;">Level: <span id="maze-difficulty-value">5</span></div>
                         </div>
-
-                        <h3 id="maze-selection-title">Ny Labyrint</h3>
-                        <div class="maze-buttons">
-                            <button class="maze-btn" data-maze="5">Start</button>
-                        </div>
-                            
-                       
                     </div>
 
-
+                    <div class="settings-section">
+                        <h3 id="view-title">View</h3>
+                        <div class="view-buttons">
+                            <button class="view-btn" data-view="iso">Isometric</button>
+                            <button class="view-btn" data-view="fpv">First Person</button>
+                        </div>
+                    </div>
 
                     <div class="settings-section">
                         <h3 id="language-title">Language</h3>
@@ -95,16 +120,124 @@
                         </div>
                     </div>
 
+                    <div class="settings-section">
+                        <h3 id="game-mode-title">Game Mode</h3>
+                        <div class="mode-buttons">
+                            <button class="mode-btn" data-mode="play">Play Mode</button>
+                            <button class="mode-btn" data-mode="create">Create Mode</button>
+                            <button class="mode-btn mode-btn-arena" data-mode="arena">Arena Mode</button>
+                        </div>
+                    </div>
 
-                    
+                    <div class="settings-section">
+                        <h3 id="character-title">Character</h3>
+                        <div class="character-buttons">
+                            <button class="character-btn active" data-character="skeleton">
+                                <div class="character-preview"></div>
+                                <span class="character-label">Skeleton</span>
+                            </button>
+                            <button class="character-btn" data-character="female1">
+                                <div class="character-preview"></div>
+                                <span class="character-label">Female 1</span>
+                            </button>
+                            <button class="character-btn" data-character="female2">
+                                <div class="character-preview"></div>
+                                <span class="character-label">Female 2</span>
+                            </button>
+                            <button class="character-btn" data-character="male1">
+                                <div class="character-preview"></div>
+                                <span class="character-label">Male 1</span>
+                            </button>
+                            <button class="character-btn" data-character="male2">
+                                <div class="character-preview"></div>
+                                <span class="character-label">Male 2</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="settings-section">
+                        <h3 id="audio-title">Audio</h3>
+                        <div class="audio-row">
+                            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                                <input id="audio-enabled" type="checkbox" checked />
+                                <span>Sound effects</span>
+                            </label>
+                        </div>
+                        <div class="audio-row" style="margin-top:8px;">
+                            <label style="display:block;margin-bottom:4px;">Volume: <span id="audio-volume-value">60</span>%</label>
+                            <input id="audio-volume" type="range" min="0" max="100" value="60" style="width:100%" />
+                        </div>
+                    </div>
+
+                    <div class="settings-section">
+                        <h3 id="game-info-title">Game Info</h3>
+                        <div class="info-grid">
+                            <div class="info-item">
+                                <span class="info-label">Current Position:</span>
+                                <span id="player-pos">(0, 0, 0)</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">Facing Direction:</span>
+                                <span id="player-facing">North (0°)</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">Camera Angle:</span>
+                                <span id="camera-info">0°</span>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
         
+        <!-- Toolbox Modal for Create Mode -->
+        <div id="toolbox-modal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>Build Toolbox</h2>
+                    <span class="close-toolbox">&times;</span>
+                </div>
+                <div class="modal-body">
+                    <div class="toolbox-section">
+                        <h3>Tools</h3>
+                        <div class="tool-buttons">
+                            <button class="tool-btn active" data-tool="wall">Wall</button>
+                            <button class="tool-btn" data-tool="erase">Erase</button>
+                            <button class="tool-btn" data-tool="start">Start Point</button>
+                            <button class="tool-btn" data-tool="end">End Point</button>
+                        </div>
+                    </div>
+                    
+                    <div class="toolbox-section">
+                        <h3>Instructions</h3>
+                        <div class="toolbox-info">
+                            <p id="tool-instructions">Click on highlighted grid squares to place walls</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Touch controls overlay (iPad / mobile) -->
+        <div id="touch-controls">
+            <div id="touch-look"></div>
+            <div id="touch-joystick">
+                <div id="touch-joystick-knob"></div>
+            </div>
+            <button class="touch-btn" id="touch-btn-menu" type="button" aria-label="Menu">≡</button>
+            <button class="touch-btn" id="touch-btn-view" type="button" aria-label="Toggle view">VIEW</button>
+            <button class="touch-btn" id="touch-btn-wprev" type="button" aria-label="Previous weapon">◀</button>
+            <button class="touch-btn" id="touch-btn-wnext" type="button" aria-label="Next weapon">▶</button>
+            <button class="touch-btn" id="touch-btn-reload" type="button" aria-label="Reload">R</button>
+            <button class="touch-btn" id="touch-btn-melee" type="button" aria-label="Melee">MELEE</button>
+            <button class="touch-btn" id="touch-btn-jump" type="button" aria-label="Jump">JUMP</button>
+            <button class="touch-btn large" id="touch-btn-fire" type="button" aria-label="Fire">FIRE</button>
+        </div>
     </div>
-    
+
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
-    <script src="game.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/utils/SkeletonUtils.js"></script>
+    <script src="game.js?v=32"></script>
 </body>
 </html>

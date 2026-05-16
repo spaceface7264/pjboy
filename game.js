@@ -1,4 +1,215 @@
 // 3D Second-Person Game - 128-bit Style
+
+// =============================================================
+// AudioBus: lightweight procedural Web Audio synth.
+// All sounds are generated on the fly — no asset files needed.
+// Construction is cheap; the AudioContext stays suspended until
+// the first user gesture (browsers require this).
+// =============================================================
+class AudioBus {
+    constructor() {
+        this.ctx = null;
+        this.master = null;
+        this.enabled = true;
+        this.volume = 0.6;
+        this._unlocked = false;
+        this._footstepCooldown = 0;
+        this._lastNow = 0;
+        // Load persisted prefs
+        try {
+            const raw = localStorage.getItem('pjboy.audio');
+            if (raw) {
+                const prefs = JSON.parse(raw);
+                if (typeof prefs.enabled === 'boolean') this.enabled = prefs.enabled;
+                if (typeof prefs.volume === 'number') this.volume = prefs.volume;
+            }
+        } catch (_) {}
+    }
+
+    _ensureContext() {
+        if (this.ctx) return this.ctx;
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return null;
+        this.ctx = new AC();
+        this.master = this.ctx.createGain();
+        this.master.gain.value = this.volume;
+        this.master.connect(this.ctx.destination);
+        return this.ctx;
+    }
+
+    unlock() {
+        const ctx = this._ensureContext();
+        if (!ctx) return;
+        if (ctx.state === 'suspended') ctx.resume();
+        this._unlocked = true;
+    }
+
+    setVolume(v) {
+        this.volume = Math.max(0, Math.min(1, v));
+        if (this.master) this.master.gain.value = this.enabled ? this.volume : 0;
+        this._persist();
+    }
+
+    setEnabled(b) {
+        this.enabled = !!b;
+        if (this.master) this.master.gain.value = this.enabled ? this.volume : 0;
+        this._persist();
+    }
+
+    _persist() {
+        try {
+            localStorage.setItem('pjboy.audio', JSON.stringify({
+                enabled: this.enabled, volume: this.volume
+            }));
+        } catch (_) {}
+    }
+
+    _now() {
+        return this.ctx ? this.ctx.currentTime : 0;
+    }
+
+    // Core building block: an oscillator with an envelope.
+    _tone({ type = 'sine', freq = 440, freqEnd = null, dur = 0.15, gain = 0.3, attack = 0.005, release = null, detune = 0, delay = 0 }) {
+        const ctx = this.ctx;
+        if (!ctx) return;
+        const t0 = ctx.currentTime + delay;
+        const osc = ctx.createOscillator();
+        const g = ctx.createGain();
+        osc.type = type;
+        osc.frequency.setValueAtTime(freq, t0);
+        if (freqEnd !== null) osc.frequency.exponentialRampToValueAtTime(Math.max(0.001, freqEnd), t0 + dur);
+        if (detune) osc.detune.setValueAtTime(detune, t0);
+        const rel = release == null ? dur : release;
+        g.gain.setValueAtTime(0, t0);
+        g.gain.linearRampToValueAtTime(gain, t0 + attack);
+        g.gain.exponentialRampToValueAtTime(0.0001, t0 + rel);
+        osc.connect(g).connect(this.master);
+        osc.start(t0);
+        osc.stop(t0 + rel + 0.05);
+    }
+
+    // Filtered noise burst.
+    _noise({ dur = 0.1, gain = 0.3, lowpass = 2000, highpass = 0, delay = 0 }) {
+        const ctx = this.ctx;
+        if (!ctx) return;
+        const t0 = ctx.currentTime + delay;
+        const len = Math.max(1, Math.floor(ctx.sampleRate * dur));
+        const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+        const data = buf.getChannelData(0);
+        for (let i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1);
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(gain, t0);
+        g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+        let node = src;
+        if (lowpass) {
+            const lp = ctx.createBiquadFilter();
+            lp.type = 'lowpass';
+            lp.frequency.value = lowpass;
+            node.connect(lp);
+            node = lp;
+        }
+        if (highpass) {
+            const hp = ctx.createBiquadFilter();
+            hp.type = 'highpass';
+            hp.frequency.value = highpass;
+            node.connect(hp);
+            node = hp;
+        }
+        node.connect(g).connect(this.master);
+        src.start(t0);
+        src.stop(t0 + dur + 0.05);
+    }
+
+    play(name) {
+        if (!this.enabled) return;
+        const ctx = this._ensureContext();
+        if (!ctx || ctx.state !== 'running') return; // gated until first gesture
+        switch (name) {
+            case 'shoot':
+                this._tone({ type: 'sawtooth', freq: 720, freqEnd: 180, dur: 0.09, gain: 0.32 });
+                this._noise({ dur: 0.05, gain: 0.18, lowpass: 1800, highpass: 400 });
+                break;
+            case 'swordSwing':
+                this._noise({ dur: 0.18, gain: 0.18, lowpass: 1200, highpass: 200 });
+                this._tone({ type: 'sine', freq: 320, freqEnd: 120, dur: 0.18, gain: 0.10 });
+                break;
+            case 'swordHit':
+                this._noise({ dur: 0.12, gain: 0.28, lowpass: 900 });
+                this._tone({ type: 'square', freq: 180, freqEnd: 80, dur: 0.1, gain: 0.18 });
+                break;
+            case 'bulletHit':
+                this._noise({ dur: 0.07, gain: 0.22, lowpass: 2400, highpass: 700 });
+                this._tone({ type: 'triangle', freq: 260, freqEnd: 110, dur: 0.07, gain: 0.14 });
+                break;
+            case 'playerHurt':
+                this._tone({ type: 'square', freq: 220, freqEnd: 110, dur: 0.22, gain: 0.28 });
+                this._noise({ dur: 0.08, gain: 0.12, lowpass: 1200 });
+                break;
+            case 'enemyDeath':
+                this._tone({ type: 'sawtooth', freq: 380, freqEnd: 70, dur: 0.35, gain: 0.28 });
+                this._noise({ dur: 0.18, gain: 0.16, lowpass: 1600 });
+                break;
+            case 'pickupHealth':
+                this._tone({ type: 'sine', freq: 660, dur: 0.09, gain: 0.22 });
+                this._tone({ type: 'sine', freq: 880, dur: 0.12, gain: 0.22, delay: 0.06 });
+                break;
+            case 'pickupAmmo':
+                this._tone({ type: 'square', freq: 520, dur: 0.07, gain: 0.18 });
+                this._tone({ type: 'square', freq: 780, dur: 0.07, gain: 0.18, delay: 0.05 });
+                break;
+            case 'pickupFlag':
+                this._tone({ type: 'triangle', freq: 440, dur: 0.09, gain: 0.22 });
+                this._tone({ type: 'triangle', freq: 660, dur: 0.09, gain: 0.22, delay: 0.07 });
+                this._tone({ type: 'triangle', freq: 880, dur: 0.12, gain: 0.22, delay: 0.14 });
+                break;
+            case 'pickupPowerup':
+                this._tone({ type: 'sine', freq: 523, dur: 0.10, gain: 0.22 });
+                this._tone({ type: 'sine', freq: 659, dur: 0.10, gain: 0.22, delay: 0.07 });
+                this._tone({ type: 'sine', freq: 784, dur: 0.10, gain: 0.22, delay: 0.14 });
+                this._tone({ type: 'sine', freq: 1047, dur: 0.18, gain: 0.22, delay: 0.21 });
+                break;
+            case 'footstep':
+                this._noise({ dur: 0.05, gain: 0.07 + Math.random() * 0.03, lowpass: 600 + Math.random() * 200 });
+                break;
+            case 'levelComplete':
+                this._tone({ type: 'triangle', freq: 523, dur: 0.18, gain: 0.28 });
+                this._tone({ type: 'triangle', freq: 659, dur: 0.18, gain: 0.28, delay: 0.12 });
+                this._tone({ type: 'triangle', freq: 784, dur: 0.18, gain: 0.28, delay: 0.24 });
+                this._tone({ type: 'triangle', freq: 1047, dur: 0.45, gain: 0.32, delay: 0.36 });
+                break;
+            case 'gameOver':
+                this._tone({ type: 'sawtooth', freq: 220, freqEnd: 80, dur: 0.9, gain: 0.28 });
+                this._tone({ type: 'sine', freq: 110, freqEnd: 55, dur: 1.1, gain: 0.18, delay: 0.1 });
+                break;
+            case 'uiClick':
+                this._tone({ type: 'square', freq: 880, dur: 0.04, gain: 0.14 });
+                break;
+            case 'uiHover':
+                this._tone({ type: 'sine', freq: 1320, dur: 0.03, gain: 0.08 });
+                break;
+            case 'reload':
+                this._noise({ dur: 0.06, gain: 0.14, lowpass: 1500, highpass: 600 });
+                this._tone({ type: 'square', freq: 320, dur: 0.05, gain: 0.10, delay: 0.08 });
+                break;
+        }
+    }
+
+    // Throttled footstep — call every frame; it self-rate-limits.
+    footstep(intervalSec = 0.36) {
+        if (!this.enabled) return;
+        const ctx = this._ensureContext();
+        if (!ctx) return;
+        const now = ctx.currentTime;
+        if (now - this._lastFootstep > intervalSec) {
+            this._lastFootstep = now;
+            this.play('footstep');
+        }
+    }
+}
+AudioBus.prototype._lastFootstep = 0;
+
 class Game3D {
     constructor() {
         this.scene = null;
@@ -9,6 +220,7 @@ class Game3D {
         this.keys = {};
         this.mouse = { x: 0, y: 0 };
         this.isPointerLocked = false;
+        this.isTouchDevice = false; // set true by setupTouchControls if a touch device is detected
         this.controlScheme = 1; // 1: Mouse controls character, 2: Space orbit, 3: Tank controls, 4: Mouse follow
         this.cameraMode = 'fixed'; // Fixed camera angles like old RE
         this.currentCameraAngle = 0; // 0, 90, 180, 270 degrees
@@ -33,7 +245,7 @@ class Game3D {
             groundDot: null
         };
         this.modelYawOffset = 0; // Yaw offset to align model forward with aim (radians)
-        this.viewMode = 'fpv'; // 'iso' | 'fpv' | 'birds-eye' | 'ghost'
+        this.viewMode = 'iso'; // 'iso' | 'fpv' | 'birds-eye' | 'ghost' — overridden to 'fpv' at end of init()
         this.fpvPitch = 0;
         this.fpvYawSensitivity = 0.0025;
         this.fpvBobAmplitude = 0.05; // camera bobbing in meters
@@ -49,44 +261,6 @@ class Game3D {
             quaternion: new THREE.Quaternion(),
             heightSpeed: 20 // Speed for height changes
         };
-        
-        // Bird's eye view camera (free-flying)
-        this.birdsEyeCamera = {
-            position: new THREE.Vector3(0, 50, 0),
-            rotation: { x: -Math.PI/2, y: 0 }, // Look straight down
-            speed: 25,
-            mouseSensitivity: 0.002,
-            quaternion: new THREE.Quaternion(),
-            heightSpeed: 30 // Speed for height changes
-        };
-        this.showControlsUI = false; // Toggle for control panel visibility
-        
-        // Game state management
-        this.gameState = 'menu'; // 'menu', 'playing', 'levelComplete', 'gameOver'
-        this.currentLevel = 1;
-        this.maxLevel = 10;
-        this.levelStartTime = 0;
-        this.levelCompleteTime = 0;
-        this.playerLives = 3;
-        this.totalScore = 0;
-        this.levelEndWorld = null; // Position of the red exit marker
-        
-        // Timer system for maze solving
-        this.mazeTimer = {
-            isActive: false,
-            startTime: 0,
-            currentTime: 0,
-            bestTime: null,
-            hasStarted: false,
-            hasFinished: false
-        };
-        
-        // Scoring tracking
-        this.levelStats = {
-            enemiesNeutralized: 0,
-            flagsUsed: 0
-        };
-        
         this.crosshair3D = null;
         this.groundTargetIndicator = null; // 3D crosshair object
         this.mazeDifficulty = 5; // 1..10 for ASCII maze generator
@@ -97,6 +271,7 @@ class Game3D {
             danish: {
                 // Game modes
                 playMode: 'Spil Tilstand',
+                createMode: 'Opret Tilstand',
                 
                 // Controls
                 controls: 'Kontroller',
@@ -108,7 +283,11 @@ class Game3D {
                 spaceCamera: 'Mellemrum - Skift Kamera',
                 jJump: 'J - Hop',
                 pSettings: 'P - Indstillinger',
+                tToolbox: 'T - Værktøjskasse',
                 iInventory: 'I - Inventar',
+                qWall: 'Q - Væg',
+                eErase: 'E - Slet',
+                shiftLine: 'SHIFT - Lige Linje',
                 
                 // Settings
                 settings: 'Indstillinger',
@@ -164,12 +343,13 @@ class Game3D {
                 
                 // Weapons
                 weapons: 'Våben',
+                consumables: 'Forbrugsvarer',
+                inventoryDrawer: 'Inventar Skuffe',
+                close: 'Luk',
                 diamondSword: 'Diamant Sværd',
                 diamondSwordDesc: 'Et kraftfuldt diamant sværd med høj skade',
                 gun: 'Pistol',
                 gunDesc: 'En præcis pistol med høj skade',
-                machineGun: 'Maskinpistol',
-                machineGunDesc: 'Hurtig maskinpistol med kontinuerlig ild',
                 currentWeapon: 'Aktuelt Våben',
                 switchWeapon: 'Skift Våben',
                 damage: 'Skade',
@@ -238,6 +418,7 @@ class Game3D {
             english: {
                 // Game modes
                 playMode: 'Play Mode',
+                createMode: 'Create Mode',
                 
                 // Controls
                 controls: 'Controls',
@@ -249,7 +430,11 @@ class Game3D {
                 spaceCamera: 'Space - Change Camera',
                 jJump: 'J - Jump',
                 pSettings: 'P - Settings',
+                tToolbox: 'T - Toolbox',
                 iInventory: 'I - Inventory',
+                qWall: 'Q - Wall',
+                eErase: 'E - Erase',
+                shiftLine: 'SHIFT - Straight Line',
                 
                 // Settings
                 settings: 'Settings',
@@ -305,12 +490,13 @@ class Game3D {
                 
                 // Weapons
                 weapons: 'Weapons',
+                consumables: 'Consumables',
+                inventoryDrawer: 'Inventory Drawer',
+                close: 'Close',
                 diamondSword: 'Diamond Sword',
                 diamondSwordDesc: 'A powerful diamond sword with high damage',
                 gun: 'Pistol',
                 gunDesc: 'A precise pistol with high damage',
-                machineGun: 'Machine Gun',
-                machineGunDesc: 'Fast machine gun with continuous fire',
                 currentWeapon: 'Current Weapon',
                 switchWeapon: 'Switch Weapon',
                 damage: 'Damage',
@@ -378,10 +564,9 @@ class Game3D {
             }
         };
         
-        // Theme system
+        // Theme — desert only
         this.themeName = 'desert';
         this.themes = {
-            
             desert: {
                 ground: 0xc2b280,
                 grid: 0xffe8a0,
@@ -390,25 +575,23 @@ class Game3D {
                 sky: 0xdfe6ff,
                 ambient: 0x705f3a,
                 sun: 0xffd27a
-            },
-            
+            }
         };
         this.materials = { wall: null };
         
         // Game modes
-        this.gameMode = 'play'; // Only play mode now
-        
-        // Temporary stub to prevent errors during cleanup
+        this.gameMode = 'play'; // 'play' or 'create'
         this.createMode = {
-            highlightObjects: [],
-            previewObject: null,
-            tool: 'wall',
-            gridSize: 20,
-            customMaze: [],
-            isMouseDown: false,
-            lastGridPos: null,
-            startLinePos: null,
-            isShiftHeld: false
+            tool: 'wall', // Current tool: 'wall', 'erase', 'start', 'end'
+            gridSize: 20, // Grid size for create mode
+            customMaze: [], // Custom maze layout
+            highlightObjects: [], // Objects for grid highlighting
+            isPlacing: false, // Whether currently placing objects
+            previewObject: null, // Preview object for current tool
+            isMouseDown: false, // Whether mouse is currently pressed
+            lastGridPos: null, // Last grid position for continuous placement
+            startLinePos: null, // Starting position for straight line
+            isShiftHeld: false // Whether SHIFT key is held down
         };
         
         // Play mode (Diablo-style) state
@@ -422,7 +605,7 @@ class Game3D {
             projectileSpeed: 30,
             enemies: [],
             enemiesGroup: new THREE.Group(),
-            cameraOffset: new THREE.Vector3(-15, 20, -15), // isometric offset
+            cameraOffset: new THREE.Vector3(-8, 10, -8), // isometric offset (closer 2nd-person)
             mouseNDC: new THREE.Vector2(0, 0),
             orbitEnabled: false,
             lastMouseX: null
@@ -455,93 +638,204 @@ class Game3D {
         this.enemySpawnTimer = 0; // timer for continuous spawning
         this.enemySpawnInterval = 30; // seconds between enemy spawns
 
+        // Arena / Wave mode (sub-mode of 'play')
+        this.arena = {
+            active: false,
+            phase: 'idle', // 'idle' | 'intro' | 'wave-active' | 'eruption' | 'boss-fight' | 'wave-complete'
+            wave: 0,
+            enemiesToSpawn: 0,
+            enemiesSpawnedThisWave: 0,
+            spawnTimer: 0,
+            spawnInterval: 1.4,
+            arenaHalf: 30,
+            perimeterWalls: [],
+            pillars: [],
+            decor: [],
+            arenaObjects: [],
+            volcano: null,
+            // Lava tuning: slow rise during eruption, keeps creeping up during boss-fight,
+            // capping high enough to threaten the tallest platform.
+            lava: { mesh: null, y: -50, restY: -50, peakY: 0.4, bossCap: 5.2, rising: false, riseSpeed: 0, tickTimer: 0, targetY: -50 },
+            shake: { intensity: 0, duration: 0, elapsed: 0 },
+            volcanoParticles: [],
+            boss: null,
+            eruptionTimer: 0,
+            eruptionDuration: 4.5,
+            waveCompleteTimer: 0,
+            introTimer: 0,
+            introDuration: 4.7,
+            introLastLabel: null,
+        };
+
+        this.audio = new AudioBus();
+        this._setupAudioUnlock();
+
         this.init();
         this.setupEventListeners();
+        // Pickups must initialize before weapons: loadQuickbarLayout (called from
+        // initializeWeapons) builds the default layout from both registries.
+        this.initializePickups();
         this.initializeWeapons();
         this.animate();
     }
-    
-    initializeWeapons() {
-        // Define available weapons
-        this.weaponDefinitions = {
-            diamondSword: {
-                name: this.t('diamondSword'),
-                damage: 15,
-                range: 2.5,
-                cooldown: 0.8,
-                type: 'melee',
-                icon: '⚔️',
-                color: 0x00aaff,
-                description: this.t('diamondSwordDesc'),
-                ammoCost: 0
-            },
-            gun: {
-                name: this.t('gun'),
-                damage: 25,
-                range: 15,
-                cooldown: 1.2,
-                type: 'ranged',
-                icon: '🔫',
-                color: 0x8B4513,
-                description: this.t('gunDesc'),
-                ammoCost: 1
-            },
-            machineGun: {
-                name: this.t('machineGun'),
-                damage: 8,
-                range: 12,
-                cooldown: 0.1,
-                type: 'ranged',
-                icon: '🔫',
-                color: 0x696969,
-                description: this.t('machineGunDesc'),
-                ammoCost: 1,
-                isContinuous: true
-            }
+
+    _setupAudioUnlock() {
+        const unlock = () => {
+            this.audio.unlock();
+            window.removeEventListener('pointerdown', unlock);
+            window.removeEventListener('keydown', unlock);
+            window.removeEventListener('touchstart', unlock);
         };
-        
-        // Initialize player weapons
-        this.player.weapons = ['diamondSword', 'gun', 'machineGun'];
+        window.addEventListener('pointerdown', unlock);
+        window.addEventListener('keydown', unlock);
+        window.addEventListener('touchstart', unlock);
+
+        // Delegated UI click sound for any modal button.
+        document.addEventListener('click', (ev) => {
+            const t = ev.target;
+            if (!t || !t.closest) return;
+            if (t.closest('.modal') && t.matches && (t.matches('button') || t.matches('.maze-btn,.view-btn,.language-btn,.mode-btn,.tool-btn,.character-btn'))) {
+                this.audio && this.audio.play('uiClick');
+            }
+        });
+    }
+
+    initializePickups() {
+        // One source of truth for pickups: spawn visuals, activation effect, toast text.
+        // `weight` is the relative drop frequency (sum doesn't have to equal 100).
+        // `autoApply: true` means picking it up immediately stacks the stat —
+        // it never sits in the bag waiting to be activated.
+        const g = this;
+        this.ITEM_DEFS = {
+            health:      { emoji: '❤️', color: 0x66ff66, weight: 22, labelKey: 'health',      labelSuffix: ' +25',
+                apply() { g.inventory.health = Math.min(g.inventory.maxHealth, g.inventory.health + 25);
+                          g.player.hp = Math.min(g.player.maxHp, g.player.hp + 25); } },
+            ammo:        { emoji: '🔸', color: 0xffff66, weight: 22, labelKey: 'ammo',        labelSuffix: ' +10', autoApply: true,
+                apply() { g.inventory.ammo = Math.min(g.inventory.ammo + 10, g.AMMO_MAX); g.updateWeaponPowerUpUI(); } },
+            jetpack:     { emoji: '🚀', color: 0xffaa66, weight: 16, labelKey: 'jetpackFuel', labelSuffix: ' +50', autoApply: true,
+                apply() { g.powerUps.jetpackFuel += 50; } },
+            speed:       { emoji: '⚡', color: 0x66ccff, weight: 12, labelKey: 'speedBoost',  labelSuffix: ' +1',
+                apply() { g.powerUps.speedBoost += 1; } },
+            weaponBuff:  { emoji: '⚔️', color: 0xff8866, weight: 10, labelKey: 'weaponBuff',  labelSuffix: ' +1',
+                apply() { g.powerUps.weaponBuff += 1; } },
+            healthRegen: { emoji: '💚', color: 0xaaff88, weight: 10, labelKey: 'healthRegen', labelSuffix: ' +1',
+                apply() { g.powerUps.healthRegen += 1; } },
+            flag:        { emoji: '🏁', color: 0xff66aa, weight: 6,  labelKey: 'flag',        labelSuffix: ' +1', autoApply: true,
+                apply() { g.inventory.flags += 1; if (g.updateControlsUI) g.updateControlsUI(); } }
+        };
+    }
+
+    // Display label that respects current language
+    itemLabel(type) {
+        const def = this.ITEM_DEFS[type];
+        if (!def) return type;
+        return `${this.t(def.labelKey)}${def.labelSuffix || ''}`;
+    }
+
+    // Pickup toast string (emoji + translated label)
+    pickupToast(type) {
+        const def = this.ITEM_DEFS[type];
+        if (!def) return `📦 ${type}`;
+        return `${def.emoji} ${this.itemLabel(type)}`;
+    }
+
+    // === Single source of truth for the inventory/drawer/quickbar UI ===
+    // Returns the canonical list of every item the game knows about, derived from
+    // WEAPON_STATS and ITEM_DEFS so adding/removing one entry there propagates
+    // through the entire UI.
+    getItemRegistry() {
+        const weapons = Object.entries(this.WEAPON_STATS).map(([id, w]) => ({
+            id, category: 'weapon', icon: w.icon, name: this.t(id)
+        }));
+        const consumables = Object.entries(this.ITEM_DEFS).map(([id, d]) => ({
+            id, category: 'consumable', icon: d.emoji, name: this.t(d.labelKey)
+        }));
+        return { weapons, consumables, all: [...weapons, ...consumables] };
+    }
+
+    // How many of `id` does the player currently own/have stocked?
+    getItemCount(id) {
+        if (this.WEAPON_STATS[id]) return this.player.weapons.includes(id) ? 1 : 0;
+        switch (id) {
+            case 'health':      return this.inventory.items.filter(i => i.type === 'health').length;
+            case 'ammo':        return this.inventory.ammo;
+            case 'jetpack':     return Math.floor(this.powerUps.jetpackFuel);
+            case 'speed':       return this.powerUps.speedBoost;
+            case 'healthRegen': return this.powerUps.healthRegen;
+            case 'weaponBuff':  return this.powerUps.weaponBuff;
+            case 'flag':        return this.inventory.flags;
+            default:            return this.inventory.items.filter(i => i.type === id).length;
+        }
+    }
+
+    isItemOwned(id) {
+        return this.getItemCount(id) > 0;
+    }
+
+    initializeWeapons() {
+        // Static weapon stats — single source of truth for tuning.
+        // Names/descriptions are filled in by `weaponDefinitions` getter so language switches update them.
+        this.WEAPON_STATS = {
+            diamondSword: { damage: 15, range: 2.5, cooldown: 0.8, type: 'melee',  icon: '⚔️', color: 0x00aaff, ammoCost: 0 },
+            // ammoCost = 0 means free-fire (canFire/fireGun skip ammo checks).
+            gun:          { damage: 25, range: 15,  cooldown: 0.1, type: 'ranged', icon: '🔫', color: 0x8B4513, ammoCost: 0 }
+        };
+
+        // Tuning constants
+        this.AMMO_MAX = 50;            // hard cap on carried ammo
+        this.RELOAD_TIME = 1.5;
+        this.RELOAD_AMOUNT = 12;       // R fills a "clip" worth, not magic-refill
+        this.WEAPON_BUFF_PER_STACK = 0.2;
+
+        // Player loadout
+        this.player.weapons = ['diamondSword', 'gun'];
         this.player.currentWeaponIndex = 0;
-        
-        // Initialize power-ups
+        this.inventory.ammo = 12;      // starting clip
+
+        // Power-up stacks
         this.powerUps = {
             jetpackFuel: 0,
             speedBoost: 0,
             healthRegen: 0,
             weaponBuff: 0
         };
-        
-        // Weapon cooldown tracking
+
+        // Weapon runtime state
         this.weaponCooldowns = {};
-        
-        // Firing state
         this.isFiring = false;
-        
-        // Cooldown update throttling (≤10 Hz)
-        this.lastCooldownUpdate = 0;
-        this.cooldownUpdateInterval = 100; // 100ms = 10 Hz
         this.isReloading = false;
         this.reloadTime = 0;
-        
+
+        // Cooldown UI throttling (10 Hz)
+        this.lastCooldownUpdate = 0;
+        this.cooldownUpdateInterval = 100;
+
         // Drawer state
         this.isDrawerOpen = false;
         this.selectedDrawerSlot = 0;
         this.draggedItem = null;
         this.dragStartSlot = null;
-        
+
         // Toast notifications
         this.toasts = [];
         this.toastId = 0;
-        
-        // Create weapon model
+
         this.createWeaponModel();
-        
-        // Load saved quickbar layout
         this.loadQuickbarLayout();
-        
-        // Mount the new HUD system
         this.mountHUD();
+    }
+
+    // Always reflects the current language for names/descriptions.
+    get weaponDefinitions() {
+        const out = {};
+        for (const id of Object.keys(this.WEAPON_STATS)) {
+            out[id] = {
+                ...this.WEAPON_STATS[id],
+                name: this.t(id),
+                description: this.t(id + 'Desc')
+            };
+        }
+        return out;
     }
     
     // ===== Weapon HUD Model System =====
@@ -651,53 +945,376 @@ class Game3D {
         }
     }
     
-    createWeaponModel() {
-        // Create diamond sword model
-        const swordGroup = new THREE.Group();
-        
-        // Sword blade (diamond blue)
-        const bladeGeometry = new THREE.BoxGeometry(0.1, 1.2, 0.05);
-        const bladeMaterial = new THREE.MeshLambertMaterial({ 
-            color: 0x00aaff,
-            emissive: 0x002244
-        });
-        const blade = new THREE.Mesh(bladeGeometry, bladeMaterial);
+    buildSwordMesh() {
+        // Wrapper Group that holds either the loaded sword GLTF or a procedural placeholder.
+        // Wrappers are tracked so they can be re-populated once the GLTF arrives.
+        const wrapper = new THREE.Group();
+        wrapper.userData.isSwordWrapper = true;
+        this._swordWrappers = this._swordWrappers || [];
+        this._swordWrappers.push(wrapper);
+        this.populateSwordWrapper(wrapper);
+        if (!this.swordTemplate && !this._swordTemplateLoading) this.loadSwordTemplate();
+        return wrapper;
+    }
+
+    populateSwordWrapper(wrapper) {
+        while (wrapper.children.length) wrapper.remove(wrapper.children[0]);
+        if (this.swordTemplate) {
+            const t = this.swordTemplate;
+            const clone = t.clone(true);
+            const o = t.userData.orient;
+            clone.rotation.set(o.rot.x, o.rot.y, o.rot.z);
+            clone.position.set(0, o.posY, 0);
+            clone.scale.setScalar(o.scale);
+            wrapper.add(clone);
+            return;
+        }
+        // Procedural fallback while the GLTF loads
+        const blade = new THREE.Mesh(
+            new THREE.BoxGeometry(0.1, 1.2, 0.05),
+            new THREE.MeshLambertMaterial({ color: 0x9fdcff, emissive: 0x002244 })
+        );
         blade.position.set(0, 0.6, 0);
         blade.castShadow = true;
-        swordGroup.add(blade);
-        
-        // Sword guard (gold)
-        const guardGeometry = new THREE.BoxGeometry(0.3, 0.1, 0.1);
-        const guardMaterial = new THREE.MeshLambertMaterial({ color: 0xffaa00 });
-        const guard = new THREE.Mesh(guardGeometry, guardMaterial);
+        wrapper.add(blade);
+        const guard = new THREE.Mesh(
+            new THREE.BoxGeometry(0.3, 0.1, 0.1),
+            new THREE.MeshLambertMaterial({ color: 0xffaa00 })
+        );
         guard.position.set(0, 0.1, 0);
         guard.castShadow = true;
-        swordGroup.add(guard);
-        
-        // Sword handle (brown)
-        const handleGeometry = new THREE.BoxGeometry(0.15, 0.8, 0.15);
-        const handleMaterial = new THREE.MeshLambertMaterial({ color: 0x8B4513 });
-        const handle = new THREE.Mesh(handleGeometry, handleMaterial);
+        wrapper.add(guard);
+        const handle = new THREE.Mesh(
+            new THREE.BoxGeometry(0.15, 0.8, 0.15),
+            new THREE.MeshLambertMaterial({ color: 0x8B4513 })
+        );
         handle.position.set(0, -0.3, 0);
         handle.castShadow = true;
-        swordGroup.add(handle);
-        
-        // Sword pommel (gold)
-        const pommelGeometry = new THREE.SphereGeometry(0.1, 8, 8);
-        const pommelMaterial = new THREE.MeshLambertMaterial({ color: 0xffaa00 });
-        const pommel = new THREE.Mesh(pommelGeometry, pommelMaterial);
+        wrapper.add(handle);
+        const pommel = new THREE.Mesh(
+            new THREE.SphereGeometry(0.1, 8, 8),
+            new THREE.MeshLambertMaterial({ color: 0xffaa00 })
+        );
         pommel.position.set(0, -0.7, 0);
         pommel.castShadow = true;
-        swordGroup.add(pommel);
-        
-        // Position sword in player's hand
-        swordGroup.position.set(0.3, 0.5, 0.2);
-        swordGroup.rotation.z = -Math.PI / 6;
-        
-        this.player.weaponModel = swordGroup;
-        // Add weapon to player model when it's available
-        if (this.player.model) {
-            this.player.model.add(swordGroup);
+        wrapper.add(pommel);
+    }
+
+    loadSwordTemplate() {
+        this._swordTemplateLoading = true;
+        const loader = new THREE.GLTFLoader();
+        loader.load('assets/Blocks/tools/Sword_Diamond.gltf', (gltf) => {
+            const template = gltf.scene;
+            template.traverse((child) => {
+                if (child.isMesh) {
+                    const src = child.material;
+                    child.material = new THREE.MeshLambertMaterial({
+                        map: src.map || null,
+                        color: src.color ? src.color.clone() : new THREE.Color(0xffffff),
+                        side: src.side
+                    });
+                    child.castShadow = true;
+                    child.receiveShadow = true;
+                }
+            });
+            // Orient the asset so its blade points along +Y like the old procedural sword,
+            // and scale so total length ≈ 1.8 units (matches the box-sword the gameplay was tuned for).
+            // Discover the longest axis on the *un-rotated* mesh to pick the right correction.
+            const box0 = new THREE.Box3().setFromObject(template);
+            const sz = box0.getSize(new THREE.Vector3());
+            let rx = 0, rz = 0;
+            if (sz.x >= sz.y && sz.x >= sz.z) rz = Math.PI / 2;       // longest along X → tilt to Y
+            else if (sz.z >= sz.y && sz.z >= sz.x) rx = Math.PI / 2;  // longest along Z → tilt to Y
+            template.rotation.set(rx, 0, rz);
+            template.updateMatrixWorld(true);
+            const box1 = new THREE.Box3().setFromObject(template);
+            const sz1 = box1.getSize(new THREE.Vector3());
+            const scale = sz1.y > 0 ? 1.8 / sz1.y : 1;
+            // Reset rotation; we'll re-apply on each clone via userData.orient so cloning starts clean.
+            template.rotation.set(0, 0, 0);
+            // After scaling, the box.min.y in cloned-space will be box1.min.y * scale.
+            const posY = -box1.min.y * scale;
+            template.userData.orient = { rot: { x: rx, y: 0, z: rz }, scale, posY };
+            this.swordTemplate = template;
+            this._swordTemplateLoading = false;
+            if (this._swordWrappers) this._swordWrappers.forEach((w) => this.populateSwordWrapper(w));
+        }, undefined, (error) => {
+            console.error('Error loading Sword_Diamond.gltf:', error);
+            this._swordTemplateLoading = false;
+        });
+    }
+
+    createWeaponModel() {
+        // ===== Third-person hand-held weapons =====
+        // Build a sword and a gun, each wrapped in a pivot Group whose local
+        // position/rotation can be tuned to fit the character's right-hand bone.
+        // The pivot's transform is the "grip" — when attached to a hand bone the
+        // weapon emerges from the fist with a natural orientation.
+
+        this.player.swordPivot = new THREE.Group();
+        const heldSword = this.buildSwordMesh();
+        heldSword.scale.setScalar(0.6);
+        // The sword's local +Y is the blade. Rotate so the blade points along +Z
+        // (forward of the fist) and lower the handle to sit inside the palm.
+        heldSword.rotation.set(-Math.PI / 2, 0, 0);
+        heldSword.position.set(0, 0, 0.1);
+        this.player.swordPivot.add(heldSword);
+
+        this.player.gunPivot = new THREE.Group();
+        const heldGun = this._buildGunMesh();
+        heldGun.scale.setScalar(1.0);
+        // The gun's -Z is forward. Rotate so the barrel points along the fist's forward.
+        heldGun.rotation.set(0, Math.PI, 0);
+        heldGun.position.set(0, 0, 0);
+        this.player.gunPivot.add(heldGun);
+        this.player.gunPivot.userData.muzzle = heldGun.userData.muzzle;
+
+        // Active 3rd-person weapon model — populated by attachActiveWeaponToHand
+        this.player.weaponModel = null;
+
+        // ===== FPV viewmodels =====
+        const fpvSword = this.buildSwordMesh();
+        const fpvPivot = new THREE.Group();
+        fpvPivot.position.set(0.45, -0.45, -0.9);
+        fpvSword.rotation.set(-0.5, -0.2, -0.6);
+        fpvSword.scale.setScalar(0.7);
+        fpvPivot.add(fpvSword);
+        this.camera.add(fpvPivot);
+        this.fpvSword = fpvPivot;
+        this.fpvSword.visible = false;
+
+        // Swing animation state
+        this.swingTimer = 0;
+        this.swingDuration = 0.25;
+
+        this.fpvGun = this._buildFpvGun();
+        this.camera.add(this.fpvGun);
+        this.fpvGun.visible = false;
+
+        this._gunRecoilT = 0;
+        this._gunRecoilDur = 0.12;
+
+        // Attempt initial hand attachment (no-op if player.handSocket isn't ready yet)
+        this.attachActiveWeaponToHand();
+    }
+
+    // Finds the right-hand bone of the loaded character model, in priority order.
+    findRightHandBone(model) {
+        if (!model) return null;
+        const priority = [
+            /^fist[._-]?r$/i, /^right.?fist$/i,
+            /^hand[._-]?r$/i, /^right.?hand$/i,
+            /^lower.?arm[._-]?r$/i, /^right.?lower.?arm$/i,
+            /^arm[._-]?r$/i, /^right.?arm$/i
+        ];
+        for (const re of priority) {
+            let hit = null;
+            model.traverse((c) => { if (!hit && c.name && re.test(c.name)) hit = c; });
+            if (hit) return hit;
+        }
+        return null;
+    }
+
+    // Called from loadPlayerModel once the character is in the scene.
+    setupHandSocket() {
+        // Clean up any previous socket reference
+        this.player.handSocket = null;
+        if (!this.player.model) return;
+        const bone = this.findRightHandBone(this.player.model);
+        if (!bone) return;
+        const socket = new THREE.Object3D();
+        socket.name = 'WeaponSocket';
+        // Per-character grip tuning. Bones in these GLTFs were built with hands at
+        // the model's sides in T-pose, so an empty fist origin works as a reasonable
+        // default. Tweak here if a specific character grips weapons oddly.
+        socket.position.set(0, 0, 0);
+        socket.rotation.set(0, 0, 0);
+        bone.add(socket);
+        this.player.handSocket = socket;
+        this.attachActiveWeaponToHand();
+    }
+
+    // Picks the right 3p weapon model based on the currently equipped weapon and
+    // re-parents it to the hand socket. Falls back to the player.model root if
+    // no socket is available yet.
+    attachActiveWeaponToHand() {
+        if (!this.player || !this.player.swordPivot || !this.player.gunPivot) return;
+        const cur = this.getCurrentWeapon && this.getCurrentWeapon();
+        const isRanged = cur && cur.type === 'ranged';
+        const active = isRanged ? this.player.gunPivot : this.player.swordPivot;
+        const inactive = isRanged ? this.player.swordPivot : this.player.gunPivot;
+        // Remove inactive from scene graph
+        if (inactive.parent) inactive.parent.remove(inactive);
+        // Attach active to socket (or player model root as fallback)
+        const target = this.player.handSocket || this.player.model;
+        if (!target) return;
+        if (active.parent !== target) {
+            if (active.parent) active.parent.remove(active);
+            target.add(active);
+        }
+        this.player.weaponModel = active;
+    }
+
+    _buildGunMesh() {
+        // Returns the pistol assembly only — used both inside _buildFpvGun (FPV viewmodel)
+        // and as the 3rd-person weapon clipped onto the character's hand.
+        const gun = new THREE.Group();
+        const matBody = new THREE.MeshLambertMaterial({ color: 0x2b2b32, emissive: 0x05050a });
+        const matAccent = new THREE.MeshLambertMaterial({ color: 0x5a5a64, emissive: 0x0a0a10 });
+        const matGrip = new THREE.MeshLambertMaterial({ color: 0x3a2614, emissive: 0x0a0604 });
+
+        // Slide / body
+        const body = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.16, 0.46), matBody);
+        body.position.set(0, 0, -0.08);
+        gun.add(body);
+
+        // Top sight rail
+        const rail = new THREE.Mesh(new THREE.BoxGeometry(0.10, 0.04, 0.4), matAccent);
+        rail.position.set(0, 0.10, -0.08);
+        gun.add(rail);
+
+        // Barrel
+        const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.038, 0.038, 0.22, 12), matAccent);
+        barrel.rotation.x = Math.PI / 2;
+        barrel.position.set(0, 0.02, -0.36);
+        gun.add(barrel);
+
+        // Front sight
+        const fsight = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.05, 0.04), matAccent);
+        fsight.position.set(0, 0.13, -0.28);
+        gun.add(fsight);
+
+        // Trigger guard
+        const guard = new THREE.Mesh(new THREE.TorusGeometry(0.07, 0.012, 6, 14, Math.PI), matAccent);
+        guard.rotation.z = Math.PI;
+        guard.position.set(0, -0.08, 0.04);
+        gun.add(guard);
+
+        // Grip (angled)
+        const grip = new THREE.Mesh(new THREE.BoxGeometry(0.10, 0.22, 0.13), matGrip);
+        grip.position.set(0, -0.18, 0.06);
+        grip.rotation.x = 0.18;
+        gun.add(grip);
+
+        // Magazine base
+        const mag = new THREE.Mesh(new THREE.BoxGeometry(0.10, 0.04, 0.13), matAccent);
+        mag.position.set(0, -0.30, 0.06);
+        mag.rotation.x = 0.18;
+        gun.add(mag);
+
+        // Muzzle anchor — at the barrel tip in local space.
+        const muzzle = new THREE.Object3D();
+        muzzle.position.set(0, 0.02, -0.48);
+        gun.add(muzzle);
+        gun.userData.muzzle = muzzle;
+        return gun;
+    }
+
+    _buildFpvGun() {
+        // Outer pivot positions the whole weapon on screen.
+        const pivot = new THREE.Group();
+        pivot.position.set(0.36, -0.32, -0.6);
+        pivot.rotation.set(0, -0.12, 0);
+
+        const gun = this._buildGunMesh();
+        pivot.userData.muzzle = gun.userData.muzzle;
+
+        // Muzzle flash sprite — hidden by default; toggled on fire.
+        const flashGeo = new THREE.PlaneGeometry(0.32, 0.32);
+        const flashMat = new THREE.MeshBasicMaterial({
+            color: 0xffe1a0, transparent: true, opacity: 0,
+            blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide
+        });
+        const flash = new THREE.Mesh(flashGeo, flashMat);
+        flash.position.copy(gun.userData.muzzle.position);
+        flash.position.z -= 0.04;
+        flash.userData.t = 0;
+        gun.add(flash);
+        pivot.userData.flash = flash;
+
+        // Tilt the gun slightly inward toward screen center for that classic FPS "carried" pose.
+        gun.rotation.set(0.02, 0.18, -0.04);
+
+        pivot.add(gun);
+        pivot.userData.gun = gun;
+        return pivot;
+    }
+
+    triggerSwordSwing() {
+        this.swingTimer = this.swingDuration;
+    }
+
+    updateSwordViewmodel(deltaTime) {
+        const cur = this.getCurrentWeapon();
+        const inFPV = this.viewMode === 'fpv';
+        const inPlay = this.gameMode === 'play';
+
+        // ---- Sword viewmodel ----
+        if (this.fpvSword) {
+            const wieldingSword = cur && cur.type === 'melee';
+            this.fpvSword.visible = wieldingSword && inFPV && inPlay;
+            if (this.swingTimer > 0) {
+                this.swingTimer = Math.max(0, this.swingTimer - deltaTime);
+                const t = 1 - (this.swingTimer / this.swingDuration);
+                const arc = Math.sin(t * Math.PI);
+                this.fpvSword.rotation.z = -arc * 1.4;
+                this.fpvSword.rotation.x = arc * 0.6;
+                this.fpvSword.position.z = -0.9 - arc * 0.25;
+            } else {
+                this.fpvSword.rotation.z = 0;
+                this.fpvSword.rotation.x = 0;
+                this.fpvSword.position.z = -0.9;
+            }
+        }
+
+        // ---- Gun viewmodel ----
+        if (this.fpvGun) {
+            const wieldingGun = cur && cur.type === 'ranged';
+            this.fpvGun.visible = wieldingGun && inFPV && inPlay;
+
+            // Recoil tween: kick back along +Z (toward camera), ease back to rest.
+            const baseZ = -0.6;
+            const baseRotX = 0;
+            if (this._gunRecoilT > 0) {
+                this._gunRecoilT = Math.max(0, this._gunRecoilT - deltaTime);
+                const k = this._gunRecoilT / this._gunRecoilDur; // 1 → 0 over duration
+                const ease = k * k; // ease-out
+                this.fpvGun.position.z = baseZ + ease * 0.18;
+                this.fpvGun.rotation.x = baseRotX - ease * 0.45;
+            } else {
+                this.fpvGun.position.z = baseZ;
+                this.fpvGun.rotation.x = baseRotX;
+            }
+
+            // Slight idle bob on the gun when moving (only when visible)
+            if (this.fpvGun.visible && this.player && this.player.velocity) {
+                const v = this.player.velocity;
+                const speed = Math.hypot(v.x, v.z);
+                this._gunBobT = (this._gunBobT || 0) + deltaTime * (speed * 1.5 + 1.5);
+                const bobAmt = Math.min(1, speed / 6);
+                this.fpvGun.position.y = -0.32 + Math.sin(this._gunBobT * 2) * 0.012 * bobAmt;
+                this.fpvGun.position.x = 0.36 + Math.cos(this._gunBobT) * 0.008 * bobAmt;
+            }
+
+            // Muzzle flash sprite fade
+            const flash = this.fpvGun.userData.flash;
+            if (flash) {
+                flash.userData.t = Math.max(0, (flash.userData.t || 0) - deltaTime);
+                const k2 = flash.userData.t / 0.06;
+                flash.material.opacity = Math.max(0, k2);
+                if (k2 > 0) {
+                    const s = 0.6 + (1 - k2) * 0.8;
+                    flash.scale.set(s, s, s);
+                    flash.rotation.z = (this._flashSpin = (this._flashSpin || 0) + 0.6);
+                }
+            }
+        }
+    }
+
+    triggerGunRecoil() {
+        this._gunRecoilT = this._gunRecoilDur;
+        if (this.fpvGun && this.fpvGun.userData.flash) {
+            this.fpvGun.userData.flash.userData.t = 0.06;
         }
     }
     
@@ -709,45 +1326,46 @@ class Game3D {
     
     switchWeapon(direction = 1) {
         if (this.player.weapons.length <= 1) return;
-        
+
         this.player.currentWeaponIndex = (this.player.currentWeaponIndex + direction) % this.player.weapons.length;
         if (this.player.currentWeaponIndex < 0) {
             this.player.currentWeaponIndex = this.player.weapons.length - 1;
         }
-        
+
         const currentWeapon = this.getCurrentWeapon();
         if (currentWeapon) {
             this.showMessage(`${this.t('switchWeapon')}: ${currentWeapon.name}`);
         }
-        
+
+        this.audio && this.audio.play('uiClick');
+
+        // Swap the 3rd-person hand-held weapon to match
+        this.attachActiveWeaponToHand();
+
         // Emit UI update event
         this.emit('ui:update', this.buildHUDModel());
+        // Refresh quickbar so the selection highlight follows the active weapon
+        this.updateInventoryGridUI && this.updateInventoryGridUI();
     }
     
     reloadWeapon() {
         const weapon = this.getCurrentWeapon();
         if (!weapon || weapon.type !== 'ranged' || this.isReloading) return;
-        
-        // Start reload process
+
         this.isReloading = true;
-        this.reloadTime = 2.0; // 2 second reload time
+        this.reloadTime = this.RELOAD_TIME;
         this.showMessage(`${this.t('reloading')}...`);
-        
-        // Emit UI update event
         this.emit('ui:update', this.buildHUDModel());
     }
-    
+
     updateReload(deltaTime) {
         if (!this.isReloading) return;
-        
+
         this.reloadTime -= deltaTime;
         if (this.reloadTime <= 0) {
-            // Reload complete
             this.isReloading = false;
-            this.inventory.ammo = Math.min(this.inventory.ammo + 50, 200); // Reload with 50 ammo, max 200
+            this.inventory.ammo = Math.min(this.inventory.ammo + this.RELOAD_AMOUNT, this.AMMO_MAX);
             this.showMessage(`${this.t('reloaded')} - ${this.t('ammo')}: ${this.inventory.ammo}`);
-            
-            // Emit UI update event
             this.emit('ui:update', this.buildHUDModel());
         }
     }
@@ -779,88 +1397,85 @@ class Game3D {
         this.emit('ui:update', this.buildHUDModel());
         
         // Apply weapon buff damage multiplier
-        const damageMultiplier = 1 + (this.powerUps.weaponBuff * 0.2); // 20% per stack
+        const damageMultiplier = 1 + (this.powerUps.weaponBuff * this.WEAPON_BUFF_PER_STACK);
         const finalDamage = Math.floor(weapon.damage * damageMultiplier);
-        
-        if (weapon.type === 'melee') {
-            this.performMeleeAttack(finalDamage);
-        } else if (weapon.type === 'ranged') {
-            this.performRangedAttack(finalDamage, weapon.range);
-        }
+
+        // Both melee and ranged share the same raycast-along-camera attack;
+        // only impact colors and the miss-trail effect differ.
+        const isRanged = weapon.type === 'ranged';
+        if (!isRanged) this.triggerSwordSwing();
+        this.audio && this.audio.play(isRanged ? 'shoot' : 'swordSwing');
+        if (isRanged) this.triggerMuzzleFlash && this.triggerMuzzleFlash();
+        this.triggerAttackPose && this.triggerAttackPose();
+        // Play the character's Attack clip once so the body actually swings/fires
+        this.playOneShotAnimation('Attack', isRanged ? 0.2 : 0.4);
+        this.performAttack({
+            damage: finalDamage,
+            range: weapon.range,
+            hitColor: isRanged ? 0xff0000 : 0xffaa55,
+            missColor: isRanged ? 0xffff00 : 0xcccccc,
+            isRanged
+        });
     }
-    
-    performRangedAttack(damage, range) {
+
+    performAttack({ damage, range, hitColor, missColor, isRanged = false }) {
         const raycaster = new THREE.Raycaster();
         raycaster.setFromCamera(new THREE.Vector2(0, 0), this.camera);
-        
-        const origin = this.camera.position.clone();
-        const dir = raycaster.ray.direction.clone();
-        
-        // Find closest enemy within range
-        const hits = raycaster.intersectObjects(this.playMode.enemies, false);
-        if (hits.length > 0 && hits[0].distance <= range) {
-            const e = hits[0].object;
+
+        const hits = raycaster.intersectObjects(this.playMode.enemies, true);
+        for (const hit of hits) {
+            if (hit.distance > range) break;
+            const e = this.findEnemyRoot(hit.object);
+            if (!e) continue;
             e.userData.hp -= damage;
-            this.spawnImpact(hits[0].point.clone(), 0xff0000);
-            
+            this.spawnImpact(hit.point.clone(), hitColor);
+            this.audio && this.audio.play(isRanged ? 'bulletHit' : 'swordHit');
+
             if (e.userData.hp <= 0) {
-                const idx = this.playMode.enemies.indexOf(e);
-                if (idx !== -1) {
-                    this.playMode.enemies.splice(idx, 1);
-                    this.levelStats.enemiesNeutralized++; // Track enemy kill
-                }
-                this.playMode.enemiesGroup.remove(e);
+                this.killEnemy(e);
             } else {
-                // Brief flash
-                const mat = e.material;
-                const orig = mat.color.getHex();
-                mat.color.setHex(0xffffff);
-                setTimeout(() => mat.color.setHex(orig), 80);
+                this.applyEnemyKnockback(e, this.camera.position, isRanged ? 8 : 6);
+                this.flashEnemy(e);
                 this.showEnemyHPBar(e, 3.0);
             }
             return;
         }
-        
-        // No hit - show bullet trail
-        const endPoint = origin.clone().add(dir.multiplyScalar(range));
-        this.spawnImpact(endPoint, 0xffff00);
-    }
-    
-    performMeleeAttack(damage = 2) {
-        const raycaster = new THREE.Raycaster();
-        raycaster.setFromCamera(new THREE.Vector2(0, 0), this.camera);
+
+        // Miss — show trail/impact at range end
         const origin = this.camera.position.clone();
         const dir = raycaster.ray.direction.clone();
-        const maxDist = 2.5;
-        
-        // Find closest enemy intersecting the ray within maxDist
-        const hits = raycaster.intersectObjects(this.playMode.enemies, false);
-        if (hits.length > 0 && hits[0].distance <= maxDist) {
-            const e = hits[0].object;
-            e.userData.hp -= damage;
-            this.spawnImpact(hits[0].point.clone(), 0xffaa55);
-            
-            if (e.userData.hp <= 0) {
-                const idx = this.playMode.enemies.indexOf(e);
-                if (idx !== -1) {
-                    this.playMode.enemies.splice(idx, 1);
-                    this.levelStats.enemiesNeutralized++; // Track enemy kill
-                }
-                this.playMode.enemiesGroup.remove(e);
-            } else {
-                // Brief flash
-                const mat = e.material;
-                const orig = mat.color.getHex();
-                mat.color.setHex(0xffffff);
-                setTimeout(() => mat.color.setHex(orig), 80);
-                this.showEnemyHPBar(e, 3.0);
-            }
-            return;
+        const endPoint = origin.add(dir.multiplyScalar(range));
+        this.spawnImpact(endPoint, missColor);
+    }
+
+    applyEnemyKnockback(e, sourcePos, strength = 7) {
+        const dx = e.position.x - sourcePos.x;
+        const dz = e.position.z - sourcePos.z;
+        const len = Math.hypot(dx, dz) || 1;
+        e.userData.knockback = new THREE.Vector2((dx / len) * strength, (dz / len) * strength);
+        e.userData.stunT = 0.35;
+        // Flinch: brief recoil away from the shot, decays in updateEnemies
+        e.userData.flinchT = 0.25;
+        e.userData.flinchMax = 0.25;
+    }
+
+    findEnemyRoot(obj) {
+        while (obj) {
+            if (obj.userData && obj.userData.type === 'enemy') return obj;
+            obj = obj.parent;
         }
-        
-        // No direct hit: optional small shove effect at range end
-        const endPoint = origin.clone().add(dir.multiplyScalar(maxDist));
-        this.spawnImpact(endPoint, 0xcccccc);
+        return null;
+    }
+
+    flashEnemy(e) {
+        const flashed = [];
+        e.traverse((child) => {
+            if (child.isMesh && child.material && child.material.color) {
+                flashed.push({ mat: child.material, orig: child.material.color.getHex() });
+                child.material.color.setHex(0xffffff);
+            }
+        });
+        setTimeout(() => flashed.forEach(({ mat, orig }) => mat.color.setHex(orig)), 80);
     }
     
     // Translation helper
@@ -873,7 +1488,6 @@ class Game3D {
         if (this.translations[lang]) {
             this.language = lang;
             this.updateAllUI();
-            console.log(`Language changed to: ${lang}`);
         }
     }
     
@@ -883,14 +1497,20 @@ class Game3D {
         this.updateInventoryUI();
     }
 
+    // Single source of truth for "is the player model visible?". Call this whenever
+    // viewMode changes OR the player model is replaced (character swap, async load, etc.)
+    applyViewModeToPlayerModel() {
+        if (this.player && this.player.model) {
+            this.player.model.visible = (this.viewMode !== 'fpv');
+        }
+    }
+
     setViewMode(mode) {
-        console.log(`setViewMode called with: ${mode}, current viewMode: ${this.viewMode}`);
-        if (mode !== 'iso' && mode !== 'fpv' && mode !== 'birds-eye' && mode !== 'ghost') {
-            console.log(`Invalid view mode: ${mode}`);
+        // Only first-person and second-person (iso) are supported.
+        if (mode !== 'iso' && mode !== 'fpv') {
             return;
         }
         this.viewMode = mode;
-        console.log(`View mode changed to: ${this.viewMode}`);
         // Reset pitch when leaving/entering fpv for comfort
         if (mode !== 'fpv') this.fpvPitch = 0;
         // Force orbit off in FPV, birds-eye, and ghost
@@ -911,40 +1531,27 @@ class Game3D {
             const quatX = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), this.ghostCamera.rotation.x);
             this.ghostCamera.quaternion.multiplyQuaternions(quatY, quatX);
         }
-        
-        // Initialize bird's eye camera position when entering bird's eye mode
-        if (mode === 'birds-eye') {
-            this.birdsEyeCamera.position.copy(this.player.position);
-            this.birdsEyeCamera.position.y += 50; // Start 50 units above player
-            this.birdsEyeCamera.rotation.x = -Math.PI/2; // Look straight down
-            this.birdsEyeCamera.rotation.y = 0; // Face forward
-            
-            // Initialize Three.js build-in orthographic camera
-            this.birdsEyeCamera.position.set(0, 50, 0); // Adjust height as needed
-            this.birdsEyeCamera.lookAt(0, 0, 0); // Look at world center
-        }
         // Hide player model in FPV to avoid clipping into the camera
-        if (this.player && this.player.model) {
-            this.player.model.visible = (mode !== 'fpv');
-        }
+        this.applyViewModeToPlayerModel();
         // Auto-hide facing indicator in FPV
         if (this.facingIndicator && this.facingIndicator.groundDot && this.facingIndicator.light) {
             const show = (mode !== 'fpv') && this.facingIndicator.enabled;
             this.facingIndicator.groundDot.visible = show;
             this.facingIndicator.light.visible = show;
         }
-        // Update crosshair visibility immediately when switching view modes
-        this.updateCrosshairUI();
+        // Crosshair visibility will be handled by updateCrosshairUI()
     }
     
     init() {
         // Create scene
         this.scene = new THREE.Scene();
-        this.scene.fog = new THREE.Fog(0x000000, 50, 200);
+        this.scene.fog = new THREE.Fog(0xb8c4d0, 120, 400);
         
         // Create camera (second-person perspective)
         this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
         this.camera.position.set(0, 5, 10); // Behind and above player
+        // Camera must be in the scene graph so children (FPV viewmodel) render.
+        this.scene.add(this.camera);
         
         // Create renderer with 128-bit aesthetic
         const canvas = document.getElementById('gameCanvas');
@@ -981,11 +1588,11 @@ class Game3D {
 
         // Apply initial theme
         this.applyTheme(this.themeName);
-        
-        // Show opening screen instead of starting immediately
-        this.showOpeningScreen();
+
+        // Default to first-person view (runs setViewMode side effects: hide model, etc.)
+        this.setViewMode('fpv');
     }
-    
+
     createPlayer() {
         // Player is invisible in second-person view, but we track its position
         this.player = {
@@ -1004,10 +1611,231 @@ class Game3D {
             weaponModel: null
         };
         
-        // Create our custom lion archer model
+        // Registry of swappable player characters (key matches data-character on the UI buttons)
+        this.characters = {
+            skeleton: { label: 'Skeleton', path: 'assets/Blocks/enemies/Skeleton_Armor.gltf' },
+            female1:  { label: 'Female 1', path: 'assets/Blocks/Characters/Character_Female_1.gltf' },
+            female2:  { label: 'Female 2', path: 'assets/Blocks/Characters/Character_Female_2.gltf' },
+            male1:    { label: 'Male 1',   path: 'assets/Blocks/Characters/Character_Male_1.gltf' },
+            male2:    { label: 'Male 2',   path: 'assets/Blocks/Characters/Character_Male_2.gltf' }
+        };
+        this.currentCharacterKey = this.currentCharacterKey || 'skeleton';
+
+        // Build the temporary lion archer model so the player has *something* visible while async-loading the character.
         this.createLionArcherModel();
         // Create facing indicator after model exists
         this.createFacingIndicator();
+        // Swap in the textured character model once it loads
+        this.loadPlayerModel(this.characters[this.currentCharacterKey].path);
+    }
+
+    generateCharacterPreviews() {
+        if (!this.characters || this._previewsStarted) return;
+        this._previewsStarted = true;
+        const size = 192; // render at 2x display size for crispness
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
+        renderer.setSize(size, size);
+        renderer.setClearColor(0x000000, 0);
+        renderer.outputEncoding = THREE.sRGBEncoding || renderer.outputEncoding;
+
+        const loader = new THREE.GLTFLoader();
+        const renderOne = (key, cfg) => {
+            loader.load(cfg.path, (gltf) => {
+                const scene = new THREE.Scene();
+                scene.add(new THREE.AmbientLight(0xffffff, 0.85));
+                const key1 = new THREE.DirectionalLight(0xffffff, 0.9);
+                key1.position.set(2, 3, 4);
+                scene.add(key1);
+                const key2 = new THREE.DirectionalLight(0xfff0c8, 0.4);
+                key2.position.set(-3, 2, -2);
+                scene.add(key2);
+
+                const character = gltf.scene;
+                character.traverse((child) => {
+                    if (child.isMesh) {
+                        const src = child.material;
+                        child.material = new THREE.MeshLambertMaterial({
+                            map: src.map || null,
+                            color: src.color ? src.color.clone() : new THREE.Color(0xffffff),
+                            side: src.side,
+                            skinning: child.isSkinnedMesh === true
+                        });
+                    }
+                });
+                scene.add(character);
+
+                // Frame the character: normalize to ~unit height, center, look from front-ish
+                const box = new THREE.Box3().setFromObject(character);
+                const sizeV = box.getSize(new THREE.Vector3());
+                const center = box.getCenter(new THREE.Vector3());
+                const targetHeight = 2.0;
+                const s = sizeV.y > 0 ? targetHeight / sizeV.y : 1;
+                character.scale.setScalar(s);
+                character.position.sub(center.multiplyScalar(s));
+
+                const cam = new THREE.PerspectiveCamera(28, 1, 0.1, 50);
+                cam.position.set(0, 0.2, 4.5);
+                cam.lookAt(0, 0, 0);
+
+                renderer.render(scene, cam);
+                const url = renderer.domElement.toDataURL('image/png');
+                document.querySelectorAll(`.character-btn[data-character="${key}"] .character-preview`).forEach(el => {
+                    el.innerHTML = '';
+                    const img = document.createElement('img');
+                    img.src = url;
+                    img.alt = cfg.label;
+                    el.appendChild(img);
+                });
+
+                // Free GPU resources for this preview
+                character.traverse((child) => {
+                    if (child.isMesh) {
+                        if (child.geometry) child.geometry.dispose();
+                        if (child.material && child.material.map) child.material.map.dispose();
+                        if (child.material) child.material.dispose();
+                    }
+                });
+            }, undefined, (error) => {
+                console.error('Preview load failed for', key, error);
+            });
+        };
+
+        Object.entries(this.characters).forEach(([key, cfg]) => renderOne(key, cfg));
+    }
+
+    setPlayerCharacter(key) {
+        if (!this.characters || !this.characters[key]) return;
+        if (this.currentCharacterKey === key && this.player && this.player.model && this.player.mixer) return;
+        this.currentCharacterKey = key;
+        this.loadPlayerModel(this.characters[key].path);
+        // Reflect active button state if modal is open
+        document.querySelectorAll('.character-btn').forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.character === key);
+        });
+    }
+
+    loadPlayerModel(filePath) {
+        const loader = new THREE.GLTFLoader();
+        loader.load(filePath, (gltf) => {
+            const character = gltf.scene;
+            // Convert PBR materials → Lambert (preserve textures) so it shades like the rest of the scene.
+            // SkinnedMesh requires `skinning: true` on the material in r128 — without it the mesh renders in bind pose.
+            character.traverse((child) => {
+                if (child.isMesh) {
+                    const src = child.material;
+                    child.material = new THREE.MeshLambertMaterial({
+                        map: src.map || null,
+                        color: src.color ? src.color.clone() : new THREE.Color(0xffffff),
+                        side: src.side,
+                        skinning: child.isSkinnedMesh === true
+                    });
+                    child.castShadow = true;
+                    child.receiveShadow = true;
+                }
+            });
+            // Scale so the character is ~2.5 units tall (matches old lion archer footprint)
+            const box = new THREE.Box3().setFromObject(character);
+            const height = box.max.y - box.min.y;
+            if (height > 0) {
+                const targetHeight = 2.5;
+                const s = targetHeight / height;
+                character.scale.setScalar(s);
+            }
+            // Re-measure after scaling, drop so feet are at y=0
+            const scaledBox = new THREE.Box3().setFromObject(character);
+            character.position.y -= scaledBox.min.y;
+            character.position.x = 0;
+            character.position.z = 0;
+
+            // Detach both 3rd-person weapon pivots so they can be re-attached to the new character's hand socket
+            if (this.player.swordPivot && this.player.swordPivot.parent) this.player.swordPivot.parent.remove(this.player.swordPivot);
+            if (this.player.gunPivot && this.player.gunPivot.parent) this.player.gunPivot.parent.remove(this.player.gunPivot);
+            this.player.handSocket = null;
+            if (this.player.model) this.scene.remove(this.player.model);
+
+            // Wrap in a group at world origin so player.position/rotation drive the avatar like before
+            const wrap = new THREE.Group();
+            wrap.add(character);
+            wrap.position.copy(this.player.position);
+
+            // Soft round shadow disc — same as lion archer
+            const shadowMat = new THREE.MeshBasicMaterial({
+                color: 0x000000, transparent: true, opacity: 0.45,
+                depthWrite: false, side: THREE.DoubleSide
+            });
+            const shadow = new THREE.Mesh(new THREE.CircleGeometry(0.85, 24), shadowMat);
+            shadow.rotation.x = -Math.PI / 2;
+            shadow.position.y = 0.02;
+            shadow.renderOrder = -1;
+            wrap.add(shadow);
+
+            this.scene.add(wrap);
+            this.player.model = wrap;
+            this.player.bodyShadow = shadow;
+            // Respect current view mode (hide in FPV) — critical for future character swaps
+            this.applyViewModeToPlayerModel();
+            // Clear limb refs — skeleton has its own bones; locomotion code no-ops when these are null
+            this.player.head = null;
+            this.player.body = null;
+            this.player.leftArm = null;
+            this.player.rightArm = null;
+            this.player.leftLeg = null;
+            this.player.rightLeg = null;
+
+            // Find the right-hand bone on the new character and re-parent the active weapon there
+            this.setupHandSocket();
+
+            if (gltf.animations && gltf.animations.length > 0) {
+                const mixer = new THREE.AnimationMixer(character);
+                this.player.mixer = mixer;
+                this.player.clips = {};
+                gltf.animations.forEach((clip) => {
+                    const action = mixer.clipAction(clip);
+                    action.enabled = true;
+                    action.setEffectiveWeight(0);
+                    action.play();
+                    this.player.clips[clip.name] = action;
+                });
+                // Start in Idle
+                const idle = this.player.clips['Idle'];
+                if (idle) idle.setEffectiveWeight(1);
+                this.player.currentClipName = 'Idle';
+            }
+        }, undefined, (error) => {
+            console.error('Error loading player character GLTF:', error);
+        });
+    }
+
+    // Play a clip once, then let the locomotion state-machine in updateCharacterAnimation
+    // resume control. While `_oneShotUntil` is in the future, setPlayerAnimation no-ops
+    // so the one-shot isn't immediately replaced by Idle/Walk/Run.
+    playOneShotAnimation(name, durationSeconds = 0.35, fadeDuration = 0.06) {
+        if (!this.player || !this.player.clips) return;
+        const next = this.player.clips[name];
+        if (!next) return;
+        const prev = this.player.clips[this.player.currentClipName];
+        if (prev && prev !== next) prev.fadeOut(fadeDuration);
+        next.reset();
+        next.setLoop(THREE.LoopOnce, 1);
+        next.clampWhenFinished = false;
+        next.fadeIn(fadeDuration).setEffectiveWeight(1).play();
+        this.player.currentClipName = name;
+        this._oneShotUntil = (performance.now() / 1000) + durationSeconds;
+    }
+
+    setPlayerAnimation(name, fadeDuration = 0.18) {
+        // Don't interrupt a running one-shot
+        if (this._oneShotUntil && performance.now() / 1000 < this._oneShotUntil) return;
+        if (!this.player || !this.player.clips) return;
+        if (this.player.currentClipName === name) return;
+        const next = this.player.clips[name];
+        if (!next) return;
+        const prev = this.player.clips[this.player.currentClipName];
+        if (prev && prev !== next) {
+            prev.fadeOut(fadeDuration);
+        }
+        next.reset().fadeIn(fadeDuration).setEffectiveWeight(1).play();
+        this.player.currentClipName = name;
     }
 
     createFacingIndicator() {
@@ -1153,7 +1981,24 @@ class Game3D {
         this.player.rightArm = rightArm;
         this.player.leftLeg = leftLeg;
         this.player.rightLeg = rightLeg;
-        
+
+        // Soft round shadow under the avatar — keeps the player grounded
+        // visually in every camera mode regardless of light setup.
+        const shadowMat = new THREE.MeshBasicMaterial({
+            color: 0x000000, transparent: true, opacity: 0.45,
+            depthWrite: false, side: THREE.DoubleSide
+        });
+        const shadow = new THREE.Mesh(new THREE.CircleGeometry(0.85, 24), shadowMat);
+        shadow.rotation.x = -Math.PI / 2;
+        shadow.position.y = 0.02;
+        shadow.renderOrder = -1;
+        g.add(shadow);
+        this.player.bodyShadow = shadow;
+
+        // Cache initial pivot rotations so locomotion animation has a baseline.
+        this.player._armRestZ = { L: leftArm.rotation.z, R: rightArm.rotation.z };
+        this.player._legRestX = { L: leftLeg.rotation.x, R: rightLeg.rotation.x };
+
         // Add weapon if it exists
         if (this.player.weaponModel) {
             this.player.model.add(this.player.weaponModel);
@@ -1164,11 +2009,11 @@ class Game3D {
         // Create a simple low-poly character using basic geometries
         const characterGroup = new THREE.Group();
         
-        // Head (cube) - different colors for front/back
+        // Head — warm desert tan
         const headGeometry = new THREE.BoxGeometry(1, 1, 1);
-        const headMaterial = new THREE.MeshLambertMaterial({ 
-            color: 0x00ff00,
-            emissive: 0x002200
+        const headMaterial = new THREE.MeshLambertMaterial({
+            color: 0xd9a76a,
+            emissive: 0x2a1808
         });
         const head = new THREE.Mesh(headGeometry, headMaterial);
         head.position.y = 1.5;
@@ -1176,22 +2021,22 @@ class Game3D {
         characterGroup.add(head);
         
         
-        // Body (rectangular)
+        // Body — khaki tunic
         const bodyGeometry = new THREE.BoxGeometry(1.2, 2, 0.8);
-        const bodyMaterial = new THREE.MeshLambertMaterial({ 
-            color: 0x008800,
-            emissive: 0x001100
+        const bodyMaterial = new THREE.MeshLambertMaterial({
+            color: 0x8a6a3a,
+            emissive: 0x1a0e04
         });
         const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
         body.position.y = 0.5;
         body.castShadow = true;
         characterGroup.add(body);
         
-        // Arms
+        // Arms — sand tone
         const armGeometry = new THREE.BoxGeometry(0.3, 1.5, 0.3);
-        const armMaterial = new THREE.MeshLambertMaterial({ 
-            color: 0x00ff00,
-            emissive: 0x002200
+        const armMaterial = new THREE.MeshLambertMaterial({
+            color: 0xd9a76a,
+            emissive: 0x2a1808
         });
         
         const leftArm = new THREE.Mesh(armGeometry, armMaterial);
@@ -1204,11 +2049,11 @@ class Game3D {
         rightArm.castShadow = true;
         characterGroup.add(rightArm);
         
-        // Legs
+        // Legs — darker khaki
         const legGeometry = new THREE.BoxGeometry(0.4, 1.5, 0.4);
-        const legMaterial = new THREE.MeshLambertMaterial({ 
-            color: 0x006600,
-            emissive: 0x001100
+        const legMaterial = new THREE.MeshLambertMaterial({
+            color: 0x6a4e22,
+            emissive: 0x1a0e04
         });
         
         const leftLeg = new THREE.Mesh(legGeometry, legMaterial);
@@ -1255,12 +2100,12 @@ class Game3D {
             character.castShadow = true;
             character.receiveShadow = true;
             
-            // Apply neon materials
+            // Apply desert hero materials
             character.traverse((child) => {
                 if (child.isMesh) {
                     child.material = new THREE.MeshLambertMaterial({
-                        color: 0x00ff00,
-                        emissive: 0x002200
+                        color: 0xd9a76a,
+                        emissive: 0x2a1808
                     });
                     child.castShadow = true;
                     child.receiveShadow = true;
@@ -1286,16 +2131,29 @@ class Game3D {
                 });
             }
             
-            console.log('Character model loaded successfully!');
         }, undefined, (error) => {
             console.error('Error loading character model:', error);
         });
     }
-    
+
+    preloadZombieTemplate() {
+        const loader = new THREE.GLTFLoader();
+        loader.load('Zombie.gltf', (gltf) => {
+            this.zombieTemplate = { scene: gltf.scene, animations: gltf.animations };
+            console.log('Zombie template loaded:', gltf.animations.map(a => a.name).join(', '));
+            // If enemies already spawned as sphere fallbacks, swap them for zombies
+            if (this.playMode && this.playMode.enemies.length > 0) {
+                this.respawnEnemies();
+            }
+        }, undefined, (error) => {
+            console.error('Error loading Zombie.gltf:', error);
+        });
+    }
+
     createEnvironment() {
         // Create ground
         const groundGeometry = new THREE.PlaneGeometry(200, 200);
-        const groundMaterial = new THREE.MeshLambertMaterial({ color: 0x001100 });
+        const groundMaterial = new THREE.MeshLambertMaterial({ color: 0x6b7280 });
         const ground = new THREE.Mesh(groundGeometry, groundMaterial);
         ground.rotation.x = -Math.PI / 2;
         this.groundY = -1; // track ground height for indicators/effects
@@ -1303,16 +2161,36 @@ class Game3D {
         ground.receiveShadow = true;
         this.scene.add(ground);
         this.ground = ground;
-        
+
+        // Cheese tile dimensions — block_cheese.gltf is ~1.87 units, scale to 2 to align with maze grid (cellSize=2)
+        this.cheeseTileSize = 2;
+        this.cheeseFloorSize = 200;
+        this.loadCheeseFloor();
+        this.loadBrickWallTemplate();
+        // Arena assets (platforms + decor)
+        this.loadPixelBlockTemplates();
+        this.loadArenaDecorTemplates();
+        // Crystal "sky" — a tiled ceiling above the tallest walls
+        this.roofTileSize = 2;
+        this.roofSize = 200;
+        this.roofY = 20; // bottom face of ceiling blocks
+        this.loadCrystalRoof();
+
         // Create retro grid pattern
         this.createGrid();
         
         // Initialize saved mazes
         this.initializeSavedMazes();
         
-        // Don't create labyrinth here - it will be created when starting a level
-        // this.createLabyrinth();
+        // Initialize create mode
+        this.initializeCreateMode();
         
+        // Preload zombie model used for all enemies
+        this.preloadZombieTemplate();
+
+        // Create labyrinth
+        this.createLabyrinth();
+
         // Create skybox
         this.createSkybox();
     }
@@ -1320,7 +2198,7 @@ class Game3D {
     createGrid() {
         const gridSize = 200;
         const gridDivisions = 50;
-        const gridHelper = new THREE.GridHelper(gridSize, gridDivisions, 0x00ff00, 0x00ff00);
+        const gridHelper = new THREE.GridHelper(gridSize, gridDivisions, 0xffe8a0, 0xffe8a0);
         gridHelper.position.y = -0.9;
         gridHelper.material.opacity = 0.3;
         gridHelper.material.transparent = true;
@@ -1328,8 +2206,284 @@ class Game3D {
         this.gridHelper = gridHelper;
     }
 
+    loadBrickWallTemplate() {
+        const loader = new THREE.GLTFLoader();
+        loader.load('assets/Blocks/pixel blocks/Bricks_Grey.gltf', (gltf) => {
+            let sourceMesh = null;
+            gltf.scene.traverse((child) => {
+                if (!sourceMesh && child.isMesh) sourceMesh = child;
+            });
+            if (!sourceMesh) {
+                console.warn('Bricks mesh not found in GLTF');
+                return;
+            }
+            const geom = sourceMesh.geometry.clone();
+            geom.computeBoundingBox();
+            const srcMat = sourceMesh.material;
+            const mat = new THREE.MeshLambertMaterial({
+                map: srcMat.map || null,
+                color: srcMat.color ? srcMat.color.clone() : new THREE.Color(0xffffff),
+                side: srcMat.side
+            });
+            this.bricksTemplate = { geometry: geom, material: mat };
+            // Refresh existing maze walls so they pick up the brick visual
+            if (this.walls && this.walls.length) this.rebuildMaze();
+        }, undefined, (error) => {
+            console.error('Error loading Bricks_Grey.gltf:', error);
+        });
+    }
+
+    // Load a curated set of pixel-block GLTFs once and cache them for arena platforms.
+    loadPixelBlockTemplates() {
+        if (this._pixelBlocks) return;
+        this._pixelBlocks = {};
+        const loader = new THREE.GLTFLoader();
+        const list = [
+            ['stone',    'assets/Blocks/pixel blocks/Stone.gltf'],
+            ['wood',     'assets/Blocks/pixel blocks/WoodPlanks.gltf'],
+            ['darkBrick','assets/Blocks/pixel blocks/Bricks_Dark.gltf'],
+            ['dirt',     'assets/Blocks/pixel blocks/Dirt.gltf'],
+        ];
+        for (const [name, path] of list) {
+            loader.load(path, (gltf) => {
+                let src = null;
+                gltf.scene.traverse(c => { if (!src && c.isMesh) src = c; });
+                if (!src) return;
+                const geom = src.geometry.clone();
+                geom.computeBoundingBox();
+                const srcMat = src.material;
+                const mat = new THREE.MeshLambertMaterial({
+                    map: srcMat.map || null,
+                    color: srcMat.color ? srcMat.color.clone() : new THREE.Color(0xffffff),
+                    side: srcMat.side
+                });
+                this._pixelBlocks[name] = { geometry: geom, material: mat };
+            }, undefined, (err) => console.warn('Pixel block load failed:', path, err));
+        }
+    }
+
+    // Load environment + animal templates used to dress the arena. Each is cached
+    // as a THREE.Object3D template; arena code clones it on placement.
+    loadArenaDecorTemplates() {
+        if (this._decorTemplates) return;
+        this._decorTemplates = {};
+        const loader = new THREE.GLTFLoader();
+        const list = [
+            ['tree1',      'assets/Blocks/environment/Tree_1.gltf'],
+            ['tree2',      'assets/Blocks/environment/Tree_2.gltf'],
+            ['tree3',      'assets/Blocks/environment/Tree_3.gltf'],
+            ['deadTree1',  'assets/Blocks/environment/DeadTree_1.gltf'],
+            ['deadTree2',  'assets/Blocks/environment/DeadTree_2.gltf'],
+            ['bush',       'assets/Blocks/environment/Bush.gltf'],
+            ['rock1',      'assets/Blocks/environment/Rock1.gltf'],
+            ['rock2',      'assets/Blocks/environment/Rock2.gltf'],
+            ['flowers1',   'assets/Blocks/environment/Flowers_1.gltf'],
+            ['flowers2',   'assets/Blocks/environment/Flowers_2.gltf'],
+            ['grassBig',   'assets/Blocks/environment/Grass_Big.gltf'],
+            ['mushroom',   'assets/Blocks/environment/Mushroom.gltf'],
+            ['chest',      'assets/Blocks/environment/Chest_Closed.gltf'],
+            ['crate',      'assets/Blocks/Block_Crate.gltf'],
+            ['sheep',      'assets/Blocks/Animals/Sheep.gltf'],
+            ['pig',        'assets/Blocks/Animals/Pig.gltf'],
+            ['chicken',    'assets/Blocks/Animals/Chicken.gltf'],
+            ['cat',        'assets/Blocks/Animals/Cat.gltf'],
+        ];
+        for (const [name, path] of list) {
+            loader.load(path, (gltf) => {
+                // Keep the whole scene so model preserves its node hierarchy and materials
+                this._decorTemplates[name] = gltf.scene;
+            }, undefined, (err) => console.warn('Decor load failed:', path, err));
+        }
+    }
+
+    // Build a single arena platform as a stack of pixel-block tiles.
+    // Returns { group, footprint, height } or null if templates not loaded.
+    _buildBlockPlatform(footprintTiles, heightTiles, blockKey) {
+        const tpl = this._pixelBlocks && this._pixelBlocks[blockKey];
+        if (!tpl) return null;
+        const bb = tpl.geometry.boundingBox;
+        const native = bb.max.y - bb.min.y; // ~2 units
+        const tile = 1.5;                    // world units per block
+        const scale = tile / native;
+        const group = new THREE.Group();
+        const offset = (footprintTiles - 1) / 2;
+        for (let yi = 0; yi < heightTiles; yi++) {
+            for (let xi = 0; xi < footprintTiles; xi++) {
+                for (let zi = 0; zi < footprintTiles; zi++) {
+                    const m = new THREE.Mesh(tpl.geometry, tpl.material);
+                    m.scale.setScalar(scale);
+                    m.position.set(
+                        (xi - offset) * tile,
+                        yi * tile + tile / 2,
+                        (zi - offset) * tile
+                    );
+                    m.castShadow = true;
+                    m.receiveShadow = true;
+                    group.add(m);
+                }
+            }
+        }
+        return { group, footprint: footprintTiles * tile, height: heightTiles * tile };
+    }
+
+    // Build a wall visual as a vertical stack of brick cubes, sized to fit the requested box dimensions.
+    // Returns null if the brick template hasn't loaded yet; callers fall back to colored BoxGeometry.
+    createBrickWallMesh(width, height, depth) {
+        if (!this.bricksTemplate) return null;
+        const group = new THREE.Group();
+        const bb = this.bricksTemplate.geometry.boundingBox;
+        const nativeSize = bb.max.y - bb.min.y; // brick cube is 2 units across
+        const xScale = width / nativeSize;
+        const zScale = depth / nativeSize;
+        const tilesH = Math.max(1, Math.round(height / nativeSize));
+        const yScale = (height / tilesH) / nativeSize;
+        const tileWorldH = nativeSize * yScale; // = height / tilesH
+        for (let i = 0; i < tilesH; i++) {
+            const m = new THREE.Mesh(this.bricksTemplate.geometry, this.bricksTemplate.material);
+            m.scale.set(xScale, yScale, zScale);
+            m.position.y = -height / 2 + tileWorldH * (i + 0.5);
+            m.castShadow = true;
+            m.receiveShadow = true;
+            group.add(m);
+        }
+        return group;
+    }
+
+    loadCrystalRoof() {
+        const loader = new THREE.GLTFLoader();
+        loader.load('assets/Blocks/Block_Crystal.gltf', (gltf) => {
+            let sourceMesh = null;
+            gltf.scene.traverse((child) => {
+                if (!sourceMesh && child.isMesh) sourceMesh = child;
+            });
+            if (!sourceMesh) {
+                console.warn('Crystal roof mesh not found in GLTF');
+                return;
+            }
+            // Bake node transform into geometry so bounds match what we see
+            sourceMesh.updateMatrixWorld(true);
+            const geom = sourceMesh.geometry.clone();
+            geom.applyMatrix4(sourceMesh.matrixWorld);
+            geom.computeBoundingBox();
+            const srcMat = sourceMesh.material;
+            const mat = new THREE.MeshLambertMaterial({
+                map: srcMat.map || null,
+                color: srcMat.color ? srcMat.color.clone() : new THREE.Color(0xffffff),
+                side: srcMat.side
+            });
+            this.roofSourceGeometry = geom;
+            this.roofSourceMaterial = mat;
+            const bb = geom.boundingBox;
+            const blockWidth = Math.max(bb.max.x - bb.min.x, bb.max.z - bb.min.z);
+            this.roofScale = this.roofTileSize / blockWidth;
+            this.rebuildCrystalRoof(this.roofSize);
+        }, undefined, (error) => {
+            console.error('Error loading Block_Crystal.gltf:', error);
+        });
+    }
+
+    rebuildCrystalRoof(size) {
+        if (!this.roofSourceGeometry || !this.roofSourceMaterial) return;
+        if (this.crystalRoof) this.scene.remove(this.crystalRoof);
+        const tile = this.roofTileSize;
+        const half = Math.ceil(size / 2 / tile) * tile;
+        const count = Math.pow((half * 2) / tile + 1, 2);
+        const mesh = new THREE.InstancedMesh(this.roofSourceGeometry, this.roofSourceMaterial, count);
+        mesh.receiveShadow = true;
+        const dummy = new THREE.Object3D();
+        const scale = this.roofScale;
+        const bb = this.roofSourceGeometry.boundingBox;
+        // Bottom face of block in world = center.y + bb.min.y * scale → place center so bottom sits at roofY
+        const blockCenterY = this.roofY - bb.min.y * scale;
+        let i = 0;
+        for (let x = -half; x <= half; x += tile) {
+            for (let z = -half; z <= half; z += tile) {
+                dummy.position.set(x, blockCenterY, z);
+                dummy.scale.set(scale, scale, scale);
+                dummy.rotation.y = 0;
+                dummy.updateMatrix();
+                mesh.setMatrixAt(i++, dummy.matrix);
+            }
+        }
+        mesh.count = i;
+        mesh.instanceMatrix.needsUpdate = true;
+        this.scene.add(mesh);
+        this.crystalRoof = mesh;
+    }
+
+    loadCheeseFloor() {
+        const loader = new THREE.GLTFLoader();
+        loader.load('assets/Blocks/pixel blocks/Diamond.gltf', (gltf) => {
+            let sourceMesh = null;
+            gltf.scene.traverse((child) => {
+                if (!sourceMesh && child.isMesh) sourceMesh = child;
+            });
+            if (!sourceMesh) {
+                console.warn('Floor block mesh not found in GLTF');
+                return;
+            }
+            this.cheeseSourceGeometry = sourceMesh.geometry.clone();
+            // Convert PBR material to Lambert so cheese shades consistently with rest of scene
+            const srcMat = sourceMesh.material;
+            this.cheeseSourceMaterial = new THREE.MeshLambertMaterial({
+                map: srcMat.map || null,
+                color: srcMat.color ? srcMat.color.clone() : new THREE.Color(0xffffff),
+                side: srcMat.side
+            });
+            // Compute scale so the block matches cheeseTileSize on its widest axis
+            this.cheeseSourceGeometry.computeBoundingBox();
+            const bb = this.cheeseSourceGeometry.boundingBox;
+            const blockWidth = Math.max(bb.max.x - bb.min.x, bb.max.z - bb.min.z);
+            this.cheeseScale = this.cheeseTileSize / blockWidth;
+            this.rebuildCheeseFloor(this.cheeseFloorSize);
+        }, undefined, (error) => {
+            console.error('Error loading floor block GLTF:', error);
+        });
+    }
+
+    rebuildCheeseFloor(size) {
+        if (!this.cheeseSourceGeometry || !this.cheeseSourceMaterial) return;
+        if (this.cheeseFloor) {
+            this.scene.remove(this.cheeseFloor);
+        }
+        const tile = this.cheeseTileSize;
+        const half = Math.ceil(size / 2 / tile) * tile;
+        const count = Math.pow((half * 2) / tile + 1, 2);
+        const geom = this.cheeseSourceGeometry;
+        const mat = this.cheeseSourceMaterial;
+        const mesh = new THREE.InstancedMesh(geom, mat, count);
+        mesh.receiveShadow = true;
+        const dummy = new THREE.Object3D();
+        const scale = this.cheeseScale;
+        // Player feet sit at y=0 (see movement clamp), so cheese top must be at 0 — not at groundY (-1)
+        // World top of block = center.y + bb.max.y * scale → set center.y so top sits at 0
+        const bb = geom.boundingBox;
+        const floorTopY = 0;
+        const blockCenterY = floorTopY - bb.max.y * scale;
+        let i = 0;
+        for (let x = -half; x <= half; x += tile) {
+            for (let z = -half; z <= half; z += tile) {
+                dummy.position.set(x, blockCenterY, z);
+                dummy.scale.set(scale, scale, scale);
+                dummy.rotation.y = 0;
+                dummy.updateMatrix();
+                mesh.setMatrixAt(i++, dummy.matrix);
+            }
+        }
+        mesh.count = i;
+        mesh.instanceMatrix.needsUpdate = true;
+        this.scene.add(mesh);
+        this.cheeseFloor = mesh;
+        // Hide the fallback plane now that cheese tiles cover it (keep underneath as safety)
+        if (this.ground) this.ground.visible = false;
+    }
+
     updateGroundAndFog(width, height) {
         const size = Math.max(width, height) + 20; // margin
+        this.cheeseFloorSize = size;
+        this.roofSize = size;
+        this.rebuildCheeseFloor(size);
+        this.rebuildCrystalRoof(size);
         // Update ground plane to cover maze
         if (this.ground) {
             if (this.ground.geometry) this.ground.geometry.dispose();
@@ -1340,7 +2494,7 @@ class Game3D {
         if (this.gridHelper) {
             this.scene.remove(this.gridHelper);
             const divisions = Math.max(10, Math.floor(size / 4));
-            const grid = new THREE.GridHelper(size, divisions, 0x00ff00, 0x00ff00);
+            const grid = new THREE.GridHelper(size, divisions, 0xffe8a0, 0xffe8a0);
             grid.position.y = -0.9;
             grid.material.opacity = 0.25;
             grid.material.transparent = true;
@@ -1355,8 +2509,111 @@ class Game3D {
     }
     
     initializeSavedMazes() {
-        // Only ASCII mazes for gameplay progression
+        // Pre-defined maze layouts
         this.savedMazes = [
+            {
+                name: this.t('wideHalls'),
+                size: 100,
+                type: "generated",
+                description: this.t('wideHallsDesc')
+            },
+            {
+                name: this.t('classicSmall'),
+                size: 15,
+                type: "static",
+                layout: [
+                    "###############",
+                    "#.............#",
+                    "#.##.......##.#",
+                    "#.#.........#.#",
+                    "#.#.#######.#.#",
+                    "#.#.........#.#",
+                    "#.##.......##.#",
+                    "#.#.........#.#",
+                    "#.#.#######.#.#",
+                    "#.#.........#.#",
+                    "#.##.......##.#",
+                    "#.#.........#.#",
+                    "#.#.#######.#.#",
+                    "#.............#",
+                    "###############"
+                ],
+                description: this.t('classicSmallDesc')
+            },
+            {
+                name: this.t('openArena'),
+                size: 20,
+                type: "static",
+                layout: [
+                    "####################",
+                    "#..................#",
+                    "#..................#",
+                    "#..................#",
+                    "#..................#",
+                    "#..................#",
+                    "#..................#",
+                    "#..................#",
+                    "#..................#",
+                    "#..................#",
+                    "#..................#",
+                    "#..................#",
+                    "#..................#",
+                    "#..................#",
+                    "#..................#",
+                    "#..................#",
+                    "#..................#",
+                    "#..................#",
+                    "#..................#",
+                    "####################"
+                ],
+                description: this.t('openArenaDesc')
+            },
+            {
+                name: this.t('spiral'),
+                size: 25,
+                type: "static",
+                layout: this.generateSpiralMaze(25),
+                description: this.t('spiralDesc')
+            },
+            {
+                name: this.t('labyrinth'),
+                size: 61,
+                type: "static",
+                layout: [
+                    "#############################################################",
+                    "#############################################################",
+                    "#############################################################",
+                    "##......................................##.......##........##",
+                    "##..######.########.##################..###..######.......###",
+                    "##..##################################..###.#######.##.##..##",
+                    "##..###..######....###.#..#####.....#....##.###.#...#####.###",
+                    "##..##.......##..........................##.##......#####.###",
+                    "##..#..####..##..##########################.###.....###....##",
+                    "##..#..#####.##..##########################..###.##.##.....##",
+                    "##..##....##.##..................................#####..#####",
+                    "##..##....##.##..................................#####.######",
+                    "##..####..##.#########################..###########....##.###",
+                    "##..####..##..########################..###########....##..##",
+                    "#...##....##....##........##.....................##.#####..##",
+                    "#...##...###....##........#.........##...........##..####..##",
+                    "#...##...###....##........#.........##...........##..####..##",
+                    "##..####..##..########################..###########....##..##",
+                    "##..####..##.#########################..###########....##.###",
+                    "##..##....##.##..................................#####.######",
+                    "##..##....##.##..................................#####..#####",
+                    "##..#..#####.##..##########################..###.##.##.....##",
+                    "##..#..####..##..##########################.###.....###....##",
+                    "##..##.......##..........................##.##......#####.###",
+                    "##..###..######....###.#..#####.....#....##.###.#...#####.###",
+                    "##..##################################..###.#######.##.##..##",
+                    "##..######.########.##################..###..######.......###",
+                    "##......................................##.......##........##",
+                    "#############################################################",
+                    "#############################################################",
+                    "#############################################################"
+                ],
+                description: this.t('labyrinthDesc')
+            },
             {
                 name: this.t('asciiMaze'),
                 size: 41,
@@ -1366,7 +2623,50 @@ class Game3D {
         ];
     }
     
+    generateSpiralMaze(size) {
+        const maze = [];
+        for (let y = 0; y < size; y++) {
+            maze[y] = [];
+            for (let x = 0; x < size; x++) {
+                maze[y][x] = '#';
+            }
+        }
+        
+        // Create spiral pattern
+        let x = 1, y = 1;
+        let dx = 1, dy = 0;
+        let steps = 1;
+        
+        while (x < size-1 && y < size-1) {
+            for (let i = 0; i < steps; i++) {
+                if (x >= 0 && x < size && y >= 0 && y < size) {
+                    maze[y][x] = '.';
+                }
+                x += dx;
+                y += dy;
+            }
+            
+            // Turn right
+            [dx, dy] = [-dy, dx];
+            if (dx === 0) steps++;
+        }
+        
+        return maze;
+    }
     
+    initializeCreateMode() {
+        // Initialize empty custom maze
+        this.createMode.customMaze = [];
+        for (let y = 0; y < this.createMode.gridSize; y++) {
+            this.createMode.customMaze[y] = [];
+            for (let x = 0; x < this.createMode.gridSize; x++) {
+                this.createMode.customMaze[y][x] = '.'; // Empty space
+            }
+        }
+        
+        // Create grid highlighting system
+        this.createGridHighlights();
+    }
     
     createGridHighlights() {
         // Clear existing highlights
@@ -1377,11 +2677,11 @@ class Game3D {
         
         if (this.gameMode !== 'create') return;
         
-        // Create highlight material
+        // Create-mode placement highlight (sand-yellow)
         const highlightMaterial = new THREE.MeshBasicMaterial({
-            color: 0x00ff00,
+            color: 0xffe8a0,
             transparent: true,
-            opacity: 0.2,
+            opacity: 0.25,
             side: THREE.DoubleSide
         });
         
@@ -1412,8 +2712,20 @@ class Game3D {
     }
     
     setGameMode(mode) {
+        // Arena is a special play sub-mode: it tears down the maze and runs the wave loop
+        if (mode === 'arena') {
+            this.startArenaMode();
+            return;
+        }
+        // Leaving arena (if active) — teardown lava/volcano/pillars before switching
+        if (this.arena && this.arena.active) {
+            this.arena.active = false;
+            this.arena.phase = 'idle';
+            this._clearArenaObjects();
+            if (this.clearEnemies) this.clearEnemies();
+        }
         this.gameMode = mode;
-        
+
         if (mode === 'create') {
             // Clear maze walls and markers
             this.clearMaze();
@@ -1443,10 +2755,8 @@ class Game3D {
             }
             // Restore normal cursor behavior
             document.body.style.cursor = 'default';
-            // Only rebuild maze if switching from create mode, not when starting new levels
-            if (this.gameMode === 'create') {
-                this.createLabyrinth();
-            }
+            // Rebuild current maze
+            this.createLabyrinth();
             // Setup play mode camera/controls and enemies
             this.setupPlayMode();
         }
@@ -1580,7 +2890,7 @@ class Game3D {
             case 'wall':
                 previewGeometry = new THREE.BoxGeometry(2, 4, 2);
                 previewMaterial = new THREE.MeshBasicMaterial({
-                    color: 0x00ff00,
+                    color: 0xffb347,
                     transparent: true,
                     opacity: 0.5,
                     wireframe: true
@@ -1598,7 +2908,7 @@ class Game3D {
             case 'start':
                 previewGeometry = new THREE.ConeGeometry(0.5, 2, 8);
                 previewMaterial = new THREE.MeshBasicMaterial({
-                    color: 0x00ff00,
+                    color: 0xffb347,
                     transparent: true,
                     opacity: 0.5
                 });
@@ -1892,14 +3202,15 @@ class Game3D {
     
     createWallAtGrid(gridX, gridZ) {
         const worldPos = this.getWorldPositionFromGrid(gridX, gridZ);
-        const wallMaterial = new THREE.MeshLambertMaterial({ 
-            color: 0x001100,
-            emissive: 0x000800,
+        const t = this.themes.desert;
+        const wallMaterial = (this.materials && this.materials.wall) || new THREE.MeshLambertMaterial({
+            color: t.wall,
+            emissive: t.wallEmissive,
             transparent: true,
-            opacity: 0.9
+            opacity: 0.95
         });
         
-        const wall = new THREE.Mesh(
+        const wall = this.createBrickWallMesh(2, 4, 2) || new THREE.Mesh(
             new THREE.BoxGeometry(2, 4, 2),
             wallMaterial
         );
@@ -1931,10 +3242,15 @@ class Game3D {
     
     switchMaze(index) {
         if (index >= 0 && index < this.savedMazes.length) {
+            // Leaving arena cleanly if it was running
+            if (this.arena && this.arena.active) {
+                this.arena.active = false;
+                this.arena.phase = 'idle';
+                this._clearArenaObjects();
+                if (this.clearEnemies) this.clearEnemies();
+            }
             this.currentMazeIndex = index;
-            this.resetMazeTimer(); // Reset timer when switching mazes
             this.rebuildMaze();
-            console.log(`Switched to maze: ${this.savedMazes[index].name}`);
             if (this.gameMode === 'play') {
                 this.respawnEnemies();
             }
@@ -1949,38 +3265,18 @@ class Game3D {
         });
         this.walls = [];
         
-        // Reset timer when maze is rebuilt
-        this.resetMazeTimer();
-        
         // Create new maze
         this.createLabyrinth();
-        // If this is the labyrinth map and start is known, spawn player outside maze entry
+        // If this is the labyrinth map and start is known, spawn player there
         const cur = this.savedMazes[this.currentMazeIndex];
         if (cur && (cur.type === 'labyrinth' || cur.name === 'Labyrinth' || cur.type === 'ascii') && this.levelStartWorld) {
-            // Calculate direction from entry to exit to determine which way is "into" the maze
-            let directionIntoMaze = new THREE.Vector3(1, 0, 0); // Default to positive X direction
+            this.player.position.set(this.levelStartWorld.x, 0, this.levelStartWorld.z);
+            // Face toward the maze interior (toward end)
             if (this.levelEndWorld) {
-                directionIntoMaze = new THREE.Vector3(
-                    this.levelEndWorld.x - this.levelStartWorld.x,
-                    0,
-                    this.levelEndWorld.z - this.levelStartWorld.z
-                ).normalize();
+                const dx = this.levelEndWorld.x - this.levelStartWorld.x;
+                const dz = this.levelEndWorld.z - this.levelStartWorld.z;
+                this.characterRotation = Math.atan2(dx, dz);
             }
-            
-            // Spawn player outside the maze entry (one cell size away from entry point)
-            const cellSize = 3; // This should match the cellSize used in createLabyrinth
-            const spawnOffset = directionIntoMaze.clone().multiplyScalar(-cellSize);
-            const spawnPosition = this.levelStartWorld.clone().add(spawnOffset);
-            
-            this.player.position.set(spawnPosition.x, 0, spawnPosition.z);
-            
-            // Face toward the green start marker (entry point)
-            const directionToStart = new THREE.Vector3(
-                this.levelStartWorld.x - spawnPosition.x,
-                0,
-                this.levelStartWorld.z - spawnPosition.z
-            ).normalize();
-            this.characterRotation = Math.atan2(directionToStart.x, directionToStart.z);
         }
     }
     
@@ -2016,8 +3312,8 @@ class Game3D {
             this.modalOpen = false;
             // Remove cursor class and re-enable pointer lock
             document.body.classList.remove('modal-open');
-            // In play mode, re-acquire pointer lock for continuous mouse aim
-            if (this.gameMode === 'play' && !this.isPointerLocked) {
+            // In play mode, re-acquire pointer lock for continuous mouse aim (desktop only).
+            if (this.gameMode === 'play' && !this.isPointerLocked && !this.isTouchDevice) {
                 setTimeout(() => document.body.requestPointerLock(), 50);
             }
         } else {
@@ -2070,6 +3366,11 @@ class Game3D {
                 btn.classList.add('active');
             }
         });
+
+        // Update character buttons
+        document.querySelectorAll('.character-btn').forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.character === this.currentCharacterKey);
+        });
         
         // Update modal text elements
         this.updateModalText();
@@ -2091,9 +3392,6 @@ class Game3D {
         
         const viewTitle = document.getElementById('view-title');
         if (viewTitle) viewTitle.textContent = this.t('view') || 'View';
-        
-        const themeTitle = document.getElementById('theme-title');
-        if (themeTitle) themeTitle.textContent = this.t('theme');
         
         const languageTitle = document.getElementById('language-title');
         if (languageTitle) languageTitle.textContent = this.t('language');
@@ -2117,6 +3415,7 @@ class Game3D {
             const mode = btn.dataset.mode;
             if (mode === 'play') btn.textContent = this.t('playMode');
             if (mode === 'create') btn.textContent = this.t('createMode');
+            if (mode === 'arena') btn.textContent = 'Arena Mode';
         });
     }
     
@@ -2157,15 +3456,6 @@ class Game3D {
             });
         });
         
-        // Theme buttons
-        document.querySelectorAll('.theme-btn').forEach(btn => {
-            btn.addEventListener('click', () => {
-                const theme = btn.dataset.theme;
-                this.applyTheme(theme);
-                this.toggleSettingsModal();
-            });
-        });
-        
         // Language buttons
         document.querySelectorAll('.language-btn').forEach(btn => {
             btn.addEventListener('click', () => {
@@ -2202,13 +3492,43 @@ class Game3D {
                 }
             });
         }
-        
+
+        // Audio settings wiring
+        const aEnabled = document.getElementById('audio-enabled');
+        const aVol = document.getElementById('audio-volume');
+        const aVolVal = document.getElementById('audio-volume-value');
+        if (aEnabled && this.audio) {
+            aEnabled.checked = this.audio.enabled;
+            aEnabled.addEventListener('change', () => {
+                this.audio.setEnabled(aEnabled.checked);
+            });
+        }
+        if (aVol && this.audio) {
+            const initPct = Math.round(this.audio.volume * 100);
+            aVol.value = String(initPct);
+            if (aVolVal) aVolVal.textContent = String(initPct);
+            aVol.addEventListener('input', () => {
+                const pct = parseInt(aVol.value) || 0;
+                if (aVolVal) aVolVal.textContent = String(pct);
+                this.audio.setVolume(pct / 100);
+            });
+        }
+
+
         // Game mode buttons
         document.querySelectorAll('.mode-btn').forEach(btn => {
             btn.addEventListener('click', () => {
                 const mode = btn.dataset.mode;
                 this.setGameMode(mode);
                 this.toggleSettingsModal(); // Close modal immediately
+            });
+        });
+
+        // Character selection buttons
+        document.querySelectorAll('.character-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const key = btn.dataset.character;
+                this.setPlayerCharacter(key);
             });
         });
         
@@ -2302,13 +3622,12 @@ class Game3D {
     }
 
     createLabyrinth() {
-        // Wall material respects theme; fall back to defaults if theme not ready
-        const theme = (this.themes && this.themes[this.themeName]) || null;
+        const theme = this.themes.desert;
         const wallMaterial = this.materials && this.materials.wall
             ? this.materials.wall
             : new THREE.MeshLambertMaterial({
-                color: theme ? theme.wall : 0x001100,
-                emissive: theme ? theme.wallEmissive : 0x000800,
+                color: theme.wall,
+                emissive: theme.wallEmissive,
                 transparent: true,
                 opacity: 0.95
             });
@@ -2318,38 +3637,79 @@ class Game3D {
         let maze;
         let cellSize, wallHeight, startX, startZ;
         
-        // Only ASCII mazes for gameplay progression
-        // Generate perfect ASCII maze based on difficulty
-        maze = this.generateAsciiPerfectMazeByDifficulty(this.mazeDifficulty || 5);
-        cellSize = 3;
-        wallHeight = 8;
-        const cols = maze[0].length;
-        const rows = maze.length;
-        startX = -((cols - 1) * cellSize) / 2;
-        startZ = -((rows - 1) * cellSize) / 2;
-        this.updateGroundAndFog((cols - 1) * cellSize, (rows - 1) * cellSize);
-        
-        // Store maze info for enemy spawning
-        this.lastMazeInfo = { maze, startX, startZ, cellSize };
+        if (currentMaze.type === "labyrinth") {
+            // Perfect maze with clear start/end; wide halls and tall walls
+            const size = currentMaze.size;
+            const result = this.generatePerfectLabyrinth(size);
+            maze = result.grid;
+            this.levelStartCell = result.start; // {x,y}
+            this.levelEndCell = result.end;
+            cellSize = this.labyrinthCorridorWidth; // wide halls (5–10 range recommended)
+            wallHeight = 8; // high walls
+            const cols = maze[0].length;
+            const rows = maze.length;
+            startX = -((cols - 1) * cellSize) / 2;
+            startZ = -((rows - 1) * cellSize) / 2;
+            this.updateGroundAndFog((cols - 1) * cellSize, (rows - 1) * cellSize);
+        } else if (currentMaze.type === "ascii") {
+            // Generate perfect ASCII maze based on difficulty
+            maze = this.generateAsciiPerfectMazeByDifficulty(this.mazeDifficulty || 5);
+            cellSize = 3;
+            wallHeight = 8;
+            const cols = maze[0].length;
+            const rows = maze.length;
+            startX = -((cols - 1) * cellSize) / 2;
+            startZ = -((rows - 1) * cellSize) / 2;
+            this.updateGroundAndFog((cols - 1) * cellSize, (rows - 1) * cellSize);
+            
+            // Store maze info for enemy spawning
+            this.lastMazeInfo = { maze, startX, startZ, cellSize };
+        } else if (currentMaze.type === "generated") {
+            // Generate maze dynamically
+            maze = this.generateMaze(currentMaze.size, currentMaze.size);
+            cellSize = 2;
+            wallHeight = 4;
+            // Center the maze exactly on the ground using cell centers
+            const cols = maze[0].length;
+            const rows = maze.length;
+            startX = -((cols - 1) * cellSize) / 2;
+            startZ = -((rows - 1) * cellSize) / 2;
+            this.updateGroundAndFog((cols - 1) * cellSize, (rows - 1) * cellSize);
+        } else {
+            // Use static layout
+            maze = currentMaze.layout;
+            cellSize = 3;
+            wallHeight = (currentMaze.name === 'Labyrinth') ? 8 : 4;
+            const cols = maze[0].length;
+            const rows = maze.length;
+            startX = -((cols - 1) * cellSize) / 2;
+            startZ = -((rows - 1) * cellSize) / 2;
+            this.updateGroundAndFog((cols - 1) * cellSize, (rows - 1) * cellSize);
+        }
         
         // Create walls based on layout
         for (let row = 0; row < maze.length; row++) {
             for (let col = 0; col < maze[row].length; col++) {
                 const tile = maze[row][col];
                 if (tile === '#') {
-                    // Vary wall height for visual interest
-                    const h = wallHeight * THREE.MathUtils.lerp(0.7, 1.6, Math.random());
-                    const wallGeometry = new THREE.BoxGeometry(cellSize, h, cellSize);
-                    const wall = new THREE.Mesh(wallGeometry, wallMaterial);
-                    
+                    const isBorder = row === 0 || col === 0 || row === maze.length - 1 || col === maze[row].length - 1;
+                    // Only thin interior walls for procedurally generated mazes.
+                    if (currentMaze.type === 'generated' && !isBorder) {
+                        if (Math.random() > this.wallDensity) continue; // skip most interior walls
+                    }
+                     // Vary wall height for visual interest
+                    const h = (currentMaze.type === 'labyrinth') ? wallHeight : (wallHeight * THREE.MathUtils.lerp(0.7, 1.6, Math.random()));
+                    const wall = this.createBrickWallMesh(cellSize, h, cellSize) || (() => {
+                        const m = new THREE.Mesh(new THREE.BoxGeometry(cellSize, h, cellSize), wallMaterial);
+                        m.castShadow = true;
+                        m.receiveShadow = true;
+                        return m;
+                    })();
                     wall.position.set(
                         startX + col * cellSize,
                         h / 2,
                         startZ + row * cellSize
                     );
-                    
-                    wall.castShadow = true;
-                    wall.receiveShadow = true;
                     this.scene.add(wall);
                     
                     // Store wall for collision detection
@@ -2365,8 +3725,20 @@ class Game3D {
         // Stash info for spawners and markers
         this.lastMazeInfo = { maze, startX, startZ, cellSize };
 
-        // Add entrance and exit markers for ASCII mazes
-        this.addLabyrinthMarkers(maze, { startX, startZ, cellSize });
+        // Compute and store start/end world positions for labyrinth
+        if (currentMaze.type === 'labyrinth' && this.levelStartCell && this.levelEndCell) {
+            const sx = startX + this.levelStartCell.x * cellSize;
+            const sz = startZ + this.levelStartCell.y * cellSize;
+            const ex = startX + this.levelEndCell.x * cellSize;
+            const ez = startZ + this.levelEndCell.y * cellSize;
+            this.levelStartWorld = new THREE.Vector3(sx, 0, sz);
+            this.levelEndWorld = new THREE.Vector3(ex, 0, ez);
+            // Place markers
+            this.addObjectiveMarkers(this.levelStartWorld, this.levelEndWorld);
+        } else {
+            // Add entrance and exit markers based on maze bounds
+            this.addLabyrinthMarkers(maze, { startX, startZ, cellSize });
+        }
     }
     
     addLabyrinthMarkers(maze, info) {
@@ -2378,95 +3750,33 @@ class Game3D {
         const { startX, startZ, cellSize } = info;
         const rows = maze.length;
         const cols = maze[0].length;
-        
-        // Find the actual entry and exit points created by generateAsciiPerfectMaze
-        // Entry is at column 0, exit is at column width-1
-        let entRow = 3; // Default to row 3 (middle of the 5-row entrance)
-        let exitRow = rows - 4; // Default to row height-4 (middle of the 5-row exit)
-        
-        // Find the center of the entrance opening (column 0)
-        let entranceCount = 0;
-        let entranceSum = 0;
-        for (let r = 0; r < rows; r++) {
-            if (maze[r][0] === '.') {
-                entranceCount++;
-                entranceSum += r;
+        // Find entrance near left side and exit near right side (handling solid borders)
+        let entRow = Math.floor(rows / 2), entCol = 1;
+        let exitRow = Math.floor(rows / 2), exitCol = cols - 2;
+        // Scan a band from the edge inward to locate the closest open cell
+        for (let r = 1; r < rows - 1; r++) {
+            for (let c = 0; c < Math.min(10, cols); c++) {
+                if (maze[r][c] === '.') { entRow = r; entCol = Math.max(1, c); break; }
             }
+            if (entCol !== 1 || maze[entRow][1] === '.') break;
         }
-        if (entranceCount > 0) {
-            entRow = Math.floor(entranceSum / entranceCount); // Center of entrance
-        }
-        
-        // Find the center of the exit opening (column width-1)
-        let exitCount = 0;
-        let exitSum = 0;
-        for (let r = 0; r < rows; r++) {
-            if (maze[r][cols - 1] === '.') {
-                exitCount++;
-                exitSum += r;
+        for (let r = rows - 2; r >= 1; r--) {
+            for (let c = cols - 1; c >= Math.max(cols - 10, 0); c--) {
+                if (maze[r][c] === '.') { exitRow = r; exitCol = Math.min(cols - 2, c); break; }
             }
+            if (exitCol !== cols - 2 || maze[exitRow][cols - 2] === '.') break;
         }
-        if (exitCount > 0) {
-            exitRow = Math.floor(exitSum / exitCount); // Center of exit
-        }
-        
-        const entCol = 0; // Entry is always at column 0
-        const exitCol = cols - 1; // Exit is always at column width-1
-        
-        console.log(`Entry point: row=${entRow}, col=${entCol}, world=(${startX + entCol * cellSize}, ${startZ + entRow * cellSize})`);
-        console.log(`Exit point: row=${exitRow}, col=${exitCol}, world=(${startX + exitCol * cellSize}, ${startZ + exitRow * cellSize})`);
-        
-        // Create start marker with visual content inside
+        // Create markers slightly above ground at cell centers
         const entranceGeometry = new THREE.ConeGeometry(0.5, 2, 8);
-        const entranceMaterial = new THREE.MeshLambertMaterial({ color: 0x00ff00, emissive: 0x004400 });
+        const entranceMaterial = new THREE.MeshLambertMaterial({ color: 0xffb347, emissive: 0x4a3018 });
         const entrance = new THREE.Mesh(entranceGeometry, entranceMaterial);
         entrance.position.set(startX + entCol * cellSize, 1, startZ + entRow * cellSize);
-        
-        // Add visual content inside the start marker
-        const startContentGroup = new THREE.Group();
-        
-        // Add a glowing sphere inside the cone
-        const sphereGeometry = new THREE.SphereGeometry(0.3, 8, 8);
-        const sphereMaterial = new THREE.MeshLambertMaterial({ 
-            color: 0xffffff, 
-            emissive: 0x00ff00,
-            transparent: true,
-            opacity: 0.8
-        });
-        const startSphere = new THREE.Mesh(sphereGeometry, sphereMaterial);
-        startSphere.position.set(0, 0.5, 0);
-        startContentGroup.add(startSphere);
-        
-        // Add a pulsing ring around the sphere
-        const ringGeometry = new THREE.RingGeometry(0.2, 0.4, 16);
-        const ringMaterial = new THREE.MeshLambertMaterial({ 
-            color: 0x00ff00, 
-            emissive: 0x00ff00,
-            transparent: true,
-            opacity: 0.6,
-            side: THREE.DoubleSide
-        });
-        const startRing = new THREE.Mesh(ringGeometry, ringMaterial);
-        startRing.rotation.x = -Math.PI / 2; // Lay flat
-        startRing.position.set(0, 0.1, 0);
-        startContentGroup.add(startRing);
-        
-        // Add the content group to the entrance
-        entrance.add(startContentGroup);
-        entrance.userData = { 
-            type: 'start',
-            content: startContentGroup,
-            sphere: startSphere,
-            ring: startRing
-        };
-        
         this.scene.add(entrance);
         
         const exitGeometry = new THREE.ConeGeometry(0.5, 2, 8);
         const exitMaterial = new THREE.MeshLambertMaterial({ color: 0xff0000, emissive: 0x440000 });
         const exit = new THREE.Mesh(exitGeometry, exitMaterial);
         exit.position.set(startX + exitCol * cellSize, 1, startZ + exitRow * cellSize);
-        exit.userData = { type: 'end' };
         this.scene.add(exit);
         this.labyrinthMarkers = [entrance, exit];
         // Save for spawn logic
@@ -2480,9 +3790,9 @@ class Game3D {
             this.labyrinthMarkers.forEach(m => this.scene.remove(m));
         }
         this.labyrinthMarkers = [];
-        // Start (green)
+        // Start marker (warm gold)
         const sGeom = new THREE.ConeGeometry(0.7, 2.5, 10);
-        const sMat = new THREE.MeshLambertMaterial({ color: 0x00ff88, emissive: 0x003300 });
+        const sMat = new THREE.MeshLambertMaterial({ color: 0xffd27a, emissive: 0x4a3018 });
         const s = new THREE.Mesh(sGeom, sMat);
         s.position.set(startWorld.x, 1.25, startWorld.z);
         this.scene.add(s);
@@ -2495,160 +3805,132 @@ class Game3D {
         this.labyrinthMarkers.push(s, e);
     }
 
+    generatePerfectLabyrinth(size) {
+        // Ensure odd size for maze
+        const n = (size % 2 === 0) ? size + 1 : size;
+        const grid = Array.from({ length: n }, () => Array.from({ length: n }, () => '#'));
+        // Carve passages at odd coordinates
+        const stack = [];
+        const start = { x: 1, y: 1 };
+        grid[start.y][start.x] = '.';
+        stack.push(start);
+        const dirs = [ {x:0,y:-2}, {x:2,y:0}, {x:0,y:2}, {x:-2,y:0} ];
+        while (stack.length) {
+            const cur = stack[stack.length - 1];
+            // collect unvisited neighbors
+            const neigh = [];
+            for (const d of dirs.sort(()=>Math.random()-0.5)) {
+                const nx = cur.x + d.x, ny = cur.y + d.y;
+                if (nx > 0 && nx < n-1 && ny > 0 && ny < n-1 && grid[ny][nx] === '#') {
+                    neigh.push({ nx, ny, wx: cur.x + d.x/2, wy: cur.y + d.y/2 });
+                }
+            }
+            if (neigh.length === 0) {
+                stack.pop();
+            } else {
+                const pick = neigh[Math.floor(Math.random()*neigh.length)];
+                grid[pick.wy][pick.wx] = '.';
+                grid[pick.ny][pick.nx] = '.';
+                stack.push({ x: pick.nx, y: pick.ny });
+            }
+        }
+        // Define end at opposite corner
+        const end = { x: n-2, y: n-2 };
+        grid[end.y][end.x] = '.';
+        // Openings on border near start and end
+        grid[1][0] = '.'; // entrance
+        grid[n-2][n-1] = '.'; // exit
+        return { grid, start, end };
+    }
 
+    // Build a static ASCII labyrinth with wide corridors and small loops.
+    // baseSize: odd number (e.g., 61); passageScale: width of corridors in cells (e.g., 5)
+    // braidFactor: 0..1 chance to open a wall between parallel passages to create loops
+    generateWideImperfectLabyrinth(baseSize = 61, passageScale = 1, braidFactor = 0.12) {
+        const { grid } = this.generatePerfectLabyrinth(baseSize); // '.' and '#'
+        const H = grid.length, W = grid[0].length;
+        // Upscale: '.' -> passageScale x passageScale block; '#' stays 1x1 to keep walls 1 cell thick
+        const out = [];
+        for (let y = 0; y < H; y++) {
+            const row = grid[y];
+            const expandedRow = [];
+            for (let x = 0; x < W; x++) {
+                if (row[x] === '.') {
+                    for (let k = 0; k < passageScale; k++) expandedRow.push('.');
+                } else {
+                    expandedRow.push('#');
+                }
+            }
+            const vrep = row.some(c => c === '.') ? passageScale : 1;
+            for (let r = 0; r < vrep; r++) out.push(expandedRow.slice());
+        }
+        const H2 = out.length, W2 = out[0].length;
+        // Outer border walls
+        for (let x = 0; x < W2; x++) { out[0][x] = '#'; out[H2-1][x] = '#'; }
+        for (let y = 0; y < H2; y++) { out[y][0] = '#'; out[y][W2-1] = '#'; }
+        // Punch some internal walls to add loops
+        for (let y = 1; y < H2 - 1; y++) {
+            for (let x = 1; x < W2 - 1; x++) {
+                if (out[y][x] !== '#') continue;
+                const left = out[y][x-1] === '.'; const right = out[y][x+1] === '.';
+                const up = out[y-1][x] === '.'; const down = out[y+1][x] === '.';
+                const separatesHoriz = left && right && !(up || down);
+                const separatesVert = up && down && !(left || right);
+                if ((separatesHoriz || separatesVert) && Math.random() < braidFactor) out[y][x] = '.';
+            }
+        }
+        // Entrance on left, exit on right
+        let entY = Math.floor(H2/2), extY = Math.floor(H2/2);
+        for (let y = 1; y < H2 - 1; y++) if (out[y][1] === '.') { entY = y; break; }
+        for (let y = H2 - 2; y >= 1; y--) if (out[y][W2-2] === '.') { extY = y; break; }
+        out[entY][0] = '.'; out[extY][W2-1] = '.';
+        return out.map(r => r.join(''));
+    }
 
     // ===== ASCII perfect maze (strings) with difficulty =====
     generateAsciiPerfectMaze(width, height) {
         let w = (width % 2 === 0) ? width - 1 : width;
         let h = (height % 2 === 0) ? height - 1 : height;
-    
+
         const grid = Array.from({ length: h }, () => Array.from({ length: w }, () => '#'));
-        
-        // Fixed bounds check - allow cells up to but not including the border
-        const inBounds = (x, y) => x >= 1 && x <= w - 2 && y >= 1 && y <= h - 2;
-        
+        const inBounds = (x, y) => x > 0 && x < w - 1 && y > 0 && y < h - 1;
         const carve = (x, y) => { grid[y][x] = '.'; };
-    
+
         // Start at random odd cell
         let sx = 1 + 2 * Math.floor(Math.random() * ((w - 1) / 2));
         let sy = 1 + 2 * Math.floor(Math.random() * ((h - 1) / 2));
         carve(sx, sy);
-    
+
         const stack = [{ x: sx, y: sy }];
         const dirs = [[0, -2], [2, 0], [0, 2], [-2, 0]];
-    
+
         while (stack.length) {
             const cur = stack[stack.length - 1];
             const neighbors = dirs
-                .map(([dx, dy]) => ({ 
-                    nx: cur.x + dx, 
-                    ny: cur.y + dy, 
-                    bx: cur.x + dx / 2, 
-                    by: cur.y + dy / 2 
-                }))
-                .filter(n => 
-                    inBounds(n.nx, n.ny) && 
-                    grid[n.ny][n.nx] === '#'
-                );
-    
-            if (neighbors.length === 0) { 
-                stack.pop(); 
-                continue; 
-            }
-    
+                .map(([dx, dy]) => ({ nx: cur.x + dx, ny: cur.y + dy, bx: cur.x + dx / 2, by: cur.y + dy / 2 }))
+                .filter(n => inBounds(n.nx, n.ny) && grid[n.ny][n.nx] === '#');
+
+            if (neighbors.length === 0) { stack.pop(); continue; }
+
             const pick = neighbors[Math.floor(Math.random() * neighbors.length)];
-            grid[pick.by][pick.bx] = '.'; // Carve the wall between
-            grid[pick.ny][pick.nx] = '.'; // Carve the destination cell
+            grid[pick.by][pick.bx] = '.';
+            grid[pick.ny][pick.nx] = '.';
             stack.push({ x: pick.nx, y: pick.ny });
         }
-    
-        // Create entrance and exit
-        let entY = 1; 
-        let foundEntrance = false;
-        for (let y = 1; y < h - 1; y++) { 
-            if (grid[y][1] === '.') { 
-                entY = y; 
-                foundEntrance = true;
-                break; 
-            }
-        }
-        
-        let extY = h - 2; 
-        let foundExit = false;
-        for (let y = h - 2; y >= 1; y--) { 
-            if (grid[y][w - 2] === '.') { 
-                extY = y; 
-                foundExit = true;
-                break; 
-            }
-        }
-        
-        grid[entY][0] = '.'; 
-        grid[extY][w - 1] = '.';
-        
-        // Ensure entrance/exit connect to paths
-        if (grid[entY][1] !== '.') {
-            grid[entY][1] = '.';
-        }
-        if (grid[extY][w - 2] !== '.') {
-            grid[extY][w-2] = '.';
-        }
-    
+
+        // Entrance and exit
+        let entY = 1; for (let y = 1; y < h - 1; y++) if (grid[y][1] === '.') { entY = y; break; }
+        let extY = h - 2; for (let y = h - 2; y >= 1; y--) if (grid[y][w - 2] === '.') { extY = y; break; }
+        grid[entY][0] = '.'; grid[extY][w - 1] = '.';
+
         return grid.map(row => row.join(''));
     }
+
     generateAsciiPerfectMazeByDifficulty(level) {
         const d = Math.max(1, Math.min(10, parseInt(level) || 5));
         const size = 25 + (d - 1) * 8; // 25..97
         const odd = (size % 2 === 1) ? size : size - 1;
-        const maze = this.generateAsciiPerfectMaze(odd, odd);
-        
-        // For small mazes (difficulty 1-2), verify connectivity and regenerate if needed
-        if (d <= 2) {
-            const isConnected = this.testMazeConnectivity(maze, d);
-            if (!isConnected) {
-                return this.generateAsciiPerfectMazeByDifficulty(level); // Recursive call to regenerate
-            }
-        }
-        
-        return maze;
-    }
-
-    testMazeConnectivity(maze, level) {
-        const h = maze.length;
-        const w = maze[0].length;
-        
-        // Find entrance and exit positions
-        let entrancePos = null;
-        let exitPos = null;
-        
-        for (let y = 0; y < h; y++) {
-            if (maze[y][0] === '.') {
-                entrancePos = { x: 0, y: y };
-                break;
-            }
-        }
-        
-        for (let y = 0; y < h; y++) {
-            if (maze[y][w-1] === '.') {
-                exitPos = { x: w-1, y: y };
-                break;
-            }
-        }
-        
-        if (!entrancePos || !exitPos) {
-            return false;
-        }
-        
-        // Simple BFS to test connectivity
-        const visited = new Set();
-        const queue = [entrancePos];
-        visited.add(`${entrancePos.x},${entrancePos.y}`);
-        
-        const directions = [[0, 1], [1, 0], [0, -1], [-1, 0]];
-        
-        while (queue.length > 0) {
-            const current = queue.shift();
-            
-            // Check if we reached the exit
-            if (current.x === exitPos.x && current.y === exitPos.y) {
-                return true;
-            }
-            
-            // Explore neighbors
-            for (const [dx, dy] of directions) {
-                const nx = current.x + dx;
-                const ny = current.y + dy;
-                const key = `${nx},${ny}`;
-                
-                if (nx >= 0 && nx < w && ny >= 0 && ny < h && 
-                    maze[ny][nx] === '.' && !visited.has(key)) {
-                    visited.add(key);
-                    queue.push({ x: nx, y: ny });
-                }
-            }
-        }
-        
-        return false;
+        return this.generateAsciiPerfectMaze(odd, odd);
     }
 
     // ===== Static Labyrinth Editing Helpers =====
@@ -2687,7 +3969,6 @@ class Game3D {
         // Switch to it and rebuild
         this.currentMazeIndex = idx;
         this.rebuildMaze();
-        console.log('Labyrinth layout applied (static).');
     }
 
 
@@ -2766,19 +4047,61 @@ class Game3D {
     }
 
     createEnemyAt(x, z) {
-        const geo = new THREE.SphereGeometry(1, 12, 12);
-        const mat = new THREE.MeshLambertMaterial({ color: 0xff3333, emissive: 0x220000 });
-        const m = new THREE.Mesh(geo, mat);
-        m.position.set(x, 1, z);
-        m.castShadow = true;
-        m.userData = {
+        const bodyColor = 0x6aa84f; // zombie green — used by death-fragment particles
+        const m = new THREE.Group();
+        m.position.set(x, 0, z);
+
+        if (this.zombieTemplate && THREE.SkeletonUtils) {
+            const clone = THREE.SkeletonUtils.clone(this.zombieTemplate.scene);
+            clone.scale.set(0.9, 0.9, 0.9);
+            clone.traverse((child) => {
+                if (child.isMesh) {
+                    child.castShadow = true;
+                    child.receiveShadow = true;
+                }
+            });
+            m.add(clone);
+            clone.updateMatrixWorld(true);
+
+            // Derive hit box from the actual scaled model so it adapts to whatever size we pick
+            const bbox = new THREE.Box3().setFromObject(clone);
+            const size = bbox.getSize(new THREE.Vector3());
+            m.userData.hitHeight = size.y;
+            m.userData.hitRadius = Math.max(size.x, size.z) * 0.5 + 0.1;
+            m.userData.hpBarY = size.y + 0.4;
+
+            const mixer = new THREE.AnimationMixer(clone);
+            const anims = this.zombieTemplate.animations;
+            const walk = anims.find(c => /walk/i.test(c.name)) || anims[0];
+            if (walk) mixer.clipAction(walk).play();
+            m.userData.zombieClone = clone;
+            m.userData.mixer = mixer;
+        } else {
+            // Fallback sphere if zombie template hasn't finished loading yet
+            const fallback = new THREE.Mesh(
+                new THREE.SphereGeometry(0.5, 12, 12),
+                new THREE.MeshLambertMaterial({ color: bodyColor, emissive: 0x081808 })
+            );
+            fallback.position.y = 0.5;
+            fallback.castShadow = true;
+            m.add(fallback);
+            m.userData.hitHeight = 1.0;
+            m.userData.hitRadius = 0.6;
+            m.userData.hpBarY = 1.4;
+        }
+
+        const maxHp = Math.round(50 + Math.random() * 100); // 50–150
+        m.userData = Object.assign(m.userData || {}, {
             type: 'enemy',
-            hp: 5,
-            hpMax: 5,
-            speed: 3 + Math.random() * 2,
+            hp: maxHp,
+            hpMax: maxHp,
+            bodyColor,
+            speed: 1.2 + Math.random() * 0.8,
             dir: new THREE.Vector2(Math.cos(Math.random()*Math.PI*2), Math.sin(Math.random()*Math.PI*2)),
-            changeT: 1 + Math.random() * 2
-        };
+            changeT: 1 + Math.random() * 2,
+            stunT: 0,
+            knockback: null
+        });
         // Add simple health bar (initially hidden)
         const barW = 1.4, barH = 0.15;
         const back = new THREE.Mesh(
@@ -2792,7 +4115,7 @@ class Game3D {
         front.position.z = 0.001;
         const bar = new THREE.Group();
         bar.add(back); bar.add(front);
-        bar.position.set(0, 2.2, 0);
+        bar.position.set(0, m.userData.hpBarY || 2.2, 0);
         bar.userData = { back, front, width: barW, showTimer: 0 };
         bar.visible = false; // Initially hidden
         m.add(bar);
@@ -2805,30 +4128,65 @@ class Game3D {
         for (let i = this.playMode.enemies.length - 1; i >= 0; i--) {
             const e = this.playMode.enemies[i];
             const ud = e.userData;
-            // Wander; occasionally turn or bounce off walls
-            ud.changeT -= deltaTime;
-            if (ud.changeT <= 0) {
-                // Random new direction, slight bias toward player
-                const toPlayer = new THREE.Vector2(
-                    this.player.position.x - e.position.x,
-                    this.player.position.z - e.position.z
-                ).normalize();
-                const rand = new THREE.Vector2(Math.cos(Math.random()*Math.PI*2), Math.sin(Math.random()*Math.PI*2)).multiplyScalar(0.5);
-                ud.dir = toPlayer.multiplyScalar(0.5).add(rand).normalize();
-                ud.changeT = 1 + Math.random() * 2;
-            }
-            // Try to move
-            const nextX = e.position.x + ud.dir.x * ud.speed * deltaTime;
-            const nextZ = e.position.z + ud.dir.y * ud.speed * deltaTime;
-            const test = new THREE.Vector3(nextX, e.position.y, nextZ);
-            if (this.pointHitsWall(test)) {
-                // Bounce: flip direction and try again next frame
-                ud.dir.x *= -1; ud.dir.y *= -1;
-                ud.changeT = 0.2;
+            // Stun: pause wandering/movement while knocked back
+            if (ud.stunT > 0) {
+                ud.stunT -= deltaTime;
             } else {
-                e.position.x = nextX;
-                e.position.z = nextZ;
+                // Wander; occasionally turn or bounce off walls
+                ud.changeT -= deltaTime;
+                if (ud.changeT <= 0) {
+                    // Random new direction, slight bias toward player
+                    const toPlayer = new THREE.Vector2(
+                        this.player.position.x - e.position.x,
+                        this.player.position.z - e.position.z
+                    ).normalize();
+                    const rand = new THREE.Vector2(Math.cos(Math.random()*Math.PI*2), Math.sin(Math.random()*Math.PI*2)).multiplyScalar(0.5);
+                    ud.dir = toPlayer.multiplyScalar(0.5).add(rand).normalize();
+                    ud.changeT = 1 + Math.random() * 2;
+                }
+                // Try to move
+                const nextX = e.position.x + ud.dir.x * ud.speed * deltaTime;
+                const nextZ = e.position.z + ud.dir.y * ud.speed * deltaTime;
+                const test = new THREE.Vector3(nextX, e.position.y, nextZ);
+                if (this.pointHitsWall(test)) {
+                    // Bounce: flip direction and try again next frame
+                    ud.dir.x *= -1; ud.dir.y *= -1;
+                    ud.changeT = 0.2;
+                } else {
+                    e.position.x = nextX;
+                    e.position.z = nextZ;
+                }
             }
+            // Apply decaying knockback impulse (works during and after stun)
+            if (ud.knockback) {
+                const kbX = ud.knockback.x * deltaTime;
+                const kbZ = ud.knockback.y * deltaTime;
+                const kbTest = new THREE.Vector3(e.position.x + kbX, e.position.y, e.position.z + kbZ);
+                if (!this.pointHitsWall(kbTest)) {
+                    e.position.x = kbTest.x;
+                    e.position.z = kbTest.z;
+                }
+                ud.knockback.multiplyScalar(Math.pow(0.001, deltaTime));
+                if (ud.knockback.lengthSq() < 0.05) ud.knockback = null;
+            }
+            // Face direction of travel
+            if (ud.dir && (ud.dir.x !== 0 || ud.dir.y !== 0)) {
+                e.rotation.y = Math.atan2(ud.dir.x, ud.dir.y);
+            }
+            // Hit flinch: lean back + squish, decays to neutral
+            if (ud.flinchT > 0) {
+                ud.flinchT -= deltaTime;
+                const p = Math.max(0, ud.flinchT) / ud.flinchMax;
+                e.rotation.x = -0.45 * p;
+                e.scale.y = 1 - 0.12 * p;
+                e.scale.x = 1 + 0.08 * p;
+                if (ud.flinchT <= 0) {
+                    e.rotation.x = 0;
+                    e.scale.set(1, 1, 1);
+                }
+            }
+            // Tick zombie animation
+            if (ud.mixer) ud.mixer.update(deltaTime);
             // Update health bar visibility and display
             if (ud.hpBar) {
                 // Update show timer
@@ -2864,7 +4222,9 @@ class Game3D {
         this.player.hp = Math.max(0, this.player.hp - amount);
         this.player.invulnerable = true;
         this.player.invulnerabilityTimer = 1.0; // 1 second invulnerability
-        
+        this.audio && this.audio.play('playerHurt');
+        this._damageVignetteT = 0.45;
+
         // Visual feedback
         this.showMessage(`${this.t('playerHit')} - ${this.t('health')}: ${this.player.hp}/${this.player.maxHp}`);
         
@@ -2888,11 +4248,222 @@ class Game3D {
         // Check for death
         if (this.player.hp <= 0) {
             this.showMessage(this.t('playerDeath'));
-            // Trigger game over
-            this.gameOver();
+            this.audio && this.audio.play('gameOver');
+            if (this.arena && this.arena.active) {
+                // Arena run failed — restart from wave 1
+                this.startArenaMode();
+            } else {
+                // Reset player position or respawn
+                this.player.position.set(0, 1, 0);
+                this.player.hp = this.player.maxHp;
+            }
         }
     }
-    
+
+    // ===== Audio-driven feel helpers =====
+    updatePlayerLocomotion(deltaTime) {
+        if (!this.player || !this.player.model) return;
+        // Sync model position/rotation with the logical player
+        const m = this.player.model;
+        m.position.copy(this.player.position);
+        // Procedural model: animate limbs based on horizontal velocity
+        if (this.player._armRestZ && this.player.leftArm) {
+            const v = this.player.velocity;
+            const speed = v ? Math.hypot(v.x, v.z) : 0;
+            this._locoT = (this._locoT || 0) + deltaTime * (3 + speed * 0.8);
+            const walkAmt = Math.min(1, speed / 6);
+            const swing = Math.sin(this._locoT * 2) * 0.6 * walkAmt;
+            const idleBob = (1 - walkAmt) * Math.sin((this._locoT) * 1.5) * 0.05;
+            // Legs swing forward/back
+            const restLx = this.player._legRestX.L;
+            const restRx = this.player._legRestX.R;
+            if (this.player.leftLeg) this.player.leftLeg.rotation.x = restLx + swing;
+            if (this.player.rightLeg) this.player.rightLeg.rotation.x = restRx - swing;
+            // Arms counter-swing on Z; skip while attacking so the swing anim takes over
+            if (!this._attackPoseT) {
+                const restLz = this.player._armRestZ.L;
+                const restRz = this.player._armRestZ.R;
+                if (this.player.leftArm) this.player.leftArm.rotation.x = -swing * 0.5;
+                if (this.player.rightArm) this.player.rightArm.rotation.x = swing * 0.5;
+                if (this.player.leftArm) this.player.leftArm.rotation.z = restLz;
+                if (this.player.rightArm) this.player.rightArm.rotation.z = restRz;
+            }
+            // Small vertical body bob
+            if (this.player.body) this.player.body.position.y = (this.player.body.userData._restY ?? this.player.body.position.y);
+            if (this.player.body && this.player.body.userData._restY === undefined) {
+                this.player.body.userData._restY = this.player.body.position.y;
+            }
+            if (this.player.body) {
+                const bob = Math.abs(Math.sin(this._locoT * 2)) * 0.06 * walkAmt + idleBob;
+                this.player.body.position.y = this.player.body.userData._restY + bob;
+            }
+        }
+        // Attack pose tween (raises the weapon arm briefly)
+        if (this._attackPoseT > 0) {
+            this._attackPoseT = Math.max(0, this._attackPoseT - deltaTime);
+            const k = this._attackPoseT / 0.18; // 1 → 0
+            const lift = Math.sin((1 - k) * Math.PI) * 1.1;
+            if (this.player.rightArm) {
+                this.player.rightArm.rotation.x = -lift;
+                this.player.rightArm.rotation.z = (this.player._armRestZ?.R || 0) - lift * 0.3;
+            }
+        }
+    }
+
+    triggerAttackPose() { this._attackPoseT = 0.18; }
+
+    updateFootsteps(deltaTime) {
+        if (!this.audio || !this.player || this.gameMode !== 'play') return;
+        const v = this.player.velocity;
+        if (!v) return;
+        const horiz = Math.hypot(v.x, v.z);
+        const grounded = this.player.onGround !== false; // default true if undefined
+        if (horiz > 1.5 && grounded) {
+            // speed scales cadence: faster movement → shorter interval
+            const interval = Math.max(0.22, 0.45 - horiz * 0.02);
+            this.audio.footstep(interval);
+            this._footDustTimer = (this._footDustTimer || 0) - deltaTime;
+            if (this._footDustTimer <= 0) {
+                this._footDustTimer = interval;
+                this.spawnFootstepDust && this.spawnFootstepDust();
+            }
+        }
+    }
+
+    updateDamageVignette(deltaTime) {
+        if (this._damageVignetteT > 0) {
+            this._damageVignetteT = Math.max(0, this._damageVignetteT - deltaTime);
+        }
+    }
+
+    triggerMuzzleFlash() {
+        // Flash data is consumed by render() (CSS overlay) and the FPV viewmodel.
+        this._muzzleFlashT = 0.08;
+    }
+
+    updateMuzzleFlash(deltaTime) {
+        if (this._muzzleFlashT > 0) {
+            this._muzzleFlashT = Math.max(0, this._muzzleFlashT - deltaTime);
+        }
+    }
+
+    spawnPickupCollectFx(p) {
+        if (!p) return;
+        // Clone the geometry/material into a transient scene mesh that scales up + fades.
+        const mat = p.material && p.material.clone ? p.material.clone() : new THREE.MeshBasicMaterial({ color: 0x66ffcc });
+        mat.transparent = true;
+        const geo = p.geometry || new THREE.IcosahedronGeometry(0.35, 0);
+        const fx = new THREE.Mesh(geo, mat);
+        fx.position.copy(p.position);
+        fx.userData = { type: 'collectFx', t: 0, ttl: 0.28 };
+        this.scene.add(fx);
+        this._collectFx = this._collectFx || [];
+        this._collectFx.push(fx);
+    }
+
+    updatePickupCollectFx(deltaTime) {
+        if (!this._collectFx || !this._collectFx.length) return;
+        for (let i = this._collectFx.length - 1; i >= 0; i--) {
+            const fx = this._collectFx[i];
+            fx.userData.t += deltaTime;
+            const k = fx.userData.t / fx.userData.ttl;
+            if (k >= 1) {
+                this.scene.remove(fx);
+                this._collectFx.splice(i, 1);
+                continue;
+            }
+            const s = 1 + k * 2.5;
+            fx.scale.set(s, s, s);
+            fx.position.y += deltaTime * 1.5;
+            if (fx.material) fx.material.opacity = 1 - k;
+        }
+    }
+
+    spawnEnemyDeathFragments(pos, baseColor) {
+        const colorHex = (typeof baseColor === 'number') ? baseColor : 0xff3333;
+        this._enemyFrags = this._enemyFrags || [];
+        for (let i = 0; i < 6; i++) {
+            const geo = new THREE.BoxGeometry(0.18, 0.18, 0.18);
+            const mat = new THREE.MeshBasicMaterial({ color: colorHex, transparent: true });
+            const f = new THREE.Mesh(geo, mat);
+            f.position.copy(pos);
+            f.position.y += 0.6;
+            const ang = Math.random() * Math.PI * 2;
+            const up = 2 + Math.random() * 2;
+            const rad = 2 + Math.random() * 2;
+            f.userData = {
+                v: new THREE.Vector3(Math.cos(ang) * rad, up, Math.sin(ang) * rad),
+                t: 0, ttl: 0.7,
+                spin: new THREE.Vector3((Math.random() - 0.5) * 8, (Math.random() - 0.5) * 8, (Math.random() - 0.5) * 8)
+            };
+            this.scene.add(f);
+            this._enemyFrags.push(f);
+        }
+    }
+
+    updateEnemyDeathFragments(deltaTime) {
+        if (!this._enemyFrags || !this._enemyFrags.length) return;
+        const gravity = -9.8;
+        for (let i = this._enemyFrags.length - 1; i >= 0; i--) {
+            const f = this._enemyFrags[i];
+            const ud = f.userData;
+            ud.t += deltaTime;
+            if (ud.t >= ud.ttl) {
+                this.scene.remove(f);
+                this._enemyFrags.splice(i, 1);
+                continue;
+            }
+            ud.v.y += gravity * deltaTime;
+            f.position.x += ud.v.x * deltaTime;
+            f.position.y += ud.v.y * deltaTime;
+            f.position.z += ud.v.z * deltaTime;
+            f.rotation.x += ud.spin.x * deltaTime;
+            f.rotation.y += ud.spin.y * deltaTime;
+            f.rotation.z += ud.spin.z * deltaTime;
+            if (f.material) f.material.opacity = Math.max(0, 1 - ud.t / ud.ttl);
+            if (f.position.y < 0.05) {
+                f.position.y = 0.05;
+                ud.v.y *= -0.3;
+                ud.v.x *= 0.6; ud.v.z *= 0.6;
+            }
+        }
+    }
+
+    spawnFootstepDust() {
+        if (!this.player) return;
+        const geo = new THREE.CircleGeometry(0.18, 10);
+        const mat = new THREE.MeshBasicMaterial({ color: 0xaaaaaa, transparent: true, opacity: 0.45, side: THREE.DoubleSide });
+        const m = new THREE.Mesh(geo, mat);
+        m.rotation.x = -Math.PI / 2;
+        m.position.set(this.player.position.x, 0.03, this.player.position.z);
+        m.userData = { t: 0, ttl: 0.35 };
+        this.scene.add(m);
+        this._footDust = this._footDust || [];
+        this._footDust.push(m);
+        // Cleanup older
+        if (this._footDust.length > 24) {
+            const old = this._footDust.shift();
+            this.scene.remove(old);
+        }
+    }
+
+    updateFootDust(deltaTime) {
+        if (!this._footDust || !this._footDust.length) return;
+        for (let i = this._footDust.length - 1; i >= 0; i--) {
+            const m = this._footDust[i];
+            m.userData.t += deltaTime;
+            const k = m.userData.t / m.userData.ttl;
+            if (k >= 1) {
+                this.scene.remove(m);
+                this._footDust.splice(i, 1);
+                continue;
+            }
+            const s = 1 + k * 1.5;
+            m.scale.set(s, s, s);
+            if (m.material) m.material.opacity = 0.45 * (1 - k);
+        }
+    }
+
     pointHitsWall(pos, radius = 0.6) {
         for (const w of this.walls) {
             const p = w.position; const s = w.size;
@@ -2943,6 +4514,12 @@ class Game3D {
     clearEnemies() {
         this.playMode.enemies.forEach(e => this.playMode.enemiesGroup.remove(e));
         this.playMode.enemies = [];
+        // Also drop any in-progress death animations so they don't linger
+        // through a level reset / respawn.
+        if (this.playMode.dyingEnemies && this.playMode.dyingEnemies.length) {
+            this.playMode.dyingEnemies.forEach(e => this.playMode.enemiesGroup.remove(e));
+            this.playMode.dyingEnemies = [];
+        }
     }
 
     respawnEnemies() {
@@ -2953,6 +4530,8 @@ class Game3D {
     updateEnemySpawning(deltaTime) {
         // Only spawn continuously in play mode
         if (this.gameMode !== 'play') return;
+        // Arena mode owns its own spawn cadence
+        if (this.arena && this.arena.active) return;
         
         // Update spawn timer
         this.enemySpawnTimer += deltaTime;
@@ -2973,103 +4552,157 @@ class Game3D {
     }
 
     handlePlayClick(event) {
-        // Raycast to enemies first; if hit, shoot. Else shoot to ground point.
-        const raycaster = new THREE.Raycaster();
-        const mouse = new THREE.Vector2();
-        const canvas = document.getElementById('gameCanvas');
-        const rect = canvas.getBoundingClientRect();
-        if (this.viewMode === 'fpv') {
-            // Always use center of screen in FPV
-            mouse.x = 0; mouse.y = 0;
-        } else if (this.isPointerLocked) {
-            mouse.x = this.playMode.mouseNDC.x;
-            mouse.y = this.playMode.mouseNDC.y;
-        } else {
-            mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-            mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+        // Route by selected weapon: sword swings, gun fires a projectile.
+        const weapon = this.getCurrentWeapon();
+        if (weapon && weapon.type === 'melee') {
+            this.handleMelee(event);
+            return;
         }
-        raycaster.setFromCamera(mouse, this.camera);
+        if (weapon && weapon.type === 'ranged') {
+            this.fireGun(event);
+            return;
+        }
+    }
 
-        // Intersect enemies
-        const enemyIntersects = raycaster.intersectObjects(this.playMode.enemies, false);
-        if (enemyIntersects.length > 0) {
-            const hit = enemyIntersects[0];
-            const origin = this.camera.position.clone();
-            let dir;
-            if (this.viewMode === 'fpv') {
-                dir = hit.point.clone().sub(origin).normalize();
+    fireGun(event) {
+        // Centralized ranged-fire path: validates ammo + cooldown, spawns the
+        // projectile from the gun barrel (not the camera centerpoint), applies
+        // recoil + muzzle flash + audio.
+        if (!this.canFire()) {
+            if (this.isReloading) {
+                this.showMessage(`${this.t('reloading')}...`);
             } else {
-                // Isometric/second-person: always fire forward from the character
-                dir = new THREE.Vector3(Math.sin(this.characterRotation), 0, Math.cos(this.characterRotation)).normalize();
+                const w = this.getCurrentWeapon();
+                if (w && w.ammoCost > 0 && this.inventory.ammo < w.ammoCost) {
+                    this.showMessage(`${this.t('noAmmo')} - ${this.t('ammo')}: ${this.inventory.ammo}`);
+                    this.audio && this.audio.play('uiClick');
+                }
             }
-            this.shootRay(origin, dir);
             return;
         }
 
-        // Intersect ground plane and shoot toward that point (ray in 3D)
-        const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-        const point = new THREE.Vector3();
-        if (raycaster.ray.intersectPlane(groundPlane, point)) {
-            const origin = this.camera.position.clone();
-            let dir;
-            if (this.viewMode === 'fpv') {
-                dir = point.clone().sub(origin).normalize();
-            } else {
-                // Isometric/second-person: always forward
-                dir = new THREE.Vector3(Math.sin(this.characterRotation), 0, Math.cos(this.characterRotation)).normalize();
-            }
-            this.shootRay(origin, dir);
+        const weapon = this.getCurrentWeapon();
+        const weaponId = this.player.weapons[this.player.currentWeaponIndex];
+
+        // Spend ammo + set cooldown BEFORE spawning so the next click is gated.
+        if (weapon.ammoCost > 0) this.inventory.ammo -= weapon.ammoCost;
+        this.weaponCooldowns[weaponId] = weapon.cooldown;
+
+        // Compute aim direction (where the bullet should fly).
+        const dir = this._computeAimDirection(event);
+
+        // Compute spawn position — from gun muzzle in FPV, from in front of the
+        // player in iso/third-person.
+        let spawn;
+        if (this.viewMode === 'fpv' && this.fpvGun && this.fpvGun.userData.muzzle) {
+            spawn = new THREE.Vector3();
+            this.fpvGun.userData.muzzle.getWorldPosition(spawn);
         } else {
-            // Above the horizon: fallback
-            const origin = this.camera.position.clone();
-            let dir;
-            if (this.viewMode === 'fpv') {
-                // In FPV, shoot along the exact view ray
-                dir = raycaster.ray.direction.clone().normalize();
-            } else {
-                // Isometric/second-person: always forward
-                dir = new THREE.Vector3(Math.sin(this.characterRotation), 0, Math.cos(this.characterRotation)).normalize();
+            const forward = new THREE.Vector3(
+                Math.sin(this.characterRotation), 0,
+                Math.cos(this.characterRotation)
+            ).normalize();
+            spawn = this.player.position.clone()
+                .add(forward.multiplyScalar(0.9))
+                .add(new THREE.Vector3(0, 1.1, 0));
+        }
+
+        this.shootRay(spawn, dir);
+
+        // Feel: recoil, muzzle flash, audio, attack pose.
+        this.triggerGunRecoil && this.triggerGunRecoil();
+        this.triggerMuzzleFlash && this.triggerMuzzleFlash();
+        this.triggerAttackPose && this.triggerAttackPose();
+        this.audio && this.audio.play('shoot');
+        this.spawnMuzzleFlashAt && this.spawnMuzzleFlashAt(spawn, dir);
+        this.playOneShotAnimation('Attack', 0.2);
+
+        // Push HUD update so ammo count refreshes immediately.
+        this.emit('ui:update', this.buildHUDModel());
+    }
+
+    _computeAimDirection(event) {
+        if (this.viewMode === 'fpv') {
+            // Aim along the camera forward (where the crosshair points).
+            const v = new THREE.Vector3();
+            this.camera.getWorldDirection(v);
+            return v.normalize();
+        }
+        // Iso / third-person: forward from character rotation (matches earlier
+        // intent — bullets always fly along the player's facing).
+        return new THREE.Vector3(
+            Math.sin(this.characterRotation), 0,
+            Math.cos(this.characterRotation)
+        ).normalize();
+    }
+
+    spawnMuzzleFlashAt(pos, dir) {
+        // Small additive sprite at the muzzle in world space for iso/third-person
+        // views (the FPV viewmodel has its own attached flash).
+        if (this.viewMode === 'fpv') return;
+        const geo = new THREE.PlaneGeometry(0.5, 0.5);
+        const mat = new THREE.MeshBasicMaterial({
+            color: 0xffe1a0, transparent: true, opacity: 0.95,
+            blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide
+        });
+        const m = new THREE.Mesh(geo, mat);
+        m.position.copy(pos);
+        m.lookAt(this.camera.position);
+        m.userData = { t: 0, ttl: 0.07 };
+        this.scene.add(m);
+        this._muzzleSprites = this._muzzleSprites || [];
+        this._muzzleSprites.push(m);
+    }
+
+    updateWorldMuzzleSprites(deltaTime) {
+        if (!this._muzzleSprites || !this._muzzleSprites.length) return;
+        for (let i = this._muzzleSprites.length - 1; i >= 0; i--) {
+            const m = this._muzzleSprites[i];
+            m.userData.t += deltaTime;
+            const k = m.userData.t / m.userData.ttl;
+            if (k >= 1) {
+                this.scene.remove(m);
+                this._muzzleSprites.splice(i, 1);
+                continue;
             }
-            this.shootRay(origin, dir);
+            m.material.opacity = (1 - k) * 0.95;
+            const s = 1 + k * 0.6;
+            m.scale.set(s, s, s);
         }
     }
 
     handleMelee(event) {
-        // Short-range ray test from center/cursor; damages first enemy hit within range
+        // Short-range melee from cursor (or center in FPV).
+        this.triggerSwordSwing();
+        this.playOneShotAnimation('Attack', 0.4);
         const raycaster = new THREE.Raycaster();
-        const mouse = new THREE.Vector2(0, 0);
-        if (this.viewMode !== 'fpv') {
-            // Use current mouse NDC when not FPV
-            mouse.x = this.playMode.mouseNDC.x;
-            mouse.y = this.playMode.mouseNDC.y;
-        }
+        const mouse = (this.viewMode === 'fpv')
+            ? new THREE.Vector2(0, 0)
+            : new THREE.Vector2(this.playMode.mouseNDC.x, this.playMode.mouseNDC.y);
         raycaster.setFromCamera(mouse, this.camera);
-        const origin = this.camera.position.clone();
-        const dir = raycaster.ray.direction.clone();
-        const maxDist = 2.5;
-        // Find closest enemy intersecting the ray within maxDist
-        const hits = raycaster.intersectObjects(this.playMode.enemies, false);
-        if (hits.length > 0 && hits[0].distance <= maxDist) {
-            const e = hits[0].object;
-            const weapon = this.getCurrentWeapon();
-            const damage = weapon ? weapon.damage : 2; // Use weapon damage or default
+
+        const weapon = this.getCurrentWeapon();
+        const damage = weapon ? weapon.damage : 2;
+        const range = (weapon && weapon.type === 'melee') ? weapon.range : 2.5;
+
+        const hits = raycaster.intersectObjects(this.playMode.enemies, true);
+        for (const hit of hits) {
+            if (hit.distance > range) break;
+            const e = this.findEnemyRoot(hit.object);
+            if (!e) continue;
             e.userData.hp -= damage;
-            this.spawnImpact(hits[0].point.clone(), 0xffaa55);
+            this.spawnImpact(hit.point.clone(), 0xffaa55);
             if (e.userData.hp <= 0) {
-                const idx = this.playMode.enemies.indexOf(e);
-                if (idx !== -1) this.playMode.enemies.splice(idx, 1);
-                this.playMode.enemiesGroup.remove(e);
+                this.killEnemy(e);
             } else {
-                // brief flash
-                const mat = e.material; const orig = mat.color.getHex();
-                mat.color.setHex(0xffffff); setTimeout(()=>mat.color.setHex(orig), 80);
-                // Show HP bar for 3 seconds
+                this.applyEnemyKnockback(e, this.camera.position, 6);
+                this.flashEnemy(e);
                 this.showEnemyHPBar(e, 3.0);
             }
             return;
         }
-        // No direct hit: optional small shove effect at range end
-        const endPoint = origin.clone().add(dir.multiplyScalar(maxDist));
+        // Whiff effect at range end
+        const endPoint = this.camera.position.clone().add(raycaster.ray.direction.clone().multiplyScalar(range));
         this.spawnImpact(endPoint, 0xcccccc);
     }
 
@@ -3081,10 +4714,28 @@ class Game3D {
     }
 
     shootRay(origin, dir) {
-        // Create a projectile traveling along a ray, supports vertical aim
-        const projGeo = new THREE.SphereGeometry(0.2, 8, 8);
-        const projMat = new THREE.MeshBasicMaterial({ color: 0xff00ff });
-        const proj = new THREE.Mesh(projGeo, projMat);
+        // Create a projectile traveling along a ray, supports vertical aim.
+        // Visual: a small round pellet with a soft additive halo — no arrow tail.
+        const group = new THREE.Group();
+        const projGeo = new THREE.SphereGeometry(0.08, 10, 10);
+        const projMat = new THREE.MeshBasicMaterial({ color: 0xffe080 });
+        const core = new THREE.Mesh(projGeo, projMat);
+        group.add(core);
+
+        // Subtle additive halo so the pellet stays readable at distance.
+        const haloGeo = new THREE.SphereGeometry(0.14, 10, 10);
+        const haloMat = new THREE.MeshBasicMaterial({
+            color: 0xffd060, transparent: true, opacity: 0.45,
+            blending: THREE.AdditiveBlending, depthWrite: false
+        });
+        const halo = new THREE.Mesh(haloGeo, haloMat);
+        group.add(halo);
+
+        // Small point light so it lights nearby walls briefly.
+        const light = new THREE.PointLight(0xffd060, 0.5, 2.5, 2);
+        group.add(light);
+        const tracer = null;
+
         // Spawn offset: FPV from eye; iso from player front
         let spawn;
         if (this.viewMode === 'fpv') {
@@ -3095,10 +4746,23 @@ class Game3D {
             // Ensure direction matches facing in iso (pure forward)
             dir = forward.clone().normalize();
         }
-        proj.position.copy(spawn);
-        proj.userData = { dir: dir.clone().normalize(), ttl: 3, radius: 0.2, bounces: 0 };
-        this.scene.add(proj);
-        this.playMode.projectiles.push(proj);
+        group.position.copy(spawn);
+
+        // Orient the group so its local +Z faces the travel direction.
+        const lookTarget = spawn.clone().add(dir);
+        group.lookAt(lookTarget);
+
+        // Tag the projectile with the current weapon's damage so updateProjectiles
+        // applies the right impact value when it hits an enemy.
+        const w = this.getCurrentWeapon();
+        const buff = 1 + (this.powerUps && this.powerUps.weaponBuff ? this.powerUps.weaponBuff * (this.WEAPON_BUFF_PER_STACK || 0.2) : 0);
+        const projDamage = w ? Math.max(1, Math.floor((w.damage || 1) * buff)) : 1;
+
+        // Expose the visual core as the "main" mesh for spawnPickupCollectFx etc.
+        group.userData = { dir: dir.clone().normalize(), ttl: 3, radius: 0.2, bounces: 0, damage: projDamage, _core: core, _tracer: tracer };
+        // For collision math the rest of the code reads `userData.radius`, so a Group is fine.
+        this.scene.add(group);
+        this.playMode.projectiles.push(group);
     }
 
     updateProjectiles(deltaTime) {
@@ -3183,32 +4847,32 @@ class Game3D {
                 continue;
             }
             p.position.copy(nextPos);
+            // Keep tracer aligned with current direction
+            if (p.lookAt) {
+                p.lookAt(p.position.clone().add(p.userData.dir));
+            }
             p.userData.ttl -= deltaTime;
-            // Check collision with enemies (simple radius)
+            // Check collision with enemies (vertical cylinder around the model)
             for (let j = this.playMode.enemies.length - 1; j >= 0; j--) {
                 const e = this.playMode.enemies[j];
-                const d2 = p.position.distanceToSquared(e.position);
-                if (d2 < 1.2 * 1.2) {
-                    // Hit enemy: apply damage and impact
-                    e.userData.hp -= 1;
+                const r = e.userData.hitRadius || 0.6;
+                const h = e.userData.hitHeight || 1.5;
+                const dx = p.position.x - e.position.x;
+                const dz = p.position.z - e.position.z;
+                const dy = p.position.y - e.position.y;
+                if (dx*dx + dz*dz < r*r && dy >= -0.1 && dy <= h + 0.1) {
+                    // Hit enemy: apply weapon damage and impact.
+                    const dmg = (p.userData.damage != null) ? p.userData.damage : 1;
+                    e.userData.hp -= dmg;
                     this.spawnImpact(p.position.clone(), 0xff5533);
+                    this.audio && this.audio.play('bulletHit');
                     this.scene.remove(p);
                     this.playMode.projectiles.splice(i, 1);
                     if (e.userData.hp <= 0) {
-                        const deathPos = e.position.clone();
-                        this.playMode.enemiesGroup.remove(e);
-                        this.playMode.enemies.splice(j, 1);
-                        this.levelStats.enemiesNeutralized++; // Track enemy kill
-                        if (Math.random() < this.dropChance) {
-                            this.spawnPickup(deathPos.x, deathPos.z);
-                        }
+                        this.killEnemy(e);
                     } else {
-                        // Brief flash on enemy
-                        const mat = e.material;
-                        const orig = mat.color.getHex();
-                        mat.color.setHex(0xffffff);
-                        setTimeout(() => mat.color.setHex(orig), 80);
-                        // Show HP bar for 3 seconds
+                        this.applyEnemyKnockback(e, p.position, 8);
+                        this.flashEnemy(e);
                         this.showEnemyHPBar(e, 3.0);
                     }
                     break;
@@ -3245,25 +4909,195 @@ class Game3D {
         requestAnimationFrame(animateOnce);
     }
 
+    // ================= Enemy death =================
+    killEnemy(e) {
+        const idx = this.playMode.enemies.indexOf(e);
+        if (idx === -1) return;
+        const deathPos = e.position.clone();
+        // Remove from the live AI list immediately so wandering/targeting stops,
+        // but keep the mesh in the scene to play the topple+fade animation.
+        this.playMode.enemies.splice(idx, 1);
+        this.audio && this.audio.play('enemyDeath');
+        this.spawnEnemyDeathFragments && this.spawnEnemyDeathFragments(deathPos, e.userData && e.userData.bodyColor);
+        const isBoss = !!(e.userData && e.userData.isBoss);
+        this.score = (this.score || 0) + (isBoss ? 200 : 10);
+        this.kills = (this.kills || 0) + 1;
+        // Arena: boss death triggers wave completion (lava recede + next wave)
+        if (isBoss && this.arena && this.arena.active) {
+            this.onArenaBossKilled();
+        }
+        // Skip the standard random drop for the boss — wave-complete drops are handled separately
+        if (!isBoss && Math.random() < this.dropChance) {
+            this.spawnPickup(deathPos.x, deathPos.z);
+        }
+        // Clone every material first — the GLTF is cloned via SkeletonUtils, which
+        // shares materials across all instances. Fading the shared mats would fade
+        // every living enemy of the same kind. Per-mesh cloning isolates the fade.
+        const fadeMats = [];
+        e.traverse((child) => {
+            if (child.isMesh && child.material) {
+                if (Array.isArray(child.material)) {
+                    child.material = child.material.map(mat => {
+                        const c = mat.clone();
+                        c.transparent = true;
+                        if (c.opacity == null) c.opacity = 1;
+                        fadeMats.push(c);
+                        return c;
+                    });
+                } else {
+                    const c = child.material.clone();
+                    c.transparent = true;
+                    if (c.opacity == null) c.opacity = 1;
+                    child.material = c;
+                    fadeMats.push(c);
+                }
+            }
+        });
+        if (e.userData.hpBar) e.userData.hpBar.visible = false;
+        e.userData.dying = true;
+        e.userData.deathT = 0;
+        e.userData.fadeMats = fadeMats;
+        e.userData.toppleDur = 0.55;
+        e.userData.holdDur = 1.2;
+        e.userData.fadeDur = 1.4;
+        // Stop ticking the death-target's stun/knockback/animation
+        e.userData.knockback = null;
+        e.userData.stunT = 0;
+        if (!this.playMode.dyingEnemies) this.playMode.dyingEnemies = [];
+        this.playMode.dyingEnemies.push(e);
+    }
+
+    updateDyingEnemies(deltaTime) {
+        const list = this.playMode.dyingEnemies;
+        if (!list || !list.length) return;
+        for (let i = list.length - 1; i >= 0; i--) {
+            const e = list[i];
+            const ud = e.userData;
+            ud.deathT += deltaTime;
+            // Topple forward to lie face-down over toppleDur (ease-out cubic)
+            const tT = Math.min(1, ud.deathT / ud.toppleDur);
+            const ease = 1 - Math.pow(1 - tT, 3);
+            e.rotation.x = (Math.PI / 2) * ease;
+            // Drop the body a touch as it lands, so the model rests on the ground
+            const drop = 0.4 * ease;
+            if (ud.baseY == null) ud.baseY = e.position.y;
+            e.position.y = Math.max(0, ud.baseY - drop);
+            // Hold, then fade
+            const fadeStart = ud.toppleDur + ud.holdDur;
+            if (ud.deathT > fadeStart) {
+                const fT = Math.min(1, (ud.deathT - fadeStart) / ud.fadeDur);
+                const opacity = 1 - fT;
+                ud.fadeMats.forEach(m => { m.opacity = opacity; });
+                if (fT >= 1) {
+                    this.playMode.enemiesGroup.remove(e);
+                    ud.fadeMats.forEach(m => m.dispose && m.dispose());
+                    list.splice(i, 1);
+                }
+            }
+        }
+    }
+
     // ================= Pickups =================
     spawnPickup(x, z) {
-        // Randomize item type
-        const types = [
-            { type: 'health', label: 'Health +25', color: 0x66ff66 },
-            { type: 'speed',  label: 'Speed Boost', color: 0x66ccff },
-            { type: 'ammo',   label: 'Ammo +25',   color: 0xffff66 },
-            { type: 'jetpack',label: 'Jetpack',    color: 0xffaa66 },
-            { type: 'flag',   label: 'Flag Token', color: 0xff66aa }
-        ];
-        const pick = types[Math.floor(Math.random() * types.length)];
-        const geo = new THREE.IcosahedronGeometry(0.35, 0);
-        const mat = new THREE.MeshLambertMaterial({ color: pick.color, emissive: 0x112222 });
-        const m = new THREE.Mesh(geo, mat);
-        m.position.set(x, 0.6, z);
-        m.castShadow = true;
-        m.userData = { type: 'pickup', t: 0, item: { type: pick.type, label: pick.label } };
-        this.pickupsGroup.add(m);
-        this.pickups.push(m);
+        // Weighted random pick from ITEM_DEFS
+        const entries = Object.entries(this.ITEM_DEFS);
+        const total = entries.reduce((s, [, d]) => s + (d.weight || 1), 0);
+        let roll = Math.random() * total;
+        let type = entries[0][0];
+        for (const [k, def] of entries) {
+            roll -= (def.weight || 1);
+            if (roll <= 0) { type = k; break; }
+        }
+        const def = this.ITEM_DEFS[type];
+
+        // Build a group so we can attach a glow ring + point light alongside the visual.
+        const group = new THREE.Group();
+        const mesh = this._buildPickupMesh(type, def);
+        group.add(mesh);
+
+        // Ground glow ring (additive flat disc)
+        const ringGeo = new THREE.RingGeometry(0.45, 0.8, 24);
+        const ringMat = new THREE.MeshBasicMaterial({
+            color: def.color, transparent: true, opacity: 0.45,
+            blending: THREE.AdditiveBlending, side: THREE.DoubleSide, depthWrite: false
+        });
+        const ring = new THREE.Mesh(ringGeo, ringMat);
+        ring.rotation.x = -Math.PI / 2;
+        ring.position.y = -0.55;
+        group.add(ring);
+
+        // Subtle point light to make the pickup pop in dark areas
+        const light = new THREE.PointLight(def.color, 0.7, 4, 2);
+        light.position.set(0, 0.2, 0);
+        group.add(light);
+
+        group.position.set(x, 0.6, z);
+        group.userData = { type: 'pickup', t: 0, item: { type }, glowRing: ring, glowLight: light, visual: mesh };
+        // Reuse `material`/`geometry` for collectFx via aliasing
+        group.material = mesh.material;
+        group.geometry = mesh.geometry;
+        this.pickupsGroup.add(group);
+        this.pickups.push(group);
+    }
+
+    _buildPickupMesh(type, def) {
+        // Item-specific shapes. Falls back to icosahedron.
+        const matEmissive = 0x2a1808;
+        switch (type) {
+            case 'health': {
+                // Red cross — two boxes
+                const grp = new THREE.Group();
+                const matH = new THREE.MeshLambertMaterial({ color: 0xff3344, emissive: 0x441010 });
+                const horiz = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.18, 0.18), matH);
+                const vert = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.55, 0.18), matH);
+                grp.add(horiz); grp.add(vert);
+                grp.material = matH;
+                grp.geometry = horiz.geometry;
+                grp.castShadow = true;
+                return grp;
+            }
+            case 'ammo': {
+                // Brass bullet
+                const grp = new THREE.Group();
+                const brass = new THREE.MeshLambertMaterial({ color: 0xddbb55, emissive: 0x3a2a08 });
+                const lead = new THREE.MeshLambertMaterial({ color: 0xaaaaaa, emissive: 0x222222 });
+                const body = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.18, 0.4, 12), brass);
+                const tip = new THREE.Mesh(new THREE.ConeGeometry(0.18, 0.22, 12), lead);
+                tip.position.y = 0.31;
+                grp.add(body); grp.add(tip);
+                grp.rotation.z = Math.PI / 2;
+                grp.material = brass;
+                grp.geometry = body.geometry;
+                return grp;
+            }
+            case 'flag': {
+                const grp = new THREE.Group();
+                const pole = new THREE.Mesh(
+                    new THREE.CylinderGeometry(0.04, 0.04, 0.9, 6),
+                    new THREE.MeshLambertMaterial({ color: 0x886633, emissive: 0x221608 })
+                );
+                const flag = new THREE.Mesh(
+                    new THREE.PlaneGeometry(0.4, 0.28),
+                    new THREE.MeshLambertMaterial({ color: def.color || 0xff5577, emissive: 0x331010, side: THREE.DoubleSide })
+                );
+                flag.position.set(0.22, 0.28, 0);
+                grp.add(pole); grp.add(flag);
+                grp.material = flag.material;
+                grp.geometry = flag.geometry;
+                return grp;
+            }
+            default: {
+                const geo = new THREE.IcosahedronGeometry(0.35, 0);
+                const mat = new THREE.MeshLambertMaterial({
+                    color: def && def.color || 0xffd28a,
+                    emissive: 0x3a2008,
+                    emissiveIntensity: 1.0
+                });
+                const m = new THREE.Mesh(geo, mat);
+                m.castShadow = true;
+                return m;
+            }
+        }
     }
 
     updatePickups(deltaTime) {
@@ -3278,54 +5112,32 @@ class Game3D {
             // Check collect (add to inventory, do not auto-activate)
             const d2 = p.position.distanceToSquared(this.player.position);
             if (d2 < collectR2) {
+                this.spawnPickupCollectFx && this.spawnPickupCollectFx(p);
                 this.pickupsGroup.remove(p);
                 this.pickups.splice(i, 1);
                 if (p.userData.item) {
-                    this.inventory.items.push(p.userData.item);
-                    this.spawnImpact(p.position.clone(), 0x66ffcc);
-                    this.showMessage(`Picked up: ${p.userData.item.label}`);
-                    this.updateInventoryUI();
-                    
-                    // Show toast notification for pickup
                     const item = p.userData.item;
-                    let toastMessage = '';
-                    let emoji = '';
-                    
-                    switch (item.type) {
-                        case 'health':
-                            emoji = '❤️';
-                            toastMessage = `${emoji} ${this.t('health')} +25`;
-                            break;
-                        case 'speed':
-                            emoji = '⚡';
-                            toastMessage = `${emoji} ${this.t('speedBoost')} +1`;
-                            break;
-                        case 'ammo':
-                            emoji = '🔸';
-                            toastMessage = `${emoji} ${this.t('ammo')} +25`;
-                            break;
-                        case 'jetpack':
-                            emoji = '🚀';
-                            toastMessage = `${emoji} ${this.t('jetpackFuel')} +50`;
-                            break;
-                        case 'healthRegen':
-                            emoji = '💚';
-                            toastMessage = `${emoji} ${this.t('healthRegen')} +1`;
-                            break;
-                        case 'weaponBuff':
-                            emoji = '⚔️';
-                            toastMessage = `${emoji} ${this.t('weaponBuff')} +1`;
-                            break;
-                        case 'flag':
-                            emoji = '🏁';
-                            toastMessage = `${emoji} ${this.t('flag')} +1`;
-                            break;
-                        default:
-                            emoji = '📦';
-                            toastMessage = `${emoji} ${item.label}`;
+                    const def = this.ITEM_DEFS[item.type];
+                    item.label = this.itemLabel(item.type); // for HUD list
+                    if (def && def.autoApply) {
+                        // Stat-based pickups (jetpack fuel, ammo, flags) stack
+                        // straight into the pool — no bag entry to click.
+                        def.apply();
+                        this.updateInventoryGridUI && this.updateInventoryGridUI();
+                    } else {
+                        this.inventory.items.push(item);
+                        this.updateInventoryUI();
                     }
-                    
-                    this.showToast(toastMessage, 'success');
+                    this.spawnImpact(p.position.clone(), 0x66ffcc);
+                    this.showMessage(`Picked up: ${item.label}`);
+                    this.showToast(this.pickupToast(item.type), 'success');
+                    if (this.audio) {
+                        const t = item.type;
+                        if (t === 'health') this.audio.play('pickupHealth');
+                        else if (t === 'ammo') this.audio.play('pickupAmmo');
+                        else if (t === 'flag') this.audio.play('pickupFlag');
+                        else this.audio.play('pickupPowerup');
+                    }
                 }
             }
         }
@@ -3401,10 +5213,10 @@ class Game3D {
             ui.style.top = '50%';
             ui.style.transform = 'translate(-50%, -50%)';
             ui.style.background = 'rgba(0,0,0,0.9)';
-            ui.style.border = '3px solid #00ff00';
+            ui.style.border = '3px solid #ffb347';
             ui.style.borderRadius = '8px';
             ui.style.padding = '16px';
-            ui.style.color = '#00ff00';
+            ui.style.color = '#ffb347';
             ui.style.fontFamily = 'Courier New, monospace';
             ui.style.fontSize = '14px';
             ui.style.zIndex = '3000';
@@ -3505,7 +5317,7 @@ class Game3D {
         if (powerUpItems.length > 0) {
             html += `
                 <div style="margin-bottom: 12px;">
-                    <div style="font-weight: bold; color: #00ff00; margin-bottom: 8px; text-align: center;">
+                    <div style="font-weight: bold; color: #ffb347; margin-bottom: 8px; text-align: center;">
                         ${this.t('powerUps').toUpperCase()}
                     </div>
                     <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 6px;">
@@ -3515,7 +5327,7 @@ class Game3D {
                 html += `
                     <div style="
                         background: rgba(0,255,0,0.1); 
-                        border: 1px solid #00ff00; 
+                        border: 1px solid #ffb347; 
                         border-radius: 4px; 
                         padding: 6px; 
                         text-align: center;
@@ -3541,7 +5353,7 @@ class Game3D {
         } else {
             html += `
                 <div style="margin-bottom: 12px;">
-                    <div style="font-weight: bold; color: #00aaff; margin-bottom: 8px; text-align: center;">
+                    <div style="font-weight: bold; color: #ffb347; margin-bottom: 8px; text-align: center;">
                         ${this.t('items').toUpperCase()}
                     </div>
                     <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap:8px; max-height:300px; overflow-y:auto;">
@@ -3549,7 +5361,7 @@ class Game3D {
             items.forEach((it, idx) => {
                 const isSelected = idx === sel;
                 const icon = this.createItemIcon(it.type, 32);
-                const borderColor = isSelected ? '#00ff00' : '#004400';
+                const borderColor = isSelected ? '#ffb347' : '#4a3018';
                 const bgColor = isSelected ? 'rgba(0,255,0,0.2)' : 'rgba(0,255,0,0.05)';
                 
                 html += `
@@ -3642,51 +5454,19 @@ class Game3D {
         const items = this.inventory.items;
         const idx = this.inventory.selectedIndex;
         if (!items.length || idx < 0 || idx >= items.length) return;
+
         const it = items[idx];
-        switch (it.type) {
-            case 'health':
-                this.inventory.health = Math.min(this.inventory.maxHealth, this.inventory.health + 25);
-                this.player.hp = Math.min(this.player.maxHp, this.player.hp + 25);
-                this.showMessage(`${this.t('healedTo')} ${this.inventory.health} | ${this.t('playerHp')}: ${this.player.hp}`);
-                this.showToast(`❤️ ${this.t('health')} +25`, 'success');
-                break;
-            case 'speed':
-                this.powerUps.speedBoost += 1; // Stack speed boost
-                this.showMessage(`${this.t('speedBoost')} +1 (${this.powerUps.speedBoost} ${this.t('stacks')})`);
-                this.showToast(`⚡ ${this.t('speedBoost')} +1`, 'success');
-                break;
-            case 'ammo':
-                this.inventory.ammo += 25;
-                this.showMessage(`${this.t('ammoCount')}: ${this.inventory.ammo}`);
-                // Immediately update HUD to show new ammo count
-                this.updateWeaponPowerUpUI();
-                this.showToast(`🔸 ${this.t('ammo')} +25`, 'success');
-                break;
-            case 'jetpack':
-                this.powerUps.jetpackFuel += 50; // Stack jetpack fuel
-                this.showMessage(`${this.t('jetpackFuel')} +50 (${this.powerUps.jetpackFuel} total)`);
-                this.showToast(`🚀 ${this.t('jetpackFuel')} +50`, 'success');
-                break;
-            case 'healthRegen':
-                this.powerUps.healthRegen += 1; // Stack health regeneration
-                this.showMessage(`${this.t('healthRegen')} +1 (${this.powerUps.healthRegen} ${this.t('stacks')})`);
-                this.showToast(`💚 ${this.t('healthRegen')} +1`, 'success');
-                break;
-            case 'weaponBuff':
-                this.powerUps.weaponBuff += 1; // Stack weapon buff
-                this.showMessage(`${this.t('weaponBuff')} +1 (${this.powerUps.weaponBuff} ${this.t('stacks')})`);
-                this.showToast(`⚔️ ${this.t('weaponBuff')} +1`, 'success');
-                break;
-            case 'flag':
-                this.inventory.flags += 1;
-                this.showMessage(`${this.t('flagsCount')}: ${this.inventory.flags} - Press F to place`);
-                this.showToast(`🏁 ${this.t('flag')} +1`, 'success');
-                this.updateControlsUI();
-                break;
-        }
-        // Remove used item
+        const def = this.ITEM_DEFS[it.type];
+        if (!def) return;
+
+        def.apply();
+        this.showMessage(this.itemLabel(it.type));
+        this.showToast(this.pickupToast(it.type), 'success');
+
         items.splice(idx, 1);
-        if (this.inventory.selectedIndex >= items.length) this.inventory.selectedIndex = Math.max(0, items.length - 1);
+        if (this.inventory.selectedIndex >= items.length) {
+            this.inventory.selectedIndex = Math.max(0, items.length - 1);
+        }
         this.updateInventoryUI();
     }
 
@@ -3749,7 +5529,6 @@ class Game3D {
         this.placedFlags.push(flagGroup);
 
         this.inventory.flags = Math.max(0, this.inventory.flags - 1);
-        this.levelStats.flagsUsed++; // Track flag usage
         this.updateInventoryUI();
         this.updateControlsUI();
         this.showToast('🏁 Flag placed', 'success');
@@ -3907,26 +5686,16 @@ class Game3D {
     }
 
     applyTheme(name) {
-        // Safeguard: if themes not defined, skip
-        if (!this.themes || !this.themes[name]) return;
-        this.themeName = name;
-        const t = this.themes[name];
-        // Ground
-        if (this.ground && this.ground.material) {
-            this.ground.material.color.setHex(t.ground);
+        // Desert is the only theme. `name` arg kept for call-site compatibility.
+        const t = this.themes.desert;
+        this.themeName = 'desert';
+        if (this.ground && this.ground.material) this.ground.material.color.setHex(t.ground);
+        if (this.gridHelper && this.gridHelper.material && this.gridHelper.material.color) {
+            this.gridHelper.material.color.setHex(t.grid);
         }
-        // Grid
-        if (this.gridHelper && this.gridHelper.material) {
-            if (this.gridHelper.material.color) this.gridHelper.material.color.setHex(t.grid);
-        }
-        // Sky
-        if (this.sky && this.sky.material) {
-            this.sky.material.color.setHex(t.sky);
-        }
-        // Lights (only if assigned in setupLighting)
+        if (this.sky && this.sky.material) this.sky.material.color.setHex(t.sky);
         if (this.ambientLight) this.ambientLight.color.setHex(t.ambient);
         if (this.directionalLight) this.directionalLight.color.setHex(t.sun);
-        // Themed wall material (shared)
         this.materials = this.materials || {};
         this.materials.wall = new THREE.MeshLambertMaterial({
             color: t.wall,
@@ -3934,26 +5703,17 @@ class Game3D {
             transparent: true,
             opacity: 0.95
         });
-        // Rebuild walls if already present to apply new material
-        if (this.walls && this.walls.length) {
-            this.resetMazeTimer(); // Reset timer when changing theme
-            this.rebuildMaze();
-        }
-        // Reflect active button state in modal if open
-        document.querySelectorAll('.theme-btn').forEach(btn => {
-            btn.classList.toggle('active', btn.dataset.theme === name);
-        });
+        if (this.walls && this.walls.length) this.rebuildMaze();
     }
     
     setupLighting() {
-        // Ambient light
-        // Increased overall brightness by ~50%
-        const ambientLight = new THREE.AmbientLight(0x001122, 0.45);
+        const t = this.themes.desert;
+        const ambientLight = new THREE.AmbientLight(t.ambient, 1.8);
         this.scene.add(ambientLight);
         this.ambientLight = ambientLight;
-        
-        // Directional light (sun)
-        const directionalLight = new THREE.DirectionalLight(0x00ff88, 1.2);
+
+        // Directional light (desert sun) — warm and bright
+        const directionalLight = new THREE.DirectionalLight(t.sun, 2.4);
         directionalLight.position.set(50, 50, 50);
         directionalLight.castShadow = true;
         directionalLight.shadow.mapSize.width = 2048;
@@ -3967,11 +5727,12 @@ class Game3D {
         this.scene.add(directionalLight);
         this.directionalLight = directionalLight;
         
-        // Point lights for 128-bit effect
+        // Warm desert accent lights — gold/amber, scattered like reflected sun
         for (let i = 0; i < 5; i++) {
+            const hue = 0.08 + Math.random() * 0.04; // amber/gold band
             const pointLight = new THREE.PointLight(
-                new THREE.Color().setHSL(Math.random(), 1, 0.8),
-                1.5,
+                new THREE.Color().setHSL(hue, 0.7, 0.7),
+                1.2,
                 30
             );
             pointLight.position.set(
@@ -4031,25 +5792,24 @@ class Game3D {
             
             // Debug: Log all key presses
             if (event.code === 'KeyV') {
-                console.log('V key detected in keydown handler');
             }
             
             // Comprehensive input blocking system
             if (this.shouldBlockInput(event)) {
-                console.log(`Input blocked for key: ${event.code}`);
                 return;
             }
             
-            // Track SHIFT key (legacy create mode support removed)
-            
-            // Control scheme switching
-            if (event.code === 'Digit1') {
-                this.setControlScheme(1);
-            }
-            if (event.code === 'Digit3') {
-                this.setControlScheme(3);
+            // Track SHIFT key for create mode
+            if (event.code === 'ShiftLeft' || event.code === 'ShiftRight') {
+                if (this.gameMode === 'create') {
+                    this.createMode.isShiftHeld = true;
+                }
             }
             
+            // Control scheme switching — disabled: Digit1/Digit3 are quickbar slots in play mode.
+            // Use the settings modal (P) to change control scheme.
+
+
             // Maze switching controls
             if (event.code === 'ArrowLeft') {
                 this.switchMaze((this.currentMazeIndex - 1 + this.savedMazes.length) % this.savedMazes.length);
@@ -4075,20 +5835,23 @@ class Game3D {
                 this.toggleMoreDrawer();
             }
             
-            // Toggle control panel with H key
-            if (event.code === 'KeyH') {
-                this.showControlsUI = !this.showControlsUI;
-                this.updateControlsUI();
-                this.showMessage(this.showControlsUI ? 'Control panel shown' : 'Control panel hidden');
+            // Open toolbox modal with T key (create mode only)
+            if (event.code === 'KeyT' && this.gameMode === 'create') {
+                this.toggleToolboxModal();
             }
-            
-            // T key (legacy toolbox support removed)
             
             // Weapon switching is now handled by selectGridItemByShortcut()
             
-            // Q and E keys (legacy create mode tool support removed)
-            
-            if (this.controlScheme === 3) {
+            // Q and E for tank controls (scheme 3) or create mode tools
+            if (this.gameMode === 'create' && !this.modalOpen) {
+                // Create mode: Q for wall, E for erase
+                if (event.code === 'KeyQ') {
+                    this.setCreateTool('wall');
+                }
+                if (event.code === 'KeyE') {
+                    this.setCreateTool('erase');
+                }
+            } else if (this.controlScheme === 3) {
                 // Tank controls: Q and E for turning
                 if (event.code === 'KeyE') {
                     this.characterRotation -= Math.PI / 2; // 90 degrees left
@@ -4115,22 +5878,9 @@ class Game3D {
                 }
             }
 
-            // Cycle through all view modes: iso -> fpv -> birds-eye -> ghost -> iso
+            // Toggle between first-person and second-person (iso) only
             if (event.code === 'KeyV' && !event.repeat) {
-                console.log(`V key pressed, current viewMode: ${this.viewMode}, gameMode: ${this.gameMode}`);
-                if (this.viewMode === 'iso') {
-                    console.log('Switching to FPV');
-                    this.setViewMode('fpv');
-                } else if (this.viewMode === 'fpv') {
-                    console.log('Switching to birds-eye');
-                    this.setViewMode('birds-eye');
-                } else if (this.viewMode === 'birds-eye') {
-                    console.log('Switching to ghost');
-                    this.setViewMode('ghost');
-                } else if (this.viewMode === 'ghost') {
-                    console.log('Switching to iso');
-                    this.setViewMode('iso');
-                }
+                this.setViewMode(this.viewMode === 'fpv' ? 'iso' : 'fpv');
             }
 
             // Place flag in play mode or fall back to indicator toggle
@@ -4147,7 +5897,6 @@ class Game3D {
                 if (this.facingIndicator.groundDot) this.facingIndicator.groundDot.visible = this.facingIndicator.enabled;
                 if (this.facingIndicator.light) this.facingIndicator.light.visible = this.facingIndicator.enabled;
                 this.modelYawOffset = (this.modelYawOffset + Math.PI) % (Math.PI * 2);
-                console.log('Model yaw offset (deg):', Math.round(this.modelYawOffset * 180 / Math.PI));
                 return;
             }
 
@@ -4168,7 +5917,6 @@ class Game3D {
                 const testCrosshair = document.getElementById('crosshair');
                 if (testCrosshair) {
                     testCrosshair.style.display = 'block';
-                    console.log('Crosshair forced visible for testing');
                 }
             }
             
@@ -4185,43 +5933,19 @@ class Game3D {
 
             // Reset view/spawn if things go off-screen
             if (event.code === 'KeyT') {
-                console.log('Resetting camera and player position');
                 // Exit pointer lock for clarity
                 if (document.pointerLockElement) document.exitPointerLock();
-                this.setViewMode('fpv');
+                this.setViewMode('iso');
                 this.currentCameraAngle = 0;
                 this.playMode.mouseNDC.set(0, 0);
-                // Prefer labyrinth start if available - spawn outside maze entry
+                // Prefer labyrinth start if available
                 const cur = this.savedMazes[this.currentMazeIndex];
                 if (cur && cur.type === 'labyrinth' && this.levelStartWorld) {
-                    // Calculate direction from entry to exit to determine which way is "into" the maze
-                    let directionIntoMaze = new THREE.Vector3(1, 0, 0); // Default to positive X direction
-                    if (this.levelEndWorld) {
-                        directionIntoMaze = new THREE.Vector3(
-                            this.levelEndWorld.x - this.levelStartWorld.x,
-                            0,
-                            this.levelEndWorld.z - this.levelStartWorld.z
-                        ).normalize();
-                    }
-                    
-                    // Spawn player outside the maze entry (one cell size away from entry point)
-                    const cellSize = 3; // This should match the cellSize used in createLabyrinth
-                    const spawnOffset = directionIntoMaze.clone().multiplyScalar(-cellSize);
-                    const spawnPosition = this.levelStartWorld.clone().add(spawnOffset);
-                    
-                    this.player.position.set(spawnPosition.x, 0, spawnPosition.z);
-                    
-                    // Face toward the green start marker (entry point)
-                    const directionToStart = new THREE.Vector3(
-                        this.levelStartWorld.x - spawnPosition.x,
-                        0,
-                        this.levelStartWorld.z - spawnPosition.z
-                    ).normalize();
-                    this.characterRotation = Math.atan2(directionToStart.x, directionToStart.z);
+                    this.player.position.copy(this.levelStartWorld);
                 } else {
                     this.player.position.set(0, 0, 0);
-                this.characterRotation = 0;
                 }
+                this.characterRotation = 0;
                 // Nudge camera immediately
                 this.updateCamera();
             }
@@ -4230,19 +5954,23 @@ class Game3D {
             if (event.code === 'KeyY') {
                 // Rotate model yaw offset +90°
                 this.modelYawOffset = (this.modelYawOffset + Math.PI / 2) % (Math.PI * 2);
-                console.log('Model yaw offset (deg):', Math.round(this.modelYawOffset * 180 / Math.PI));
             }
             if (event.code === 'KeyU') {
                 // Rotate model yaw offset -90°
                 this.modelYawOffset = (this.modelYawOffset - Math.PI / 2 + Math.PI * 2) % (Math.PI * 2);
-                console.log('Model yaw offset (deg):', Math.round(this.modelYawOffset * 180 / Math.PI));
             }
         });
         
         document.addEventListener('keyup', (event) => {
             this.keys[event.code] = false;
             
-            // SHIFT key release (legacy create mode support removed)
+            // Track SHIFT key release for create mode
+            if (event.code === 'ShiftLeft' || event.code === 'ShiftRight') {
+                if (this.gameMode === 'create') {
+                    this.createMode.isShiftHeld = false;
+                    this.createMode.startLinePos = null; // Reset line start
+                }
+            }
             
             // No special handling needed on space release now
         });
@@ -4254,9 +5982,12 @@ class Game3D {
                 return;
             }
             
-            // Legacy create mode preview support removed
-            
-            if (this.gameMode === 'play' && !this.modalOpen) {
+            // Handle create mode preview
+            if (this.gameMode === 'create' && !this.modalOpen) {
+                this.handleCreateModeHover();
+                // Don't process other mouse events in create mode
+                return;
+            } else if (this.gameMode === 'play' && !this.modalOpen) {
                 // Track mouse for aim/orbit. Use pointer lock deltas if locked; otherwise client coords.
                 const canvas = document.getElementById('gameCanvas');
                 const rect = canvas.getBoundingClientRect();
@@ -4295,21 +6026,6 @@ class Game3D {
                         const quatY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), this.ghostCamera.rotation.y);
                         const quatX = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), this.ghostCamera.rotation.x);
                         this.ghostCamera.quaternion.multiplyQuaternions(quatY, quatX);
-                    }
-                    
-                    // Bird's eye camera mouse look
-                    if (this.viewMode === 'birds-eye') {
-                        // Update yaw (Y rotation) and pitch (X rotation) separately
-                        this.birdsEyeCamera.rotation.y -= event.movementX * this.birdsEyeCamera.mouseSensitivity;
-                        this.birdsEyeCamera.rotation.x -= event.movementY * this.birdsEyeCamera.mouseSensitivity;
-                        
-                        // Clamp pitch to prevent over-rotation (keep looking down)
-                        this.birdsEyeCamera.rotation.x = Math.max(-Math.PI/2, Math.min(Math.PI/6, this.birdsEyeCamera.rotation.x));
-                        
-                        // Update quaternion from Euler angles (Y first, then X to avoid roll)
-                        const quatY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), this.birdsEyeCamera.rotation.y);
-                        const quatX = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), this.birdsEyeCamera.rotation.x);
-                        this.birdsEyeCamera.quaternion.multiplyQuaternions(quatY, quatX);
                     }
                 } else {
                     this.playMode.mouseNDC.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
@@ -4353,7 +6069,10 @@ class Game3D {
                 return;
             }
             
-            if (this.gameMode === 'play' && !this.modalOpen) {
+            if (this.gameMode === 'create' && !this.modalOpen) {
+                this.createMode.isMouseDown = true;
+                this.handleCreateModeClick(event);
+            } else if (this.gameMode === 'play' && !this.modalOpen) {
                 // Handle press-and-drag continuous move if holding button (optional)
                 this.handlePlayClick(event);
                 // Start continuous firing for machine gun
@@ -4373,7 +6092,11 @@ class Game3D {
                 return;
             }
             
-            if (this.gameMode === 'play' && !this.modalOpen) {
+            if (this.gameMode === 'create' && !this.modalOpen) {
+                this.createMode.isMouseDown = false;
+                this.createMode.lastGridPos = null;
+                this.createMode.startLinePos = null; // Reset line start
+            } else if (this.gameMode === 'play' && !this.modalOpen) {
                 // Stop continuous firing
                 if (event.button === 0) { // Left click
                     this.isFiring = false;
@@ -4383,7 +6106,11 @@ class Game3D {
         
         // Click handler
         document.addEventListener('click', (event) => {
-            if (this.gameMode === 'play' && !this.modalOpen) {
+            if (this.gameMode === 'create' && !this.modalOpen) {
+                this.handleCreateModeClick(event);
+            } else if (this.gameMode === 'play' && !this.modalOpen) {
+                // On touch devices, the on-screen Fire button drives shooting — skip pointer lock entirely.
+                if (this.isTouchDevice) return;
                 // Ensure pointer lock; first click acquires lock instead of shooting
                 if (!this.isPointerLocked) {
                     document.body.requestPointerLock();
@@ -4398,6 +6125,7 @@ class Game3D {
         document.addEventListener('contextmenu', (e) => e.preventDefault());
         document.addEventListener('mousedown', (event) => {
             if (this.gameMode === 'play' && !this.modalOpen && event.button === 2) {
+                if (this.isTouchDevice) return;
                 if (!this.isPointerLocked) {
                     document.body.requestPointerLock();
                     return;
@@ -4409,10 +6137,7 @@ class Game3D {
         document.addEventListener('pointerlockchange', () => {
             this.isPointerLocked = document.pointerLockElement === document.body;
             // Cursor visibility based on mode/lock
-            if (this.gameState === 'menu') {
-                // Always show cursor on start screen
-                document.body.style.cursor = 'default';
-            } else if (this.isPointerLocked && this.gameMode === 'play') {
+            if (this.isPointerLocked && this.gameMode === 'play') {
                 document.body.style.cursor = 'none';
             } else if (this.gameMode === 'create') {
                 document.body.style.cursor = 'crosshair';
@@ -4433,20 +6158,10 @@ class Game3D {
             this.renderer.setSize(window.innerWidth, window.innerHeight);
         });
         
-        // Mouse wheel for weapon switching and bird's eye camera elevation
+        // Mouse wheel for weapon switching
         document.addEventListener('wheel', (event) => {
             // Block wheel input when drawer is open
             if (this.isDrawerOpen) {
-                return;
-            }
-            
-            // Bird's eye camera elevation
-            if (this.gameMode === 'play' && this.viewMode === 'birds-eye') {
-                const direction = event.deltaY > 0 ? -1 : 1; // Scroll down = lower, scroll up = higher
-                const elevationSpeed = 5; // Units per scroll
-                this.birdsEyeCamera.position.y += direction * elevationSpeed;
-                // Clamp height to reasonable bounds
-                this.birdsEyeCamera.position.y = Math.max(10, Math.min(200, this.birdsEyeCamera.position.y));
                 return;
             }
             
@@ -4456,19 +6171,211 @@ class Game3D {
                 this.switchWeapon(direction);
             }
         });
+
+        this.setupTouchControls();
     }
-    
+
+    setupTouchControls() {
+        const isTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints || 0) > 0;
+        if (!isTouch) return;
+        this.isTouchDevice = true;
+        document.body.classList.add('touch-device');
+
+        // ---- Joystick (left thumb -> WASD) ----------------------------------
+        const stick = document.getElementById('touch-joystick');
+        const knob  = document.getElementById('touch-joystick-knob');
+        const STICK_RADIUS = 60;
+        const DEAD = 0.18;
+        let stickTouchId = null;
+        let stickCenter = { x: 0, y: 0 };
+
+        const clearMoveKeys = () => {
+            this.keys['KeyW'] = false;
+            this.keys['KeyA'] = false;
+            this.keys['KeyS'] = false;
+            this.keys['KeyD'] = false;
+        };
+        const setMoveKeys = (nx, ny) => {
+            this.keys['KeyW'] = ny < -DEAD;
+            this.keys['KeyS'] = ny >  DEAD;
+            this.keys['KeyA'] = nx < -DEAD;
+            this.keys['KeyD'] = nx >  DEAD;
+        };
+        const moveKnob = (clientX, clientY) => {
+            let dx = clientX - stickCenter.x;
+            let dy = clientY - stickCenter.y;
+            const len = Math.hypot(dx, dy);
+            if (len > STICK_RADIUS) {
+                const s = STICK_RADIUS / len;
+                dx *= s; dy *= s;
+            }
+            knob.style.transform = `translate(${dx}px, ${dy}px)`;
+            setMoveKeys(dx / STICK_RADIUS, dy / STICK_RADIUS);
+        };
+
+        stick.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const t = e.changedTouches[0];
+            stickTouchId = t.identifier;
+            const rect = stick.getBoundingClientRect();
+            stickCenter.x = rect.left + rect.width / 2;
+            stickCenter.y = rect.top + rect.height / 2;
+            stick.classList.add('active');
+            moveKnob(t.clientX, t.clientY);
+        }, { passive: false });
+
+        // ---- Look pad (right thumb -> aim / camera) -------------------------
+        const look = document.getElementById('touch-look');
+        let lookTouchId = null;
+        let lookLast = { x: 0, y: 0 };
+        const LOOK_FPV_YAW   = 0.005;
+        const LOOK_FPV_PITCH = 0.005;
+        const applyLookDelta = (dx, dy) => {
+            if (this.modalOpen) return;
+            if (this.gameMode !== 'play') return;
+            if (this.viewMode === 'fpv') {
+                this.fpvPitch = (this.fpvPitch || 0) - dy * LOOK_FPV_PITCH;
+                this.characterRotation -= dx * LOOK_FPV_YAW;
+                const limit = Math.PI / 3;
+                this.fpvPitch = Math.max(-limit, Math.min(limit, this.fpvPitch));
+            } else {
+                const canvas = document.getElementById('gameCanvas');
+                const rect = canvas.getBoundingClientRect();
+                const sx = 2 / rect.width;
+                const sy = 2 / rect.height;
+                this.playMode.mouseNDC.x = THREE.MathUtils.clamp(
+                    this.playMode.mouseNDC.x + dx * sx, -1, 1);
+                this.playMode.mouseNDC.y = THREE.MathUtils.clamp(
+                    this.playMode.mouseNDC.y - dy * sy, -1, 1);
+                if (this.playMode.orbitEnabled) {
+                    this.currentCameraAngle = (this.currentCameraAngle + dx * 0.2) % 360;
+                }
+            }
+        };
+
+        look.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const t = e.changedTouches[0];
+            lookTouchId = t.identifier;
+            lookLast.x = t.clientX;
+            lookLast.y = t.clientY;
+        }, { passive: false });
+
+        // ---- Document-level touchmove / end dispatch ------------------------
+        document.addEventListener('touchmove', (e) => {
+            let consumed = false;
+            for (const t of e.changedTouches) {
+                if (t.identifier === stickTouchId) {
+                    moveKnob(t.clientX, t.clientY);
+                    consumed = true;
+                } else if (t.identifier === lookTouchId) {
+                    const dx = t.clientX - lookLast.x;
+                    const dy = t.clientY - lookLast.y;
+                    lookLast.x = t.clientX;
+                    lookLast.y = t.clientY;
+                    applyLookDelta(dx, dy);
+                    consumed = true;
+                }
+            }
+            if (consumed) e.preventDefault();
+        }, { passive: false });
+
+        const endTouch = (e) => {
+            for (const t of e.changedTouches) {
+                if (t.identifier === stickTouchId) {
+                    stickTouchId = null;
+                    knob.style.transform = '';
+                    stick.classList.remove('active');
+                    clearMoveKeys();
+                }
+                if (t.identifier === lookTouchId) {
+                    lookTouchId = null;
+                }
+            }
+        };
+        document.addEventListener('touchend', endTouch);
+        document.addEventListener('touchcancel', endTouch);
+
+        // ---- Action buttons -------------------------------------------------
+        const bindButton = (id, opts) => {
+            const el = document.getElementById(id);
+            if (!el) return;
+            const down = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                el.classList.add('active');
+                opts.onDown && opts.onDown();
+            };
+            const up = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                el.classList.remove('active');
+                opts.onUp && opts.onUp();
+            };
+            el.addEventListener('touchstart',  down, { passive: false });
+            el.addEventListener('touchend',    up,   { passive: false });
+            el.addEventListener('touchcancel', up,   { passive: false });
+            // Don't let synthesized clicks bubble to the document click handler.
+            el.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); });
+        };
+
+        // Synthetic event used by handlePlayClick / handleMelee — they read button & coords.
+        const center = () => ({
+            button: 0,
+            clientX: window.innerWidth / 2,
+            clientY: window.innerHeight / 2,
+            preventDefault: () => {}, stopPropagation: () => {}
+        });
+
+        bindButton('touch-btn-fire', {
+            onDown: () => {
+                if (this.modalOpen || this.gameMode !== 'play') return;
+                this.handlePlayClick(center());
+                const w = this.getCurrentWeapon && this.getCurrentWeapon();
+                if (w && w.isContinuous) this.isFiring = true;
+            },
+            onUp: () => { this.isFiring = false; }
+        });
+        bindButton('touch-btn-jump', {
+            onDown: () => { this.keys['Space'] = true; },
+            onUp:   () => { this.keys['Space'] = false; }
+        });
+        bindButton('touch-btn-melee', {
+            onDown: () => {
+                if (this.modalOpen || this.gameMode !== 'play') return;
+                this.handleMelee({ button: 2 });
+            }
+        });
+        bindButton('touch-btn-reload', {
+            onDown: () => { if (!this.modalOpen) this.reloadWeapon(); }
+        });
+        bindButton('touch-btn-wprev', {
+            onDown: () => { if (!this.modalOpen) this.switchWeapon(-1); }
+        });
+        bindButton('touch-btn-wnext', {
+            onDown: () => { if (!this.modalOpen) this.switchWeapon(1); }
+        });
+        bindButton('touch-btn-view', {
+            onDown: () => {
+                if (this.modalOpen) return;
+                this.setViewMode(this.viewMode === 'fpv' ? 'iso' : 'fpv');
+            }
+        });
+        bindButton('touch-btn-menu', {
+            onDown: () => { this.toggleSettingsModal(); }
+        });
+
+        // Suppress iOS double-tap zoom / long-press selection on the game area.
+        document.addEventListener('gesturestart', (e) => e.preventDefault());
+        document.addEventListener('dblclick',     (e) => e.preventDefault());
+    }
+
     updatePlayer(deltaTime) {
         // Ghost camera movement
         if (this.viewMode === 'ghost') {
             this.updateGhostCamera(deltaTime);
-            this.updateCamera();
-            return;
-        }
-        
-        // Bird's eye camera movement
-        if (this.viewMode === 'birds-eye') {
-            this.updateBirdsEyeCamera(deltaTime);
             this.updateCamera();
             return;
         }
@@ -4703,7 +6610,6 @@ class Game3D {
                 
                 // Debug logging
                 if (Math.random() < 0.01) { // Log occasionally to avoid spam
-                    console.log('Jetpack thrust! Fuel:', Math.round(this.powerUps.jetpackFuel), 'Velocity Y:', this.player.velocity.y);
                 }
             } else {
                 this.jetpackThrust = Math.max(this.jetpackThrust - deltaTime * 2, 0);
@@ -4762,9 +6668,6 @@ class Game3D {
         // Update direction indicators
         this.updateDirectionIndicators();
         
-        // Check for level completion
-        this.checkLevelCompletion();
-        
         // Update camera position based on mode
         this.updateCamera();
     }
@@ -4777,14 +6680,12 @@ class Game3D {
         }
         this.controlScheme = scheme;
         this.cameraMode = 'fixed';
-        console.log(`Control Scheme: ${scheme}`);
     }
     
     
     cycleCameraAngle() {
         // Cycle through fixed camera angles: 0°, 90°, 180°, 270°
         this.currentCameraAngle = (this.currentCameraAngle + 90) % 360;
-        console.log(`Camera angle: ${this.currentCameraAngle}°`);
     }
     
     updateDirectionIndicators() {
@@ -4818,11 +6719,32 @@ class Game3D {
         return 'Unknown';
     }
     
+    checkEnemyCollision(position) {
+        if (!this.playMode || !this.playMode.enemies) return false;
+        const playerRadius = 0.8;
+        const cur = this.player.position;
+        for (const e of this.playMode.enemies) {
+            const r = (e.userData.hitRadius || 0.6) + playerRadius;
+            const dx = position.x - e.position.x;
+            const dz = position.z - e.position.z;
+            const d2 = dx * dx + dz * dz;
+            if (d2 < r * r) {
+                // Allow movement that increases distance — prevents permastuck if a zombie
+                // wandered into the player.
+                const curDx = cur.x - e.position.x;
+                const curDz = cur.z - e.position.z;
+                if (d2 < curDx * curDx + curDz * curDz) return true;
+            }
+        }
+        return false;
+    }
+
     checkCollision(position) {
+        if (this.checkEnemyCollision(position)) return true;
         // Player collision box size
         const playerRadius = 0.8;
         const playerHeight = 2;
-        
+
         // Check collision with each wall (horizontal only - Y handled separately)
         for (let wall of this.walls) {
             const wallPos = wall.position;
@@ -4851,6 +6773,7 @@ class Game3D {
     }
     
     checkCollisionAxis(position, axis) {
+        if (this.checkEnemyCollision(position)) return true;
         // Player collision box size
         const playerRadius = 0.8;
         const playerHeight = 2;
@@ -4990,9 +6913,13 @@ class Game3D {
             }
             
             if (this.viewMode === 'birds-eye') {
-                // Bird's eye view: free-flying camera looking down
-                this.camera.position.copy(this.birdsEyeCamera.position);
-                this.camera.quaternion.copy(this.birdsEyeCamera.quaternion);
+                // Birds-eye view: camera high above player looking down
+                const height = 150; // Height above player
+                const cameraPos = this.player.position.clone();
+                cameraPos.y += height;
+                
+                this.camera.position.set(cameraPos.x, cameraPos.y, cameraPos.z);
+                this.camera.lookAt(this.player.position);
                 return;
             }
             
@@ -5029,8 +6956,8 @@ class Game3D {
             const angleRad = (this.currentCameraAngle * Math.PI) / 180;
             
             // Position camera at fixed angles around the player
-            const cameraDistance = 15;
-            const cameraHeight = 8;
+            const cameraDistance = 8;
+            const cameraHeight = 5;
             
             const cameraX = this.player.position.x + Math.sin(angleRad) * cameraDistance;
             const cameraZ = this.player.position.z + Math.cos(angleRad) * cameraDistance;
@@ -5042,6 +6969,22 @@ class Game3D {
     }
     
     updateCharacterAnimation(deltaTime) {
+        // Drive skeleton clip selection from movement/jump state before stepping the mixer
+        if (this.player.clips) {
+            const vx = this.player.velocity ? this.player.velocity.x : 0;
+            const vz = this.player.velocity ? this.player.velocity.z : 0;
+            const horizSpeed = Math.hypot(vx, vz);
+            const sprinting = !!(this.keys && (this.keys['ShiftLeft'] || this.keys['ShiftRight']));
+            let target;
+            if (this.player.onGround === false && this.player.clips['Jump']) {
+                target = 'Jump';
+            } else if (horizSpeed > 0.5) {
+                target = (sprinting && this.player.clips['Run']) ? 'Run' : 'Walk';
+            } else {
+                target = 'Idle';
+            }
+            this.setPlayerAnimation(target);
+        }
         // Update animation mixer if it exists
         if (this.player.mixer) {
             this.player.mixer.update(deltaTime);
@@ -5080,41 +7023,43 @@ class Game3D {
     
     animate() {
         requestAnimationFrame(() => this.animate());
-        
+
         const deltaTime = this.clock.getDelta();
-        
-        // Clamp deltaTime to prevent spiral of death
         const clampedDeltaTime = Math.min(deltaTime, Game3D.MAX_FRAME_TIME);
-        
-        // Accumulate time for fixed timestep
+
         this.accumulator = (this.accumulator || 0) + clampedDeltaTime;
-        
-        // Run fixed timestep simulation
         while (this.accumulator >= Game3D.FIXED_TIMESTEP) {
             this.fixedUpdate(Game3D.FIXED_TIMESTEP);
             this.accumulator -= Game3D.FIXED_TIMESTEP;
         }
-        
-        // Render at display refresh rate
+
+        // Per-frame visual updates that should run at display rate (smooth animation).
+        this.updateSwordViewmodel(clampedDeltaTime);
+
         this.render();
     }
     
     fixedUpdate(deltaTime) {
-        // Only run game logic when in playing state
-        if (this.gameState !== 'playing') {
-            return;
-        }
-        
         // All game logic goes here - runs at fixed 60 FPS
         this.updatePlayer(deltaTime);
-        
+        this.updateFootsteps(deltaTime);
+        this.updateDamageVignette(deltaTime);
+        this.updatePlayerLocomotion(deltaTime);
+
         // Update projectiles and other play-mode systems
         if (this.gameMode === 'play') {
             this.updateProjectiles(deltaTime);
             this.updateEnemies(deltaTime);
+            this.updateDyingEnemies(deltaTime);
             this.updatePickups(deltaTime);
             this.updateJetpackParticles(deltaTime);
             this.updateEnemySpawning(deltaTime);
+            this.updateMuzzleFlash(deltaTime);
+            this.updatePickupCollectFx(deltaTime);
+            this.updateEnemyDeathFragments(deltaTime);
+            this.updateFootDust(deltaTime);
+            this.updateWorldMuzzleSprites(deltaTime);
+            if (this.arena && this.arena.active) this.updateArena(deltaTime);
         }
         
         // Update facing indicator position/target
@@ -5139,266 +7084,268 @@ class Game3D {
     }
     
     render() {
-        // Update crosshair regardless of game state (depends on gameMode, not gameState)
-        this.updateCrosshairUI();
-        
-        // Only render other game UI when in playing state
-        if (this.gameState !== 'playing') {
-            return;
-        }
-        
         // All rendering and UI updates go here - runs at display refresh rate
         this.clearAllUI();
         this.updateControlsUI();
         this.updateHealthUI();
         this.updateCompassUI();
         // this.updateWeaponPowerUpUI(); // Replaced by new HUD system
+        this.updateCrosshairUI();
         this.updateGroundTargetIndicator();
-        this.updateTimerUI();
-        // this.updateInventoryGridUI(); // Hidden for now
+        this.updateInventoryGridUI();
         this.updateToasts();
-        
+
+        // New HUD elements (health bar / vignette / minimap / objective banner)
+        this.updateHealthBarUI();
+        this.updateDamageVignetteUI();
+        this.updateMuzzleFlashUI();
+        this.updateObjectiveBannerUI();
+        this.updateMinimapUI();
+        this._updateArenaCountdownUI();
+
         // Emit UI update for new HUD system
         this.emit('ui:update', this.buildHUDModel());
-        
+
         // Render the scene
         this.renderer.render(this.scene, this.camera);
     }
 
+    // ===== HUD: segmented health bar =====
+    updateHealthBarUI() {
+        const el = document.getElementById('health-bar');
+        if (!el) return;
+        if (this.gameMode !== 'play') { el.style.display = 'none'; return; }
+        el.style.display = 'block';
+
+        const pipsEl = el.querySelector('.hb-pips');
+        const textEl = el.querySelector('.hb-text');
+        const hp = Math.max(0, Math.floor(this.player.hp));
+        const maxHp = this.player.maxHp || 100;
+        const pipsTotal = 10;
+        const perPip = maxHp / pipsTotal;
+        const filledCount = Math.ceil(hp / perPip);
+        const pct = hp / maxHp;
+
+        const lastHp = this._lastHpForBar;
+        if (typeof lastHp === 'number' && hp < lastHp) {
+            el.classList.remove('pulse');
+            // force reflow to restart animation
+            void el.offsetWidth;
+            el.classList.add('pulse');
+        }
+        this._lastHpForBar = hp;
+
+        if (!pipsEl.children.length || pipsEl.children.length !== pipsTotal) {
+            pipsEl.innerHTML = '';
+            for (let i = 0; i < pipsTotal; i++) {
+                const p = document.createElement('div');
+                p.className = 'hb-pip';
+                pipsEl.appendChild(p);
+            }
+        }
+        const statusClass = pct < 0.3 ? 'crit' : pct < 0.6 ? 'low' : '';
+        for (let i = 0; i < pipsTotal; i++) {
+            const pip = pipsEl.children[i];
+            pip.classList.remove('low', 'crit', 'lost');
+            if (i >= filledCount) pip.classList.add('lost');
+            else if (statusClass) pip.classList.add(statusClass);
+        }
+        textEl.textContent = `${hp} / ${maxHp}`;
+    }
+
+    updateDamageVignetteUI() {
+        const el = document.getElementById('damage-vignette');
+        if (!el) return;
+        const t = this._damageVignetteT || 0;
+        el.style.opacity = Math.min(1, t / 0.45).toFixed(3);
+    }
+
+    updateMuzzleFlashUI() {
+        const el = document.getElementById('muzzle-flash');
+        if (!el) return;
+        const t = this._muzzleFlashT || 0;
+        el.style.opacity = (t > 0 ? Math.min(1, t / 0.08) * 0.75 : 0).toFixed(3);
+    }
+
+    updateObjectiveBannerUI() {
+        const el = document.getElementById('objective-banner');
+        const arenaEl = document.getElementById('arena-hud');
+        const lavaVignette = document.getElementById('lava-vignette');
+        if (!el) return;
+        // Arena mode owns its own HUD
+        if (this.arena && this.arena.active) {
+            el.style.display = 'none';
+            if (arenaEl) {
+                arenaEl.style.display = 'block';
+                const phaseLabel = {
+                    'wave-active': 'Clear the wave',
+                    'eruption':    'GROUND SHAKES!',
+                    'boss-fight':  'BOSS FIGHT',
+                    'wave-complete': 'WAVE CLEARED'
+                }[this.arena.phase] || '';
+                const waveEl = arenaEl.querySelector('.ah-wave');
+                const enemiesEl = arenaEl.querySelector('.ah-enemies');
+                const phaseEl = arenaEl.querySelector('.ah-phase');
+                const scoreEl = arenaEl.querySelector('.ah-score');
+                const bossWrap = arenaEl.querySelector('.ah-boss-wrap');
+                const bossFill = arenaEl.querySelector('.ah-boss-fill');
+                if (waveEl) waveEl.textContent = `WAVE ${this.arena.wave}`;
+                const remaining = (this.arena.enemiesToSpawn - this.arena.enemiesSpawnedThisWave) + (this.playMode.enemies ? this.playMode.enemies.length : 0);
+                if (enemiesEl) enemiesEl.textContent = String(Math.max(0, remaining));
+                if (phaseEl) phaseEl.textContent = phaseLabel;
+                if (scoreEl) scoreEl.textContent = `Score: ${this.score || 0}`;
+                const boss = this.arena.boss;
+                if (bossWrap && bossFill) {
+                    if (boss && !boss.userData.dying && boss.userData.hpMax > 0) {
+                        bossWrap.style.display = 'flex';
+                        const ratio = Math.max(0, Math.min(1, boss.userData.hp / boss.userData.hpMax));
+                        bossFill.style.width = (ratio * 100).toFixed(1) + '%';
+                    } else {
+                        bossWrap.style.display = 'none';
+                    }
+                }
+            }
+            if (lavaVignette) {
+                const lava = this.arena.lava;
+                const proximity = lava && lava.y > lava.restY + 0.1
+                    ? Math.max(0, Math.min(1, 1 - (this.player.position.y - lava.y) * 1.5))
+                    : 0;
+                lavaVignette.style.opacity = proximity.toFixed(3);
+            }
+            return;
+        }
+        // Default (maze) banner
+        if (arenaEl) arenaEl.style.display = 'none';
+        if (lavaVignette) lavaVignette.style.opacity = '0';
+        if (this.gameMode !== 'play') { el.style.display = 'none'; return; }
+        el.style.display = 'flex';
+        const level = this.mazeDifficulty || 1;
+        const enemiesLeft = (this.playMode && this.playMode.enemies) ? this.playMode.enemies.length : 0;
+        const flags = (this.inventory && typeof this.inventory.flags === 'number') ? this.inventory.flags : 0;
+        const flagsMax = this.flagsObjective || (this.placedFlags ? this.placedFlags.length : 0);
+        const score = this.score || 0;
+        const lvlEl = el.querySelector('.ob-level');
+        const enemiesEl = el.querySelector('.ob-enemies');
+        const flagsEl = el.querySelector('.ob-flags');
+        const scoreEl = el.querySelector('.ob-score');
+        if (lvlEl) lvlEl.textContent = `LVL ${level}`;
+        if (enemiesEl) enemiesEl.textContent = `Enemies: ${enemiesLeft}`;
+        if (flagsEl) flagsEl.textContent = `Flags: ${flags}/${flagsMax}`;
+        if (scoreEl) scoreEl.textContent = `Score: ${score}`;
+    }
+
+    updateMinimapUI() {
+        const wrap = document.getElementById('minimap-wrap');
+        const canvas = document.getElementById('minimap');
+        if (!wrap || !canvas) return;
+        if (this.gameMode !== 'play') { wrap.style.display = 'none'; return; }
+        wrap.style.display = 'block';
+
+        // Throttle to ~10 fps to save cycles
+        this._mmFrame = ((this._mmFrame || 0) + 1) % 6;
+        if (this._mmFrame !== 0 && this._mmDrawn) return;
+        this._mmDrawn = true;
+
+        const ctx = canvas.getContext('2d');
+        const w = canvas.width, h = canvas.height;
+        ctx.clearRect(0, 0, w, h);
+        ctx.fillStyle = 'rgba(0,0,0,0.55)';
+        ctx.fillRect(0, 0, w, h);
+
+        const bounds = this.getMazeBounds ? this.getMazeBounds() : { minX:-50, maxX:50, minZ:-50, maxZ:50 };
+        const bw = bounds.maxX - bounds.minX;
+        const bh = bounds.maxZ - bounds.minZ;
+        const pad = 4;
+        const sx = (w - pad*2) / Math.max(1, bw);
+        const sz = (h - pad*2) / Math.max(1, bh);
+        const toX = (x) => pad + (x - bounds.minX) * sx;
+        const toY = (z) => pad + (z - bounds.minZ) * sz;
+
+        // Walls
+        ctx.fillStyle = 'rgba(255,179,71,0.45)';
+        if (this.walls && this.walls.length) {
+            for (const w0 of this.walls) {
+                const wx = toX(w0.position.x - w0.size.x/2);
+                const wy = toY(w0.position.z - w0.size.z/2);
+                const ww = Math.max(1, w0.size.x * sx);
+                const wh = Math.max(1, w0.size.z * sz);
+                ctx.fillRect(wx, wy, ww, wh);
+            }
+        }
+
+        // Start / End markers
+        if (this.levelStartWorld) {
+            ctx.fillStyle = '#7fff7f';
+            ctx.fillRect(toX(this.levelStartWorld.x) - 3, toY(this.levelStartWorld.z) - 3, 6, 6);
+        }
+        if (this.levelEndWorld) {
+            ctx.fillStyle = '#ff5050';
+            ctx.fillRect(toX(this.levelEndWorld.x) - 3, toY(this.levelEndWorld.z) - 3, 6, 6);
+        }
+
+        // Pickups
+        if (this.pickups && this.pickups.length) {
+            ctx.fillStyle = '#66ffcc';
+            for (const p of this.pickups) {
+                ctx.fillRect(toX(p.position.x) - 1.5, toY(p.position.z) - 1.5, 3, 3);
+            }
+        }
+
+        // Enemies
+        if (this.playMode && this.playMode.enemies) {
+            ctx.fillStyle = '#ff4444';
+            for (const e of this.playMode.enemies) {
+                ctx.beginPath();
+                ctx.arc(toX(e.position.x), toY(e.position.z), 2.5, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        // Player (with facing wedge)
+        if (this.player) {
+            const px = toX(this.player.position.x);
+            const py = toY(this.player.position.z);
+            const yaw = this.characterRotation || 0;
+            ctx.save();
+            ctx.translate(px, py);
+            ctx.rotate(-yaw);
+            ctx.fillStyle = '#ffd28a';
+            ctx.beginPath();
+            ctx.moveTo(0, -6);
+            ctx.lineTo(4, 4);
+            ctx.lineTo(-4, 4);
+            ctx.closePath();
+            ctx.fill();
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+            ctx.restore();
+        }
+    }
+
     updateObjectives() {
+        // Arena owns objective state when active
+        if (this.arena && this.arena.active) return;
         const cur = this.savedMazes[this.currentMazeIndex];
-        if (!cur || (cur.type !== 'labyrinth' && cur.type !== 'ascii')) return;
+        if (!cur || cur.type !== 'labyrinth') return;
         if (!this.levelStartWorld || !this.levelEndWorld) return;
         const p = this.player.position;
         const atStart = p.distanceToSquared(this.levelStartWorld) < 2.0;
         const atEnd = p.distanceToSquared(this.levelEndWorld) < 2.0;
-        
-        // Debug logging
-        if (atStart && !this.mazeTimer.hasStarted) {
-            console.log('Player near start marker, distance:', Math.sqrt(p.distanceToSquared(this.levelStartWorld)));
+        if (atEnd) {
+            this.showMessage('Exit reached!');
+            if (!this._levelCompletePlayed) {
+                this._levelCompletePlayed = true;
+                this.audio && this.audio.play('levelComplete');
+            }
+        } else {
+            this._levelCompletePlayed = false;
         }
-        
-        // Handle start marker collision
-        if (atStart && !this.mazeTimer.hasStarted) {
-            console.log('Player touched start marker - starting timer!');
-            this.startMazeTimer();
-        }
-        
-        // Handle end marker collision
-        if (atEnd && this.mazeTimer.hasStarted && !this.mazeTimer.hasFinished) {
-            this.finishMazeTimer();
-        }
-        
-        // Legacy messages
-        if (atEnd) this.showMessage('Exit reached!');
         if (atStart && (this.hasLeftStartOnce || false)) this.showMessage('Back at start');
         if (!atStart) this.hasLeftStartOnce = true;
     }
     
-    startMazeTimer() {
-        this.mazeTimer.isActive = true;
-        this.mazeTimer.startTime = Date.now();
-        this.mazeTimer.hasStarted = true;
-        this.mazeTimer.hasFinished = false;
-        this.mazeTimer.currentTime = 0;
-        
-        console.log('Maze timer started!');
-        this.showMessage('Timer started! Find the red exit marker.');
-        this.showToast('⏱️ Timer Started!', 'info');
-        
-        // Force timer UI to show immediately
-        this.updateTimerUI();
-        
-        // Add screen flash effect
-        this.addScreenFlash(0x00ff00, 0.3);
-        
-        // Animate the start marker
-        this.animateStartMarker();
-    }
     
-    finishMazeTimer() {
-        if (!this.mazeTimer.isActive || this.mazeTimer.hasFinished) return;
-        
-        this.mazeTimer.isActive = false;
-        this.mazeTimer.hasFinished = true;
-        this.mazeTimer.currentTime = (Date.now() - this.mazeTimer.startTime) / 1000;
-        
-        // Check for best time
-        if (!this.mazeTimer.bestTime || this.mazeTimer.currentTime < this.mazeTimer.bestTime) {
-            this.mazeTimer.bestTime = this.mazeTimer.currentTime;
-            this.showMessage(`New best time: ${this.mazeTimer.currentTime.toFixed(0)}s!`);
-            this.showToast(`🏆 New Best Time: ${this.mazeTimer.currentTime.toFixed(0)}s!`, 'success');
-        } else {
-            this.showMessage(`Time: ${this.mazeTimer.currentTime.toFixed(0)}s (Best: ${this.mazeTimer.bestTime.toFixed(0)}s)`);
-            this.showToast(`⏱️ Time: ${this.mazeTimer.currentTime.toFixed(0)}s`, 'info');
-        }
-        
-        console.log(`Maze completed in ${this.mazeTimer.currentTime.toFixed(0)} seconds`);
-        
-        // Add screen flash effect
-        this.addScreenFlash(0xff0000, 0.2);
-        
-        // Animate the end marker
-        this.animateEndMarker();
-    }
-    
-    animateStartMarker() {
-        // Find the start marker and animate it
-        const startMarker = this.scene.children.find(child => 
-            child.userData && child.userData.type === 'start'
-        );
-        
-        if (startMarker && startMarker.userData.content) {
-            const content = startMarker.userData.content;
-            const sphere = startMarker.userData.sphere;
-            const ring = startMarker.userData.ring;
-            
-            // Animate the sphere pulsing
-            const animate = () => {
-                if (!this.mazeTimer.isActive) return;
-                
-                const time = Date.now() * 0.005;
-                const scale = 1 + Math.sin(time) * 0.2;
-                sphere.scale.setScalar(scale);
-                
-                // Rotate the ring
-                ring.rotation.z += 0.02;
-                
-                requestAnimationFrame(animate);
-            };
-            animate();
-        }
-    }
-    
-    animateEndMarker() {
-        // Find the end marker and animate it
-        const endMarker = this.scene.children.find(child => 
-            child.userData && child.userData.type === 'end'
-        );
-        
-        if (endMarker) {
-            // Flash the end marker
-            const originalColor = endMarker.material.color.getHex();
-            let flashCount = 0;
-            const flash = () => {
-                if (flashCount >= 6) {
-                    endMarker.material.color.setHex(originalColor);
-                    return;
-                }
-                
-                endMarker.material.color.setHex(flashCount % 2 === 0 ? 0xffffff : originalColor);
-                flashCount++;
-                setTimeout(flash, 200);
-            };
-            flash();
-        }
-    }
-    
-    resetMazeTimer() {
-        // Stop any active timer
-        this.mazeTimer.isActive = false;
-        this.mazeTimer.hasStarted = false;
-        this.mazeTimer.hasFinished = false;
-        this.mazeTimer.startTime = 0;
-        this.mazeTimer.currentTime = 0;
-        
-        // Hide timer UI
-        const timerUI = document.getElementById('timer-ui');
-        if (timerUI) {
-            timerUI.style.display = 'none';
-        }
-        
-        console.log('Maze timer reset');
-    }
-    
-    addScreenFlash(color, intensity) {
-        // Create a temporary overlay for screen flash effect
-        const flashOverlay = document.createElement('div');
-        flashOverlay.style.position = 'fixed';
-        flashOverlay.style.top = '0';
-        flashOverlay.style.left = '0';
-        flashOverlay.style.width = '100%';
-        flashOverlay.style.height = '100%';
-        flashOverlay.style.backgroundColor = `#${color.toString(16).padStart(6, '0')}`;
-        flashOverlay.style.opacity = intensity;
-        flashOverlay.style.pointerEvents = 'none';
-        flashOverlay.style.zIndex = '9999';
-        flashOverlay.style.transition = 'opacity 0.3s ease-out';
-        
-        document.body.appendChild(flashOverlay);
-        
-        // Fade out and remove
-        setTimeout(() => {
-            flashOverlay.style.opacity = '0';
-            setTimeout(() => {
-                if (flashOverlay.parentNode) {
-                    flashOverlay.parentNode.removeChild(flashOverlay);
-                }
-            }, 300);
-        }, 100);
-    }
-    
-    updateTimerUI() {
-        // Only show timer in play mode
-        if (this.gameMode !== 'play') {
-            return;
-        }
-        
-        // Create or update timer UI (bottom left)
-        let timerUI = document.getElementById('timer-ui');
-        if (!timerUI) {
-            timerUI = document.createElement('div');
-            timerUI.id = 'timer-ui';
-            timerUI.style.position = 'absolute';
-            timerUI.style.bottom = '20px';
-            timerUI.style.left = '20px';
-            timerUI.style.background = 'linear-gradient(135deg, rgba(0,0,0,0.9), rgba(0,20,40,0.9))';
-            timerUI.style.border = '2px solid #00ff00';
-            timerUI.style.borderRadius = '12px';
-            timerUI.style.padding = '15px 20px';
-            timerUI.style.fontFamily = "'Courier New', monospace";
-            timerUI.style.fontSize = '16px';
-            timerUI.style.color = '#00ff00';
-            timerUI.style.textShadow = '0 0 10px #00ff00';
-            timerUI.style.zIndex = '1000';
-            timerUI.style.minWidth = '200px';
-            timerUI.style.textAlign = 'center';
-            document.body.appendChild(timerUI);
-        }
-        
-        if (this.mazeTimer.isActive) {
-            // Update current time
-            this.mazeTimer.currentTime = (Date.now() - this.mazeTimer.startTime) / 1000;
-            
-            timerUI.innerHTML = `
-                <div style="font-size: 12px; margin-bottom: 3px; opacity: 0.6;">LEVEL ${this.currentLevel}</div>
-                <div style="font-size: 14px; margin-bottom: 5px; opacity: 0.8;">MAZE TIMER</div>
-                <div style="font-size: 24px; font-weight: bold; color: #00ff00;">
-                    ${this.mazeTimer.currentTime.toFixed(0)}s
-                </div>
-                <div style="font-size: 12px; margin-top: 5px; opacity: 0.7;">
-                    Best: ${this.mazeTimer.bestTime ? this.mazeTimer.bestTime.toFixed(0) + 's' : '--'}
-                </div>
-            `;
-            timerUI.style.display = 'block';
-        } else if (this.mazeTimer.hasFinished) {
-            // Show final time
-            timerUI.innerHTML = `
-                <div style="font-size: 12px; margin-bottom: 3px; opacity: 0.6;">LEVEL ${this.currentLevel}</div>
-                <div style="font-size: 14px; margin-bottom: 5px; opacity: 0.8;">COMPLETED</div>
-                <div style="font-size: 20px; font-weight: bold; color: #00ff00;">
-                    ${this.mazeTimer.currentTime.toFixed(0)}s
-                </div>
-                <div style="font-size: 12px; margin-top: 5px; opacity: 0.7;">
-                    Best: ${this.mazeTimer.bestTime ? this.mazeTimer.bestTime.toFixed(0) + 's' : '--'}
-                </div>
-            `;
-            timerUI.style.display = 'block';
-        } else {
-            // Hide timer when not active
-            timerUI.style.display = 'none';
-        }
-    }
     
     clearAllUI() {
         // Remove ALL possible UI elements (except modals, inventory, and crosshair)
@@ -5409,7 +7356,7 @@ class Game3D {
             'player-pos', 'player-facing', 'camera-info',
             // Any other possible UI elements
             'objective-msg', 'facing-indicator',
-            'control-ui', 'maze-ui', 'timer-ui'
+            'control-ui', 'maze-ui'
         ];
         
         allUIElements.forEach(id => {
@@ -5434,12 +7381,20 @@ class Game3D {
                 (style.top === '20px' || style.top === '10px' || style.top === '0px' || style.top === '50%') &&
                 (style.right === '20px' || style.right === '10px' || style.right === '0px' || style.left === '50%')) {
                 // Check if it's not one of our protected UI elements
-                if (!div.id || (!div.id.includes('health-ui') && 
-                    !div.id.includes('compass-ui') && 
+                if (!div.id || (!div.id.includes('health-ui') &&
+                    !div.id.includes('health-bar') &&
+                    !div.id.includes('compass-ui') &&
                     !div.id.includes('weapon-powerup-ui') &&
                     !div.id.includes('settings-modal') &&
                     !div.id.includes('toolbox-modal') &&
                     !div.id.includes('inventory-ui') &&
+                    !div.id.includes('minimap') &&
+                    !div.id.includes('objective-banner') &&
+                    !div.id.includes('damage-vignette') &&
+                    !div.id.includes('muzzle-flash') &&
+                    !div.id.includes('arena-hud') &&
+                    !div.id.includes('arena-countdown') &&
+                    !div.id.includes('lava-vignette') &&
                     !div.id.includes('crosshair'))) {
                     div.remove();
                 }
@@ -5448,12 +7403,14 @@ class Game3D {
     }
 
     updateHealthUI() {
-        // Only show in play mode
+        // Replaced by updateHealthBarUI() — keep stub so other call sites don't break.
+        const old = document.getElementById('health-ui');
+        if (old) old.remove();
+        return;
+        // eslint-disable-next-line no-unreachable
         if (this.gameMode !== 'play') {
             return;
         }
-        
-        // Create or update health UI (top right)
         let hud = document.getElementById('health-ui');
         if (!hud) {
             hud = document.createElement('div');
@@ -5474,7 +7431,7 @@ class Game3D {
         }
         
         const hpPercent = (this.player.hp / this.player.maxHp) * 100;
-        const hpColor = hpPercent > 60 ? '#00ff00' : hpPercent > 30 ? '#ffff00' : '#ff6666';
+        const hpColor = hpPercent > 60 ? '#ffb347' : hpPercent > 30 ? '#ffff00' : '#ff6666';
         
         hud.innerHTML = `
             <div style="text-align: center; margin-bottom: 8px; font-size: 14px; opacity: 0.8;">${this.t('health').toUpperCase()}</div>
@@ -5510,17 +7467,17 @@ class Game3D {
             hud.style.position = 'absolute';
             hud.style.bottom = '20px';
             hud.style.left = '20px';
-            hud.style.background = 'linear-gradient(135deg, rgba(0,0,0,0.9), rgba(0,20,40,0.9))';
-            hud.style.border = '2px solid #00aaff';
+            hud.style.background = 'linear-gradient(135deg, rgba(0,0,0,0.9), rgba(42,24,8,0.9))';
+            hud.style.border = '2px solid #ffb347';
             hud.style.borderRadius = '12px';
             hud.style.padding = '16px 20px';
-            hud.style.color = '#00aaff';
+            hud.style.color = '#ffb347';
             hud.style.fontFamily = 'Courier New, monospace';
             hud.style.fontSize = '14px';
             hud.style.fontWeight = 'bold';
             hud.style.zIndex = '1000';
             hud.style.minWidth = '280px';
-            hud.style.boxShadow = '0 4px 20px rgba(0,170,255,0.3)';
+            hud.style.boxShadow = '0 4px 20px rgba(255,179,71,0.3)';
             document.body.appendChild(hud);
         }
         
@@ -5541,7 +7498,7 @@ class Game3D {
             ammoColor = '#ffaa00';
         } else if (ammoCount > 0) {
             ammoStatus = `${ammoCount}`;
-            ammoColor = '#00ff00';
+            ammoColor = '#ffb347';
         } else {
             ammoStatus = 'NO AMMO';
             ammoColor = '#ff4444';
@@ -5565,17 +7522,17 @@ class Game3D {
         // Weapon cooldown indicator
         const cooldown = this.weaponCooldowns[currentWeapon.name] || 0;
         const cooldownPercent = Math.max(0, (cooldown / currentWeapon.cooldown) * 100);
-        const cooldownColor = cooldown > 0 ? '#ff4444' : '#00ff00';
+        const cooldownColor = cooldown > 0 ? '#ff4444' : '#ffb347';
         
         hud.innerHTML = `
             <div style="margin-bottom: 16px;">
                 <div style="text-align: center; margin-bottom: 8px; font-size: 12px; opacity: 0.8; letter-spacing: 1px;">${this.t('currentWeapon').toUpperCase()}</div>
-                <div style="text-align: center; font-size: 20px; color: #00aaff; margin-bottom: 4px;">${currentWeapon.icon} ${currentWeapon.name}</div>
+                <div style="text-align: center; font-size: 20px; color: #ffb347; margin-bottom: 4px;">${currentWeapon.icon} ${currentWeapon.name}</div>
                 <div style="text-align: center; font-size: 11px; opacity: 0.7; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px;">${currentWeapon.type}</div>
                 
                 <!-- Weapon Stats -->
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-bottom: 8px; font-size: 11px;">
-                    ${weaponStats.map(stat => `<div style="text-align: center; padding: 2px 4px; background: rgba(0,170,255,0.1); border-radius: 4px;">${stat}</div>`).join('')}
+                    ${weaponStats.map(stat => `<div style="text-align: center; padding: 2px 4px; background: rgba(255,179,71,0.1); border-radius: 4px;">${stat}</div>`).join('')}
                 </div>
                 
                 <!-- Ammo Status -->
@@ -5600,11 +7557,11 @@ class Game3D {
             </div>
             
             ${activePowerUps.length > 0 ? `
-                <div style="border-top: 1px solid rgba(0,170,255,0.3); padding-top: 12px;">
+                <div style="border-top: 1px solid rgba(255,179,71,0.3); padding-top: 12px;">
                     <div style="text-align: center; margin-bottom: 8px; font-size: 12px; opacity: 0.8; letter-spacing: 1px;">${this.t('active')} ${this.t('powerUps')}</div>
                     <div style="font-size: 12px; line-height: 1.6;">
                         ${activePowerUps.map(powerup => `
-                            <div style="display: flex; justify-content: space-between; align-items: center; padding: 2px 0; border-bottom: 1px solid rgba(0,170,255,0.1);">
+                            <div style="display: flex; justify-content: space-between; align-items: center; padding: 2px 0; border-bottom: 1px solid rgba(255,179,71,0.1);">
                                 <span>${powerup.split(' (')[0]}</span>
                                 <span style="opacity: 0.7;">${powerup.split(' (')[1]?.replace(')', '') || ''}</span>
                             </div>
@@ -5628,17 +7585,17 @@ class Game3D {
         hud.style.position = 'absolute';
         hud.style.bottom = '20px';
         hud.style.left = '20px';
-        hud.style.background = 'linear-gradient(135deg, rgba(0,0,0,0.9), rgba(0,20,40,0.9))';
-        hud.style.border = '2px solid #00aaff';
+        hud.style.background = 'linear-gradient(135deg, rgba(0,0,0,0.9), rgba(42,24,8,0.9))';
+        hud.style.border = '2px solid #ffb347';
         hud.style.borderRadius = '12px';
         hud.style.padding = '16px 20px';
-        hud.style.color = '#00aaff';
+        hud.style.color = '#ffb347';
         hud.style.fontFamily = 'Courier New, monospace';
         hud.style.fontSize = '14px';
         hud.style.fontWeight = 'bold';
         hud.style.zIndex = '1000';
         hud.style.minWidth = '280px';
-        hud.style.boxShadow = '0 4px 20px rgba(0,170,255,0.3)';
+        hud.style.boxShadow = '0 4px 20px rgba(255,179,71,0.3)';
         hud.style.display = 'none';
         document.body.appendChild(hud);
         
@@ -5684,10 +7641,10 @@ class Game3D {
         style.textContent = `
             .weapon-header { margin-bottom: 16px; }
             .weapon-title { text-align: center; margin-bottom: 8px; font-size: 12px; opacity: 0.8; letter-spacing: 1px; }
-            .weapon-name { text-align: center; font-size: 20px; color: #00aaff; margin-bottom: 4px; }
+            .weapon-name { text-align: center; font-size: 20px; color: #ffb347; margin-bottom: 4px; }
             .weapon-type { text-align: center; font-size: 11px; opacity: 0.7; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
             .weapon-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-bottom: 8px; font-size: 11px; }
-            .stat-item { text-align: center; padding: 2px 4px; background: rgba(0,170,255,0.1); border-radius: 4px; }
+            .stat-item { text-align: center; padding: 2px 4px; background: rgba(255,179,71,0.1); border-radius: 4px; }
             .ammo-section { text-align: center; margin-bottom: 8px; }
             .ammo-label { font-size: 12px; opacity: 0.8; margin-bottom: 2px; }
             .ammo-status { font-size: 16px; font-weight: bold; }
@@ -5695,8 +7652,8 @@ class Game3D {
             .cooldown-label { font-size: 10px; opacity: 0.7; margin-bottom: 2px; text-align: center; }
             .cooldown-bar { width: 100%; height: 4px; background: rgba(0,0,0,0.5); border-radius: 2px; overflow: hidden; }
             .cooldown-fill { height: 100%; transition: width 0.1s; }
-            .powerups-section { border-top: 1px solid rgba(0,170,255,0.3); padding-top: 12px; }
-            .powerup-item { display: flex; justify-content: space-between; align-items: center; padding: 2px 0; border-bottom: 1px solid rgba(0,170,255,0.1); font-size: 12px; line-height: 1.6; }
+            .powerups-section { border-top: 1px solid rgba(255,179,71,0.3); padding-top: 12px; }
+            .powerup-item { display: flex; justify-content: space-between; align-items: center; padding: 2px 0; border-bottom: 1px solid rgba(255,179,71,0.1); font-size: 12px; line-height: 1.6; }
         `;
         document.head.appendChild(style);
         
@@ -5728,46 +7685,74 @@ class Game3D {
         weaponStats.push(`RNG: ${model.weapon.range}`);
         weaponStats.push(`CD: ${model.weapon.cooldown}s`);
         if (model.weapon.ammoCost > 0) {
-            weaponStats.push(`AMMO: ${model.weapon.ammoCost}`);
+            // The carry cap is the meaningful number for the player, not the
+            // per-shot cost (always 1 for the current arsenal).
+            weaponStats.push(`MAX: ${this.AMMO_MAX}`);
         }
-        
-        this.hudElements.weaponStats.innerHTML = weaponStats.map(stat => 
+
+        this.hudElements.weaponStats.innerHTML = weaponStats.map(stat =>
             `<div class="stat-item">${stat}</div>`
         ).join('');
-        
-        // Update ammo status
+
+        // Update ammo status. Melee = "—", free-fire ranged = "∞", real ranged = "n / max".
         let ammoStatus, ammoColor;
+        const isRanged = model.weapon.type === 'ranged' && model.weapon.ammoCost > 0;
+        const isFreeRanged = model.weapon.type === 'ranged' && model.weapon.ammoCost === 0;
         if (model.isReloading) {
-            ammoStatus = 'RELOADING...';
+            ammoStatus = 'RELOADING…';
             ammoColor = '#ffaa00';
+        } else if (isFreeRanged) {
+            ammoStatus = '∞';
+            ammoColor = '#ffd28a';
+        } else if (!isRanged) {
+            ammoStatus = '—';
+            ammoColor = 'rgba(255,179,71,0.55)';
         } else if (model.ammoCount > 0) {
-            ammoStatus = `${model.ammoCount}`;
-            ammoColor = '#00ff00';
+            ammoStatus = `${model.ammoCount} / ${this.AMMO_MAX}`;
+            const pct = model.ammoCount / this.AMMO_MAX;
+            ammoColor = pct > 0.5 ? '#ffd28a' : pct > 0.2 ? '#ffd34a' : '#ff8a5a';
         } else {
             ammoStatus = 'NO AMMO';
-            ammoColor = '#ff4444';
+            ammoColor = '#ff5a5a';
         }
-        
+
         this.hudElements.ammoStatus.textContent = ammoStatus;
         this.hudElements.ammoStatus.style.color = ammoColor;
         
-        // Update cooldown bar
-        this.hudElements.cooldownLabel.textContent = model.isReloading ? 'RELOADING' : 'READY';
-        
-        const cooldownFill = this.hudElements.cooldownBar.querySelector('.cooldown-fill') || 
+        // Update cooldown bar — three states: reloading, cooling down, ready,
+        // and a fourth: ranged weapon with zero ammo (looks identical to "ready"
+        // in the old code, which lies to the player).
+        const rangedDry = isRanged && model.ammoCount <= 0 && !model.isReloading;
+        if (model.isReloading) {
+            this.hudElements.cooldownLabel.textContent = 'RELOADING';
+        } else if (rangedDry) {
+            this.hudElements.cooldownLabel.textContent = 'EMPTY — PRESS R';
+        } else if (model.cooldown > 0) {
+            this.hudElements.cooldownLabel.textContent = 'COOLDOWN';
+        } else {
+            this.hudElements.cooldownLabel.textContent = 'READY';
+        }
+
+        const cooldownFill = this.hudElements.cooldownBar.querySelector('.cooldown-fill') ||
             (() => {
                 const fill = document.createElement('div');
                 fill.className = 'cooldown-fill';
                 this.hudElements.cooldownBar.appendChild(fill);
                 return fill;
             })();
-        
+
         if (model.isReloading) {
             cooldownFill.style.width = `${model.reloadProgress * 100}%`;
             cooldownFill.style.background = '#ffaa00';
-        } else {
+        } else if (rangedDry) {
+            cooldownFill.style.width = '0%';
+            cooldownFill.style.background = '#ff5a5a';
+        } else if (model.cooldown > 0) {
             cooldownFill.style.width = `${100 - model.cooldownPercent}%`;
-            cooldownFill.style.background = model.cooldown > 0 ? '#ff4444' : '#00ff00';
+            cooldownFill.style.background = '#ff4444';
+        } else {
+            cooldownFill.style.width = '100%';
+            cooldownFill.style.background = '#ffb347';
         }
         
         // Update power-ups
@@ -5801,17 +7786,12 @@ class Game3D {
     }
     
     updateControlsUI() {
+        // Controls panel is hidden — kept off by default
+        const existing = document.getElementById('controls-ui');
+        if (existing) existing.style.display = 'none';
+        return;
         // Only show in play mode
         if (this.gameMode !== 'play') {
-            return;
-        }
-        
-        // Check if control panel should be visible
-        if (!this.showControlsUI) {
-            const hud = document.getElementById('controls-ui');
-            if (hud) {
-                hud.style.display = 'none';
-            }
             return;
         }
         
@@ -5823,17 +7803,17 @@ class Game3D {
             hud.style.position = 'absolute';
             hud.style.top = '20px';
             hud.style.left = '20px';
-            hud.style.background = 'linear-gradient(135deg, rgba(0,0,0,0.9), rgba(0,20,40,0.9))';
-            hud.style.border = '2px solid #00aaff';
+            hud.style.background = 'linear-gradient(135deg, rgba(0,0,0,0.9), rgba(42,24,8,0.9))';
+            hud.style.border = '2px solid #ffb347';
             hud.style.borderRadius = '12px';
             hud.style.padding = '16px 20px';
-            hud.style.color = '#00aaff';
+            hud.style.color = '#ffb347';
             hud.style.fontFamily = 'Courier New, monospace';
             hud.style.fontSize = '12px';
             hud.style.fontWeight = 'bold';
             hud.style.zIndex = '1000';
             hud.style.minWidth = '280px';
-            hud.style.boxShadow = '0 4px 20px rgba(0,170,255,0.3)';
+            hud.style.boxShadow = '0 4px 20px rgba(255,179,71,0.3)';
             document.body.appendChild(hud);
         }
         
@@ -5854,7 +7834,7 @@ class Game3D {
             'Left Click - Fire',
             'Mouse Wheel - Switch Weapon',
             'R - Reload',
-            '1-3 - Select Weapon'
+            '1-2 - Select Weapon'
         ];
         
         // View controls
@@ -5873,7 +7853,6 @@ class Game3D {
         
         // Game controls
         const gameControls = [
-            'H - Toggle Controls',
             'P - Settings',
             'T - Toolbox',
             'M - Open Drawer',
@@ -5931,7 +7910,7 @@ class Game3D {
             </div>
             
             ${specialStates.length > 0 ? `
-                <div style="border-top: 1px solid rgba(0,170,255,0.3); padding-top: 8px;">
+                <div style="border-top: 1px solid rgba(255,179,71,0.3); padding-top: 8px;">
                     <div style="font-size: 11px; opacity: 0.8; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">${this.t('status')}</div>
                     <div style="font-size: 10px; line-height: 1.4; color: #ffaa00;">
                         ${specialStates.map(state => `<div style="margin-bottom: 2px;">${state}</div>`).join('')}
@@ -5945,257 +7924,171 @@ class Game3D {
     updateInventoryGridUI() {
         // Only show in play mode
         if (this.gameMode !== 'play') {
+            const existing = document.getElementById('inventory-grid-ui');
+            if (existing) existing.style.display = 'none';
+            this._qbSig = null;
             return;
         }
-        
+
+        // Cheap signature check — rebuilding the bar every frame is wasteful,
+        // and rebuilding clobbers in-flight drag operations.
+        const layout = this.quickbarLayout || this.defaultQuickbarLayout();
+        const activeWeaponId = this.player.weapons[this.player.currentWeaponIndex];
+        const sigParts = [activeWeaponId || ''];
+        for (const id of layout) {
+            if (!id) { sigParts.push('_'); continue; }
+            sigParts.push(`${id}:${this.getItemCount(id)}:${this.isItemOwned(id) ? 1 : 0}`);
+        }
+        const sig = sigParts.join('|');
+        if (sig === this._qbSig) return;
+        this._qbSig = sig;
+
         // Create or update inventory grid UI (bottom center)
         let hud = document.getElementById('inventory-grid-ui');
         if (!hud) {
             hud = document.createElement('div');
             hud.id = 'inventory-grid-ui';
             hud.style.position = 'absolute';
-            hud.style.bottom = '20px';
+            hud.style.bottom = '24px';
             hud.style.left = '50%';
             hud.style.transform = 'translateX(-50%)';
             hud.style.display = 'flex';
-            hud.style.gap = '4px';
             hud.style.zIndex = '1000';
             document.body.appendChild(hud);
         }
-        
-        // Use saved quickbar layout
-        const quickbarLayout = this.quickbarLayout || ['diamondSword', 'gun', 'machineGun', 'health', 'ammo', 'jetpack', 'speed', 'healthRegen', 'weaponBuff'];
-        
-        // Item definitions
-        const itemDefinitions = {
-            'diamondSword': { type: 'weapon', icon: '⚔️', name: 'Diamond Sword' },
-            'gun': { type: 'weapon', icon: '🔫', name: 'Gun' },
-            'machineGun': { type: 'weapon', icon: '🔫', name: 'Machine Gun' },
-            'health': { type: 'item', icon: '❤️', name: 'Health' },
-            'ammo': { type: 'item', icon: '🔸', name: 'Ammo' },
-            'jetpack': { type: 'item', icon: '🚀', name: 'Jetpack' },
-            'speed': { type: 'item', icon: '⚡', name: 'Speed Boost' },
-            'healthRegen': { type: 'item', icon: '💚', name: 'Health Regen' },
-            'weaponBuff': { type: 'item', icon: '⚔️', name: 'Weapon Buff' }
-        };
-        
-        // Create grid items from quickbar layout
+
+        // Build quickbar slots from the unified registry so weapons/consumables
+        // share one list of icons/names.
+        const reg = this.getItemRegistry();
+        const byId = Object.fromEntries(reg.all.map(d => [d.id, d]));
+        const quickbarLayout = this.quickbarLayout || this.defaultQuickbarLayout();
         const gridItems = quickbarLayout.map((itemId, index) => {
-            const def = itemDefinitions[itemId] || { type: 'item', icon: '?', name: 'Unknown' };
+            const def = byId[itemId];
             return {
                 id: itemId,
-                type: def.type,
+                type: def ? (def.category === 'weapon' ? 'weapon' : 'item') : 'empty',
                 shortcut: (index + 1).toString(),
-                icon: def.icon,
-                name: def.name
+                icon: def ? def.icon : '',
+                name: def ? def.name : ''
             };
         });
-        
-        // Clear existing grid
+
         hud.innerHTML = '';
-        
-        // Create grid items
+        hud.style.display = 'flex';
+
         gridItems.forEach((item, index) => {
-            const gridItem = document.createElement('div');
-            gridItem.className = 'inventory-grid-item';
-            gridItem.style.width = '50px';
-            gridItem.style.height = '50px';
-            gridItem.style.border = '2px solid #00aaff';
-            gridItem.style.borderRadius = '8px';
-            gridItem.style.background = 'linear-gradient(135deg, rgba(0,0,0,0.8), rgba(0,20,40,0.8))';
-            gridItem.style.display = 'flex';
-            gridItem.style.alignItems = 'center';
-            gridItem.style.justifyContent = 'center';
-            gridItem.style.position = 'relative';
-            gridItem.style.cursor = 'pointer';
-            gridItem.style.transition = 'all 0.2s ease';
-            gridItem.draggable = true;
-            
-            // Check if item is available in inventory
-            let isAvailable = false;
-            let isSelected = false;
-            
-            if (item.type === 'weapon') {
-                isAvailable = this.player.weapons.includes(item.id);
-                isSelected = this.player.weapons[this.player.currentWeaponIndex] === item.id;
-            } else {
-                // Check if item is in inventory or power-up is active
-                if (item.id === 'health') {
-                    isAvailable = this.inventory.health > 0;
-                } else if (item.id === 'ammo') {
-                    isAvailable = this.inventory.ammo > 0;
-                } else if (item.id === 'jetpack') {
-                    isAvailable = this.powerUps.jetpackFuel > 0;
-                } else if (item.id === 'speed') {
-                    isAvailable = this.powerUps.speedBoost > 0;
-                } else if (item.id === 'healthRegen') {
-                    isAvailable = this.powerUps.healthRegen > 0;
-                } else if (item.id === 'weaponBuff') {
-                    isAvailable = this.powerUps.weaponBuff > 0;
-                }
+            const slot = document.createElement('div');
+            slot.className = 'qb-slot';
+            slot.dataset.slot = String(index);
+            slot.title = item.name || '';
+            slot.draggable = item.type !== 'empty';
+
+            const isOwned = item.type !== 'empty' && this.isItemOwned(item.id);
+            const isSelected = item.type === 'weapon' && item.id === activeWeaponId;
+
+            if (item.type === 'empty') {
+                slot.classList.add('qb-empty');
+            } else if (!isOwned) {
+                slot.classList.add('qb-unavail');
             }
-            
-            // Apply visual states
-            if (!isAvailable) {
-                gridItem.style.opacity = '0.3';
-                gridItem.style.filter = 'grayscale(100%)';
-            } else {
-                gridItem.style.opacity = '1';
-                gridItem.style.filter = 'none';
-            }
-            
-            if (isSelected) {
-                gridItem.style.border = '3px solid #ff6600';
-                gridItem.style.boxShadow = '0 0 10px rgba(255,102,0,0.5)';
-            } else {
-                gridItem.style.border = '2px solid #00aaff';
-                gridItem.style.boxShadow = 'none';
-            }
-            
-            // Add hover effect
-            gridItem.addEventListener('mouseenter', () => {
-                if (isAvailable) {
-                    gridItem.style.transform = 'scale(1.1)';
-                    gridItem.style.background = 'linear-gradient(135deg, rgba(0,170,255,0.3), rgba(0,40,80,0.3))';
-                }
-            });
-            
-            gridItem.addEventListener('mouseleave', () => {
-                gridItem.style.transform = 'scale(1)';
-                gridItem.style.background = 'linear-gradient(135deg, rgba(0,0,0,0.8), rgba(0,20,40,0.8))';
-            });
-            
-            // Add click handler
-            gridItem.addEventListener('click', () => {
-                if (isAvailable) {
+            if (isSelected) slot.classList.add('qb-selected');
+
+            const count = item.type === 'empty' ? 0 : this.getItemCount(item.id);
+            const showCount = item.type !== 'weapon' && item.type !== 'empty' && count > 0;
+
+            slot.innerHTML = `
+                <span class="qb-key">${item.shortcut}</span>
+                <span class="qb-icon">${item.icon || '·'}</span>
+                ${showCount ? `<span class="qb-count">${count}</span>` : ''}
+            `;
+
+            slot.addEventListener('click', () => {
+                if (isOwned) {
+                    this.audio && this.audio.play('uiClick');
                     this.selectGridItem(item);
                 }
             });
-            
-            // Add drag & drop handlers
-            gridItem.addEventListener('dragstart', (e) => {
+
+            // Drag & drop reordering
+            slot.addEventListener('dragstart', (e) => {
+                if (!slot.draggable) return;
                 this.dragStartSlot = index;
                 this.draggedItem = item.id;
                 e.dataTransfer.effectAllowed = 'move';
-                gridItem.style.opacity = '0.5';
+                slot.style.opacity = '0.5';
             });
-            
-            gridItem.addEventListener('dragend', () => {
-                gridItem.style.opacity = isAvailable ? '1' : '0.3';
+            slot.addEventListener('dragend', () => {
+                slot.style.opacity = '';
                 this.draggedItem = null;
                 this.dragStartSlot = null;
             });
-            
-            gridItem.addEventListener('dragover', (e) => {
+            slot.addEventListener('dragover', (e) => {
                 e.preventDefault();
                 e.dataTransfer.dropEffect = 'move';
-                gridItem.style.background = 'linear-gradient(135deg, rgba(255,102,0,0.3), rgba(255,102,0,0.1))';
+                slot.classList.add('qb-drop-target');
             });
-            
-            gridItem.addEventListener('dragleave', () => {
-                gridItem.style.background = 'linear-gradient(135deg, rgba(0,0,0,0.8), rgba(0,20,40,0.8))';
+            slot.addEventListener('dragleave', () => {
+                slot.classList.remove('qb-drop-target');
             });
-            
-            gridItem.addEventListener('drop', (e) => {
+            slot.addEventListener('drop', (e) => {
                 e.preventDefault();
-                gridItem.style.background = 'linear-gradient(135deg, rgba(0,0,0,0.8), rgba(0,20,40,0.8))';
-                
+                slot.classList.remove('qb-drop-target');
                 if (this.draggedItem && this.dragStartSlot !== null) {
                     this.swapQuickbarItems(this.dragStartSlot, index);
                 }
             });
-            
-            // Create content
-            gridItem.innerHTML = `
-                <div style="position: absolute; top: 2px; left: 2px; background: rgba(0,0,0,0.8); color: #00aaff; font-size: 10px; font-weight: bold; width: 16px; height: 16px; border-radius: 3px; display: flex; align-items: center; justify-content: center; font-family: monospace;">
-                    ${item.shortcut}
-                </div>
-                <div style="font-size: 24px; opacity: ${isAvailable ? '1' : '0.3'};">
-                    ${item.icon}
-                </div>
-            `;
-            
-            hud.appendChild(gridItem);
+
+            hud.appendChild(slot);
         });
-        
-        // Add "More" button
+
+        // "More" button
         const moreButton = document.createElement('div');
         moreButton.id = 'more-button';
-        moreButton.style.width = '50px';
-        moreButton.style.height = '50px';
-        moreButton.style.border = '2px solid #00aaff';
-        moreButton.style.borderRadius = '8px';
-        moreButton.style.background = 'linear-gradient(135deg, rgba(0,0,0,0.8), rgba(0,20,40,0.8))';
-        moreButton.style.display = 'flex';
-        moreButton.style.alignItems = 'center';
-        moreButton.style.justifyContent = 'center';
-        moreButton.style.cursor = 'pointer';
-        moreButton.style.transition = 'all 0.2s ease';
-        moreButton.style.fontSize = '12px';
-        moreButton.style.color = '#00aaff';
-        moreButton.style.fontWeight = 'bold';
-        moreButton.innerHTML = 'More';
-        
-        // Add hover effect for more button
-        moreButton.addEventListener('mouseenter', () => {
-            moreButton.style.transform = 'scale(1.1)';
-            moreButton.style.background = 'linear-gradient(135deg, rgba(0,170,255,0.3), rgba(0,40,80,0.3))';
-        });
-        
-        moreButton.addEventListener('mouseleave', () => {
-            moreButton.style.transform = 'scale(1)';
-            moreButton.style.background = 'linear-gradient(135deg, rgba(0,0,0,0.8), rgba(0,20,40,0.8))';
-        });
-        
-        // Add click handler for more button (placeholder for now)
+        moreButton.className = 'qb-more';
+        moreButton.textContent = 'More';
         moreButton.addEventListener('click', () => {
+            this.audio && this.audio.play('uiClick');
             this.toggleMoreDrawer();
         });
-        
         hud.appendChild(moreButton);
-        hud.style.display = 'flex';
     }
     
     selectGridItem(item) {
         if (item.type === 'weapon') {
-            // Switch to weapon
             const weaponIndex = this.player.weapons.indexOf(item.id);
             if (weaponIndex !== -1) {
                 this.player.currentWeaponIndex = weaponIndex;
                 this.showMessage(`${this.t('switchWeapon')}: ${item.name}`);
-                
-                // Emit UI update event
+                this.attachActiveWeaponToHand();
                 this.emit('ui:update', this.buildHUDModel());
+                this.updateInventoryGridUI && this.updateInventoryGridUI();
             }
         } else {
-            // Use item
             this.activateSelectedItem(item.id);
+            this.updateInventoryGridUI && this.updateInventoryGridUI();
         }
     }
     
     selectGridItemByShortcut(shortcut) {
-        const gridItems = [
-            { id: 'diamondSword', type: 'weapon', shortcut: '1', name: 'Diamond Sword' },
-            { id: 'gun', type: 'weapon', shortcut: '2', name: 'Gun' },
-            { id: 'machineGun', type: 'weapon', shortcut: '3', name: 'Machine Gun' },
-            { id: 'health', type: 'item', shortcut: '4', name: 'Health' },
-            { id: 'ammo', type: 'item', shortcut: '5', name: 'Ammo' },
-            { id: 'jetpack', type: 'item', shortcut: '6', name: 'Jetpack' },
-            { id: 'speed', type: 'item', shortcut: '7', name: 'Speed Boost' },
-            { id: 'healthRegen', type: 'item', shortcut: '8', name: 'Health Regen' },
-            { id: 'weaponBuff', type: 'item', shortcut: '9', name: 'Weapon Buff' }
-        ];
-        
-        const item = gridItems.find(i => i.shortcut === shortcut);
-        if (item) {
-            this.selectGridItem(item);
-        }
+        // Number-key shortcuts target the slot at that position in the
+        // current quickbar layout, so they stay in sync with HUD and drawer.
+        const slotIndex = parseInt(shortcut, 10) - 1;
+        if (Number.isNaN(slotIndex) || slotIndex < 0 || slotIndex >= this.quickbarLayout.length) return;
+        const itemId = this.quickbarLayout[slotIndex];
+        if (!itemId) return;
+        const reg = this.getItemRegistry();
+        const def = reg.all.find(d => d.id === itemId);
+        if (!def) return;
+        this.selectGridItem({
+            id: def.id,
+            type: def.category === 'weapon' ? 'weapon' : 'item',
+            name: def.name,
+            icon: def.icon
+        });
     }
     
     toggleMoreDrawer() {
-        console.log('toggleMoreDrawer called, current state:', this.isDrawerOpen);
         this.isDrawerOpen = !this.isDrawerOpen;
-        console.log('New drawer state:', this.isDrawerOpen);
         this.updateDrawerUI();
         
         if (this.isDrawerOpen) {
@@ -6213,11 +8106,9 @@ class Game3D {
     }
     
     updateDrawerUI() {
-        console.log('updateDrawerUI called, isDrawerOpen:', this.isDrawerOpen);
         // Create or update drawer UI
         let drawer = document.getElementById('inventory-drawer');
         if (!drawer) {
-            console.log('Creating new drawer element');
             drawer = document.createElement('div');
             drawer.id = 'inventory-drawer';
             drawer.style.position = 'fixed';
@@ -6225,59 +8116,45 @@ class Game3D {
             drawer.style.left = '0';
             drawer.style.right = '0';
             drawer.style.height = '400px';
-            drawer.style.background = 'linear-gradient(135deg, rgba(0,0,0,0.95), rgba(0,20,40,0.95))';
-            drawer.style.borderTop = '3px solid #00aaff';
+            drawer.style.background = 'linear-gradient(135deg, rgba(0,0,0,0.95), rgba(42,24,8,0.95))';
+            drawer.style.borderTop = '3px solid #ffb347';
             drawer.style.zIndex = '2000';
             drawer.style.transition = 'bottom 0.3s ease';
             drawer.style.overflowY = 'auto';
             drawer.style.padding = '20px';
             document.body.appendChild(drawer);
-            console.log('Drawer element created and added to body');
         }
         
         // Update position
         const newBottom = this.isDrawerOpen ? '0px' : '-400px';
-        console.log('Setting drawer bottom to:', newBottom);
         drawer.style.bottom = newBottom;
         
         if (!this.isDrawerOpen) {
             return;
         }
         
-        // All available items
-        const allItems = [
-            { id: 'diamondSword', type: 'weapon', icon: '⚔️', name: 'Diamond Sword', category: 'weapon' },
-            { id: 'gun', type: 'weapon', icon: '🔫', name: 'Gun', category: 'weapon' },
-            { id: 'machineGun', type: 'weapon', icon: '🔫', name: 'Machine Gun', category: 'weapon' },
-            { id: 'health', type: 'item', icon: '❤️', name: 'Health', category: 'consumable' },
-            { id: 'ammo', type: 'item', icon: '🔸', name: 'Ammo', category: 'consumable' },
-            { id: 'jetpack', type: 'item', icon: '🚀', name: 'Jetpack', category: 'consumable' },
-            { id: 'speed', type: 'item', icon: '⚡', name: 'Speed Boost', category: 'consumable' },
-            { id: 'healthRegen', type: 'item', icon: '💚', name: 'Health Regen', category: 'consumable' },
-            { id: 'weaponBuff', type: 'item', icon: '⚔️', name: 'Weapon Buff', category: 'consumable' }
-        ];
-        
-        // Group items by category
-        const weaponItems = allItems.filter(item => item.category === 'weapon');
-        const consumableItems = allItems.filter(item => item.category === 'consumable');
+        // Pull from the shared registry — no separate item table to drift.
+        const reg = this.getItemRegistry();
+        const weaponItems = reg.weapons.map(d => ({ ...d, type: 'weapon' }));
+        const consumableItems = reg.consumables.map(d => ({ ...d, type: 'item' }));
         
         drawer.innerHTML = `
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-                <h3 style="color: #00aaff; margin: 0; font-family: 'Courier New', monospace;">Inventory Drawer</h3>
-                <button id="close-drawer" style="background: #ff4444; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-family: 'Courier New', monospace;">Close</button>
+                <h3 style="color: #ffb347; margin: 0; font-family: 'Courier New', monospace;">${this.t('inventoryDrawer')}</h3>
+                <button id="close-drawer" style="background: #5a3a14; color: #ffb347; border: 1px solid #ffb347; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-family: 'Courier New', monospace;">${this.t('close')}</button>
             </div>
-            
+
             <div style="margin-bottom: 20px;">
-                <h4 style="color: #00aaff; margin: 0 0 10px 0; font-family: 'Courier New', monospace;">Weapons</h4>
+                <h4 style="color: #ffb347; margin: 0 0 10px 0; font-family: 'Courier New', monospace;">${this.t('weapons')}</h4>
                 <div id="weapon-grid" style="display: grid; grid-template-columns: repeat(auto-fill, 50px); gap: 8px; margin-bottom: 20px;"></div>
             </div>
-            
+
             <div>
-                <h4 style="color: #00aaff; margin: 0 0 10px 0; font-family: 'Courier New', monospace;">Consumables</h4>
+                <h4 style="color: #ffb347; margin: 0 0 10px 0; font-family: 'Courier New', monospace;">${this.t('consumables')}</h4>
                 <div id="consumable-grid" style="display: grid; grid-template-columns: repeat(auto-fill, 50px); gap: 8px;"></div>
             </div>
-            
-            <div style="margin-top: 20px; padding: 10px; background: rgba(0,170,255,0.1); border-radius: 8px; font-size: 12px; color: #00aaff;">
+
+            <div style="margin-top: 20px; padding: 10px; background: rgba(255,179,71,0.08); border: 1px solid rgba(255,179,71,0.3); border-radius: 8px; font-size: 12px; color: #ffb347;">
                 <strong>Instructions:</strong><br>
                 • Click items to assign to selected quickbar slot<br>
                 • Drag items to quickbar to assign<br>
@@ -6318,9 +8195,9 @@ class Game3D {
         itemEl.dataset.itemId = item.id;
         itemEl.style.width = '50px';
         itemEl.style.height = '50px';
-        itemEl.style.border = '2px solid #00aaff';
+        itemEl.style.border = '2px solid #ffb347';
         itemEl.style.borderRadius = '8px';
-        itemEl.style.background = 'linear-gradient(135deg, rgba(0,0,0,0.8), rgba(0,20,40,0.8))';
+        itemEl.style.background = 'linear-gradient(135deg, rgba(0,0,0,0.8), rgba(42,24,8,0.8))';
         itemEl.style.display = 'flex';
         itemEl.style.alignItems = 'center';
         itemEl.style.justifyContent = 'center';
@@ -6329,38 +8206,23 @@ class Game3D {
         itemEl.style.position = 'relative';
         itemEl.draggable = true;
         
-        // Check if item is owned
-        let isOwned = false;
-        if (item.type === 'weapon') {
-            isOwned = this.player.weapons.includes(item.id);
-        } else {
-            if (item.id === 'health') {
-                isOwned = this.inventory.health > 0;
-            } else if (item.id === 'ammo') {
-                isOwned = this.inventory.ammo > 0;
-            } else if (item.id === 'jetpack') {
-                isOwned = this.powerUps.jetpackFuel > 0;
-            } else if (item.id === 'speed') {
-                isOwned = this.powerUps.speedBoost > 0;
-            } else if (item.id === 'healthRegen') {
-                isOwned = this.powerUps.healthRegen > 0;
-            } else if (item.id === 'weaponBuff') {
-                isOwned = this.powerUps.weaponBuff > 0;
-            }
-        }
-        
-        // Apply visual states
+        const isOwned = this.isItemOwned(item.id);
+        const count = this.getItemCount(item.id);
+
         if (!isOwned) {
             itemEl.style.opacity = '0.3';
             itemEl.style.filter = 'grayscale(100%)';
             itemEl.style.cursor = 'not-allowed';
             itemEl.draggable = false;
         }
-        
+
+        const showCount = item.type !== 'weapon' && count > 0;
+        itemEl.title = `${item.name}${showCount ? ` (${count})` : ''}`;
         itemEl.innerHTML = `
             <div style="font-size: 24px; opacity: ${isOwned ? '1' : '0.3'};">
                 ${item.icon}
             </div>
+            ${showCount ? `<div style="position: absolute; bottom: 2px; right: 4px; color: #ffb347; font-size: 11px; font-weight: bold; font-family: monospace; text-shadow: 0 0 2px #000;">${count}</div>` : ''}
         `;
         
         // Add click handler
@@ -6388,13 +8250,13 @@ class Game3D {
         itemEl.addEventListener('mouseenter', () => {
             if (isOwned) {
                 itemEl.style.transform = 'scale(1.1)';
-                itemEl.style.background = 'linear-gradient(135deg, rgba(0,170,255,0.3), rgba(0,40,80,0.3))';
+                itemEl.style.background = 'linear-gradient(135deg, rgba(255,179,71,0.3), rgba(74,48,24,0.3))';
             }
         });
         
         itemEl.addEventListener('mouseleave', () => {
             itemEl.style.transform = 'scale(1)';
-            itemEl.style.background = 'linear-gradient(135deg, rgba(0,0,0,0.8), rgba(0,20,40,0.8))';
+            itemEl.style.background = 'linear-gradient(135deg, rgba(0,0,0,0.8), rgba(42,24,8,0.8))';
         });
         
         return itemEl;
@@ -6451,7 +8313,7 @@ class Game3D {
         // Remove previous selection
         document.querySelectorAll('.drawer-item').forEach(item => {
             item.classList.remove('selected');
-            item.style.border = '2px solid #00aaff';
+            item.style.border = '2px solid #ffb347';
         });
         
         // Add selection to current slot
@@ -6463,22 +8325,34 @@ class Game3D {
     }
     
     loadQuickbarLayout() {
-        // Initialize default quickbar layout
-        this.quickbarLayout = ['diamondSword', 'gun', 'machineGun', 'health', 'ammo', 'jetpack', 'speed', 'healthRegen', 'weaponBuff'];
-        
-        // Load from localStorage
-        const saved = localStorage.getItem('pjboy_quickbar_layout');
+        this.quickbarLayout = this.defaultQuickbarLayout();
+
+        // Versioned storage key so old saved layouts (with machineGun, etc.)
+        // are discarded instead of silently shown.
+        const saved = localStorage.getItem('pjboy_quickbar_layout_v2');
         if (saved) {
             try {
-                this.quickbarLayout = JSON.parse(saved);
+                const parsed = JSON.parse(saved);
+                const valid = new Set([...Object.keys(this.WEAPON_STATS), ...Object.keys(this.ITEM_DEFS)]);
+                this.quickbarLayout = parsed.map(id => (valid.has(id) ? id : null));
+                while (this.quickbarLayout.length < 9) this.quickbarLayout.push(null);
+                this.quickbarLayout = this.quickbarLayout.slice(0, 9);
             } catch (e) {
                 console.warn('Failed to load quickbar layout:', e);
             }
         }
     }
-    
+
+    // Curated default. Slot 3 is reserved for jetpack so the fuel stack is
+    // always visible at a fixed key when the player is carrying any.
+    defaultQuickbarLayout() {
+        const layout = ['diamondSword', 'gun', 'jetpack', 'health', 'ammo', 'speed', 'weaponBuff', 'healthRegen', 'flag'];
+        const valid = new Set([...Object.keys(this.WEAPON_STATS), ...Object.keys(this.ITEM_DEFS)]);
+        return layout.map(id => (valid.has(id) ? id : null));
+    }
+
     saveQuickbarLayout() {
-        localStorage.setItem('pjboy_quickbar_layout', JSON.stringify(this.quickbarLayout));
+        localStorage.setItem('pjboy_quickbar_layout_v2', JSON.stringify(this.quickbarLayout));
     }
     
     showToast(message, type = 'info', duration = 3000) {
@@ -6507,16 +8381,16 @@ class Game3D {
         toastEl.style.top = '20px';
         toastEl.style.left = '50%';
         toastEl.style.transform = 'translateX(-50%)';
-        toastEl.style.background = 'linear-gradient(135deg, rgba(0,0,0,0.9), rgba(0,20,40,0.9))';
-        toastEl.style.border = '2px solid #00aaff';
+        toastEl.style.background = 'linear-gradient(135deg, rgba(0,0,0,0.9), rgba(42,24,8,0.9))';
+        toastEl.style.border = '2px solid #ffb347';
         toastEl.style.borderRadius = '8px';
         toastEl.style.padding = '12px 20px';
-        toastEl.style.color = '#00aaff';
+        toastEl.style.color = '#ffb347';
         toastEl.style.fontFamily = 'Courier New, monospace';
         toastEl.style.fontSize = '14px';
         toastEl.style.fontWeight = 'bold';
         toastEl.style.zIndex = '10000';
-        toastEl.style.boxShadow = '0 4px 20px rgba(0,170,255,0.3)';
+        toastEl.style.boxShadow = '0 4px 20px rgba(255,179,71,0.3)';
         toastEl.style.opacity = '0';
         toastEl.style.transition = 'all 0.3s ease';
         toastEl.style.maxWidth = '400px';
@@ -6526,8 +8400,8 @@ class Game3D {
         // Set type-specific styling
         switch (toast.type) {
             case 'success':
-                toastEl.style.border = '2px solid #00ff00';
-                toastEl.style.color = '#00ff00';
+                toastEl.style.border = '2px solid #ffb347';
+                toastEl.style.color = '#ffb347';
                 toastEl.style.boxShadow = '0 4px 20px rgba(0,255,0,0.3)';
                 break;
             case 'warning':
@@ -6594,15 +8468,15 @@ class Game3D {
         cursor.style.width = '20px';
         cursor.style.height = '20px';
         cursor.style.background = 'radial-gradient(circle, #000000 0%, #000000 30%, transparent 30%)';
-        cursor.style.border = '2px solid #00ff00';
+        cursor.style.border = '2px solid #ffb347';
         cursor.style.borderRadius = '50%';
         cursor.style.pointerEvents = 'none';
         cursor.style.zIndex = '999999';
         cursor.style.transform = 'translate(-50%, -50%)';
         cursor.style.boxShadow = `
-            0 0 10px #00ff00,
-            0 0 20px #00ff00,
-            0 0 30px #00ff00,
+            0 0 10px #ffb347,
+            0 0 20px #ffb347,
+            0 0 30px #ffb347,
             inset 0 0 10px rgba(0, 255, 0, 0.3)
         `;
         cursor.style.animation = 'drawerCursorPulse 2s ease-in-out infinite alternate';
@@ -6614,16 +8488,16 @@ class Game3D {
             @keyframes drawerCursorPulse {
                 0% {
                     box-shadow: 
-                        0 0 10px #00ff00,
-                        0 0 20px #00ff00,
-                        0 0 30px #00ff00,
+                        0 0 10px #ffb347,
+                        0 0 20px #ffb347,
+                        0 0 30px #ffb347,
                         inset 0 0 10px rgba(0, 255, 0, 0.3);
                 }
                 100% {
                     box-shadow: 
-                        0 0 15px #00ff00,
-                        0 0 25px #00ff00,
-                        0 0 35px #00ff00,
+                        0 0 15px #ffb347,
+                        0 0 25px #ffb347,
+                        0 0 35px #ffb347,
                         inset 0 0 15px rgba(0, 255, 0, 0.5);
                 }
             }
@@ -6698,10 +8572,10 @@ class Game3D {
             hud.style.bottom = '20px';
             hud.style.right = '20px';
             hud.style.background = 'rgba(0,0,0,0.8)';
-            hud.style.border = '2px solid #00ff00';
+            hud.style.border = '2px solid #ffb347';
             hud.style.borderRadius = '8px';
             hud.style.padding = '12px 16px';
-            hud.style.color = '#00ff00';
+            hud.style.color = '#ffb347';
             hud.style.fontFamily = 'Courier New, monospace';
             hud.style.fontSize = '16px';
             hud.style.fontWeight = 'bold';
@@ -6758,57 +8632,32 @@ class Game3D {
     }
     
     updateCrosshairUI() {
-        // Create a brand new crosshair system
-        this.createNewCrosshair();
-    }
-    
-    createNewCrosshair() {
-        // Remove any existing crosshair elements
-        const existingCrosshairs = document.querySelectorAll('#crosshair, #new-crosshair');
-        existingCrosshairs.forEach(el => el.remove());
-        
-        // Only show crosshair in FPV play mode AND when actually playing
-        const shouldShow = (this.gameMode === 'play' && this.viewMode === 'fpv' && this.gameState === 'playing');
-        console.log(`New Crosshair: gameMode=${this.gameMode}, viewMode=${this.viewMode}, gameState=${this.gameState}, shouldShow=${shouldShow}`);
-        
-        if (shouldShow) {
-            // Create completely new crosshair element
-            const newCrosshair = document.createElement('div');
-            newCrosshair.id = 'new-crosshair';
-            newCrosshair.style.cssText = `
-                position: fixed !important;
-                top: 50% !important;
-                left: 50% !important;
-                width: 16px !important;
-                height: 16px !important;
-                transform: translate(-50%, -50%) !important;
-                pointer-events: none !important;
-                z-index: 100 !important;
-                display: block !important;
-                background: transparent !important;
-                border: none !important;
+        // Only show crosshair in FPV play mode
+        const shouldShow = (this.gameMode === 'play' && this.viewMode === 'fpv');
+        const htmlCrosshair = document.getElementById('crosshair');
+
+        if (!htmlCrosshair) return;
+
+        let dot = htmlCrosshair.querySelector('div');
+        if (!dot) {
+            htmlCrosshair.innerHTML = `
+                <div style="position: absolute; top: 50%; left: 50%; width: 8px; height: 8px; background: #ffb347; box-shadow: 0 0 10px #ffb347, 0 0 20px #ffb347; border-radius: 50%; transform: translate(-50%, -50%);"></div>
             `;
-            
-            // Add inner dot - clean green crosshair
-            const innerDot = document.createElement('div');
-            innerDot.style.cssText = `
-                position: absolute !important;
-                top: 50% !important;
-                left: 50% !important;
-                width: 4px !important;
-                height: 4px !important;
-                background: #00ff00 !important;
-                border-radius: 50% !important;
-                transform: translate(-50%, -50%) !important;
-                box-shadow: 0 0 8px #00ff00, 0 0 16px #00ff00 !important;
-            `;
-            
-            newCrosshair.appendChild(innerDot);
-            document.body.appendChild(newCrosshair);
-            
-            console.log('✅ New crosshair created and added to body');
-        } else {
-            console.log('❌ Not showing crosshair - conditions not met');
+            dot = htmlCrosshair.querySelector('div');
+        }
+
+        htmlCrosshair.style.display = shouldShow ? 'block' : 'none';
+
+        if (shouldShow && dot && this.camera) {
+            // Cheap aim-on-enemy test: cast a ray from camera center.
+            const rc = this._cxRaycaster || (this._cxRaycaster = new THREE.Raycaster());
+            rc.setFromCamera({ x: 0, y: 0 }, this.camera);
+            const onEnemy = this.playMode && this.playMode.enemies
+                ? rc.intersectObjects(this.playMode.enemies, true).length > 0
+                : false;
+            const color = onEnemy ? '#ff4444' : '#ffb347';
+            dot.style.background = color;
+            dot.style.boxShadow = `0 0 10px ${color}, 0 0 20px ${color}`;
         }
     }
     
@@ -6821,7 +8670,7 @@ class Game3D {
         // Create outer ring
         const outerGeometry = new THREE.RingGeometry(1.2, 1.5, 32);
         const outerMaterial = new THREE.MeshBasicMaterial({
-            color: 0x00ff00,
+            color: 0xffb347,
             transparent: true,
             opacity: 0.3,
             side: THREE.DoubleSide
@@ -6831,7 +8680,7 @@ class Game3D {
         // Create inner ring
         const innerGeometry = new THREE.RingGeometry(0.8, 1.0, 32);
         const innerMaterial = new THREE.MeshBasicMaterial({
-            color: 0x00ff00,
+            color: 0xffb347,
             transparent: true,
             opacity: 0.6,
             side: THREE.DoubleSide
@@ -6841,7 +8690,7 @@ class Game3D {
         // Create center dot
         const dotGeometry = new THREE.CircleGeometry(0.3, 16);
         const dotMaterial = new THREE.MeshBasicMaterial({
-            color: 0x00ff00,
+            color: 0xffb347,
             transparent: true,
             opacity: 0.8,
             side: THREE.DoubleSide
@@ -6864,14 +8713,12 @@ class Game3D {
         this.groundTargetIndicator.visible = false;
         
         this.scene.add(this.groundTargetIndicator);
-        console.log('Ground target indicator created');
     }
     
     updateGroundTargetIndicator() {
         // Only show in isometric, birds-eye, and ghost play modes
         const shouldShow = (this.gameMode === 'play' && (this.viewMode === 'iso' || this.viewMode === 'birds-eye' || this.viewMode === 'ghost'));
         
-        console.log(`Ground Target: gameMode=${this.gameMode}, viewMode=${this.viewMode}, shouldShow=${shouldShow}`);
         
         if (!this.groundTargetIndicator) {
             this.createGroundTargetIndicator();
@@ -6884,7 +8731,6 @@ class Game3D {
             mouse.x = this.playMode.mouseNDC.x;
             mouse.y = this.playMode.mouseNDC.y;
             
-            console.log(`Mouse position: NDC x=${mouse.x}, y=${mouse.y}`);
             
             const raycaster = new THREE.Raycaster();
             raycaster.setFromCamera(mouse, this.camera);
@@ -6894,20 +8740,16 @@ class Game3D {
             const intersectionPoint = new THREE.Vector3();
             const intersects = raycaster.ray.intersectPlane(groundPlane, intersectionPoint);
             
-            console.log(`Ray intersection: ${intersects}, point: x=${intersectionPoint.x}, y=${intersectionPoint.y}, z=${intersectionPoint.z}`);
             
             if (intersects) {
                 this.groundTargetIndicator.position.x = intersectionPoint.x;
                 this.groundTargetIndicator.position.z = intersectionPoint.z;
                 this.groundTargetIndicator.visible = true;
-                console.log(`Ground target positioned at: x=${intersectionPoint.x}, z=${intersectionPoint.z}`);
             } else {
                 this.groundTargetIndicator.visible = false;
-                console.log('No ground intersection found');
             }
         } else {
             this.groundTargetIndicator.visible = false;
-            console.log('Ground target hidden - not in isometric mode');
         }
     }
     
@@ -6940,39 +8782,6 @@ class Game3D {
         // Apply movement
         movement.multiplyScalar(moveSpeed);
         this.ghostCamera.position.add(movement);
-        
-        // Mouse look (only when pointer is locked)
-        if (this.isPointerLocked) {
-            // Mouse look is handled in mousemove event
-        }
-    }
-    
-    updateBirdsEyeCamera(deltaTime) {
-        // Bird's eye camera movement controls
-        const speed = this.birdsEyeCamera.speed;
-        const moveSpeed = speed * deltaTime;
-        
-        // For bird's eye view, we want flat movement (no vertical component from WASD)
-        // Only use horizontal movement vectors
-        const forward = new THREE.Vector3(0, 0, -1);
-        const right = new THREE.Vector3(1, 0, 0);
-        
-        // Apply only Y rotation (yaw) to movement vectors for flat movement
-        const yawQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), this.birdsEyeCamera.rotation.y);
-        forward.applyQuaternion(yawQuat);
-        right.applyQuaternion(yawQuat);
-        
-        // Movement input - only horizontal movement
-        const movement = new THREE.Vector3();
-        
-        if (this.keys['KeyW']) movement.add(forward);
-        if (this.keys['KeyS']) movement.sub(forward);
-        if (this.keys['KeyA']) movement.sub(right);
-        if (this.keys['KeyD']) movement.add(right);
-        
-        // Apply movement
-        movement.multiplyScalar(moveSpeed);
-        this.birdsEyeCamera.position.add(movement);
         
         // Mouse look (only when pointer is locked)
         if (this.isPointerLocked) {
@@ -7055,8 +8864,8 @@ class Game3D {
             el.style.transform = 'translateX(-50%)';
             el.style.padding = '6px 12px';
             el.style.background = 'rgba(0,0,0,0.7)';
-            el.style.border = '2px solid #00ff00';
-            el.style.color = '#00ff00';
+            el.style.border = '2px solid #ffb347';
+            el.style.color = '#ffb347';
             el.style.fontFamily = 'Courier New, monospace';
             el.style.fontSize = '14px';
             el.style.zIndex = '2000';
@@ -7072,6 +8881,700 @@ class Game3D {
         el.style.display = 'block';
         clearTimeout(this._msgTimer);
         this._msgTimer = setTimeout(() => { el.style.display = 'none'; }, duration);
+    }
+
+    // ================= ARENA / WAVE MODE =================
+    startArenaMode() {
+        // Tear down current maze + reset world
+        if (this.clearMaze) this.clearMaze();
+        if (this.clearEnemies) this.clearEnemies();
+        this._clearArenaObjects();
+
+        const a = this.arena;
+        a.active = true;
+        a.phase = 'intro';
+        a.introTimer = 0;
+        a.introLastLabel = null;
+        a.wave = 1;
+        a.enemiesSpawnedThisWave = 0;
+        a.enemiesToSpawn = 4 + a.wave * 2;
+        a.spawnTimer = 0;
+        a.spawnInterval = 1.4;
+        a.eruptionTimer = 0;
+        a.waveCompleteTimer = 0;
+        a.boss = null;
+        a.lava.y = a.lava.restY;
+        a.lava.rising = false;
+        a.lava.riseSpeed = 0;
+        a.lava.tickTimer = 0;
+        a.shake.intensity = 0;
+        a.shake.duration = 0;
+        a.shake.elapsed = 0;
+
+        // Build geometry
+        this.buildArena();
+
+        // Reset player loadout
+        this.player.position.set(0, 0, 0);
+        this.player.velocity.set(0, 0, 0);
+        this.player.hp = this.player.maxHp || 100;
+        this.player.invulnerable = false;
+        this.player.invulnerabilityTimer = 0;
+        this.characterRotation = 0;
+        if (this.player.weapons) {
+            this.player.weapons = ['diamondSword', 'gun'];
+            this.player.currentWeaponIndex = 0;
+        }
+        if (this.inventory) this.inventory.ammo = 100;
+        this.score = 0;
+        this.kills = 0;
+
+        // Make sure we're in play mode controls
+        this.gameMode = 'play';
+
+        // The big centered overlay now does the talking — no toast needed here.
+        this.audio && this.audio.play('uiClick');
+    }
+
+    exitArenaMode() {
+        if (!this.arena || !this.arena.active) return;
+        this.arena.active = false;
+        this.arena.phase = 'idle';
+        this._clearArenaObjects();
+        if (this.clearEnemies) this.clearEnemies();
+        if (this.rebuildMaze) this.rebuildMaze();
+    }
+
+    _clearArenaObjects() {
+        const a = this.arena;
+        if (!a) return;
+        if (a.arenaObjects && a.arenaObjects.length) {
+            for (const o of a.arenaObjects) {
+                if (o && o.parent) o.parent.remove(o);
+            }
+        }
+        a.arenaObjects = [];
+        // Strip perimeter walls + pillars from this.walls
+        if ((a.perimeterWalls && a.perimeterWalls.length) || (a.pillars && a.pillars.length)) {
+            const drop = new Set([...(a.perimeterWalls || []), ...(a.pillars || [])]);
+            this.walls = this.walls.filter(w => !drop.has(w));
+        }
+        a.perimeterWalls = [];
+        a.pillars = [];
+        a.decor = [];
+        // Despawn live volcano particles
+        if (a.volcanoParticles && a.volcanoParticles.length) {
+            for (const p of a.volcanoParticles) {
+                if (p && p.parent) p.parent.remove(p);
+            }
+            a.volcanoParticles = [];
+        }
+        a.boss = null;
+        a.volcano = null;
+        a.lava.mesh = null;
+    }
+
+    buildArena() {
+        const a = this.arena;
+        const half = a.arenaHalf;
+
+        // 1. Perimeter walls (collision boundary, cosmetic)
+        const wallThickness = 1.2;
+        const wallHeight = 6;
+        const perimLen = half * 2 + wallThickness * 2;
+        const wallSpecs = [
+            { x: 0, z: -half - wallThickness / 2, sx: perimLen, sz: wallThickness },
+            { x: 0, z:  half + wallThickness / 2, sx: perimLen, sz: wallThickness },
+            { x: -half - wallThickness / 2, z: 0, sx: wallThickness, sz: perimLen },
+            { x:  half + wallThickness / 2, z: 0, sx: wallThickness, sz: perimLen },
+        ];
+        for (const spec of wallSpecs) {
+            let mesh = this.createBrickWallMesh ? this.createBrickWallMesh(spec.sx, wallHeight, spec.sz) : null;
+            if (!mesh) {
+                mesh = new THREE.Mesh(
+                    new THREE.BoxGeometry(spec.sx, wallHeight, spec.sz),
+                    new THREE.MeshLambertMaterial({ color: 0x553322, emissive: 0x110803 })
+                );
+                mesh.castShadow = true;
+                mesh.receiveShadow = true;
+            }
+            mesh.position.set(spec.x, wallHeight / 2, spec.z);
+            this.scene.add(mesh);
+            const entry = {
+                mesh,
+                position: mesh.position,
+                size: { x: spec.sx, y: wallHeight, z: spec.sz }
+            };
+            this.walls.push(entry);
+            a.perimeterWalls.push(entry);
+            a.arenaObjects.push(mesh);
+        }
+
+        // 2. Procedural pixel-block platforms (always within jump distance of each other)
+        const platforms = this._generatePlatformLayout({
+            count: 11,
+            arenaRadius: half - 5,
+            minSeparation: 3.6,
+            maxJumpGap: 5.5,
+        });
+        const blockKeys = ['stone', 'darkBrick', 'wood', 'dirt'];
+        for (let i = 0; i < platforms.length; i++) {
+            const p = platforms[i];
+            const blockKey = blockKeys[i % blockKeys.length];
+            const heightTiles = p.heightTiles;
+            const footTiles = 2; // 2x2 blocks (3 units wide)
+            let group, footprint, height;
+            const built = this._buildBlockPlatform(footTiles, heightTiles, blockKey);
+            if (built) {
+                group = built.group;
+                footprint = built.footprint;
+                height = built.height;
+            } else {
+                // Fallback: stone-grey cylinder if templates haven't loaded yet
+                footprint = 3.0;
+                height = heightTiles * 1.5;
+                group = new THREE.Group();
+                const geo = new THREE.CylinderGeometry(footprint / 2, footprint / 2, height, 16);
+                const mat = new THREE.MeshLambertMaterial({ color: 0x5a4232, emissive: 0x140805 });
+                const m = new THREE.Mesh(geo, mat);
+                m.position.y = height / 2;
+                m.castShadow = true;
+                m.receiveShadow = true;
+                group.add(m);
+            }
+            group.position.set(p.x, 0, p.z);
+            this.scene.add(group);
+            // Collision math uses size.y as the FULL height and treats position.y
+            // as the CENTER. Blocks span world [0, height], so center is height/2.
+            const collisionPos = new THREE.Vector3(p.x, height / 2, p.z);
+            const entry = {
+                mesh: group,
+                position: collisionPos,
+                size: { x: footprint, y: height, z: footprint }
+            };
+            this.walls.push(entry);
+            a.pillars.push(entry);
+            a.arenaObjects.push(group);
+        }
+
+        // 3. Volcano at the back of the arena
+        const volcGroup = new THREE.Group();
+        volcGroup.position.set(0, 0, -half - 8);
+        const baseCone = new THREE.Mesh(
+            new THREE.ConeGeometry(7.5, 13, 18),
+            new THREE.MeshLambertMaterial({ color: 0x3a2418, emissive: 0x110703, flatShading: true })
+        );
+        baseCone.position.y = 6.5;
+        baseCone.castShadow = true;
+        baseCone.receiveShadow = true;
+        volcGroup.add(baseCone);
+        const crater = new THREE.Mesh(
+            new THREE.ConeGeometry(2.5, 1.4, 14),
+            new THREE.MeshBasicMaterial({ color: 0xff5a14 })
+        );
+        crater.position.y = 13.2;
+        crater.rotation.x = Math.PI;
+        volcGroup.add(crater);
+        const volcLight = new THREE.PointLight(0xff6622, 0, 28, 2);
+        volcLight.position.set(0, 13.5, 0);
+        volcGroup.add(volcLight);
+        a.volcano = {
+            group: volcGroup,
+            light: volcLight,
+            craterTop: new THREE.Vector3(0, 13.5, -half - 8)
+        };
+        this.scene.add(volcGroup);
+        a.arenaObjects.push(volcGroup);
+
+        // 4. Lava plane — hidden far below ground initially
+        const lavaGeo = new THREE.PlaneGeometry(half * 2 + 4, half * 2 + 4);
+        const lavaMat = new THREE.MeshBasicMaterial({
+            color: 0xff4411, transparent: true, opacity: 0.92, side: THREE.DoubleSide
+        });
+        const lava = new THREE.Mesh(lavaGeo, lavaMat);
+        lava.rotation.x = -Math.PI / 2;
+        lava.position.set(0, a.lava.restY, 0);
+        this.scene.add(lava);
+        a.lava.mesh = lava;
+        a.lava.y = a.lava.restY;
+        a.arenaObjects.push(lava);
+
+        // 5. Dress the area with trees, animals, rocks, chests
+        this._placeArenaDecor();
+    }
+
+    // Generates a list of platform spots — first one near center, every subsequent
+    // platform is required to be within maxJumpGap of an existing platform so the
+    // player can always hop from one to the next.
+    _generatePlatformLayout({ count, arenaRadius, minSeparation, maxJumpGap }) {
+        const platforms = [];
+        const minSep2 = minSeparation * minSeparation;
+        // Seed platform near center — keep it tall so it's a safe haven
+        platforms.push({ x: (Math.random() - 0.5) * 6, z: (Math.random() - 0.5) * 6, heightTiles: 2 });
+        while (platforms.length < count) {
+            let placed = false;
+            for (let tries = 0; tries < 200 && !placed; tries++) {
+                const parent = platforms[Math.floor(Math.random() * platforms.length)];
+                const ang = Math.random() * Math.PI * 2;
+                const dist = (minSeparation + 0.6) + Math.random() * (maxJumpGap - minSeparation - 0.6);
+                const x = parent.x + Math.cos(ang) * dist;
+                const z = parent.z + Math.sin(ang) * dist;
+                if (Math.hypot(x, z) > arenaRadius) continue;
+                let bad = false;
+                for (const p of platforms) {
+                    const dx = p.x - x, dz = p.z - z;
+                    if (dx*dx + dz*dz < minSep2) { bad = true; break; }
+                }
+                if (bad) continue;
+                // Height tier: mix of 1, 2, 3 blocks (1.5 / 3 / 4.5 units tall)
+                const tierRoll = Math.random();
+                const heightTiles = tierRoll < 0.40 ? 1 : (tierRoll < 0.80 ? 2 : 3);
+                platforms.push({ x, z, heightTiles });
+                placed = true;
+            }
+            if (!placed) break; // arena too crowded — stop early
+        }
+        return platforms;
+    }
+
+    // Scatter trees / animals / rocks / chests / flowers around the arena floor
+    // and outside the perimeter walls. Animals get a soft idle wobble.
+    _placeArenaDecor() {
+        const a = this.arena;
+        const tpls = this._decorTemplates;
+        if (!tpls) return;
+        const half = a.arenaHalf;
+
+        const placeOnce = (key, x, z, opts = {}) => {
+            const src = tpls[key];
+            if (!src) return null;
+            // Skip if it would land on a platform or volcano
+            for (const w of a.pillars) {
+                if (Math.abs(w.position.x - x) < (w.size.x / 2 + 1) &&
+                    Math.abs(w.position.z - z) < (w.size.z / 2 + 1)) return null;
+            }
+            const clone = THREE.SkeletonUtils
+                ? THREE.SkeletonUtils.clone(src)
+                : src.clone(true);
+            // Normalize scale based on assumed ~2 unit native blocks
+            const scale = opts.scale != null ? opts.scale : 1.0;
+            clone.scale.setScalar(scale);
+            clone.position.set(x, opts.y != null ? opts.y : 0, z);
+            clone.rotation.y = Math.random() * Math.PI * 2;
+            clone.traverse((c) => {
+                if (c.isMesh) {
+                    c.castShadow = true;
+                    c.receiveShadow = true;
+                }
+            });
+            this.scene.add(clone);
+            a.decor.push(clone);
+            a.arenaObjects.push(clone);
+            return clone;
+        };
+
+        // --- Outside the perimeter: trees + animals (forest ring) ---
+        const ringMinR = half + 4;
+        const ringMaxR = half + 16;
+        const sampleRing = () => {
+            const ang = Math.random() * Math.PI * 2;
+            const r = ringMinR + Math.random() * (ringMaxR - ringMinR);
+            return { x: Math.cos(ang) * r, z: Math.sin(ang) * r };
+        };
+
+        const treeKeys = ['tree1', 'tree2', 'tree3'];
+        for (let i = 0; i < 28; i++) {
+            const p = sampleRing();
+            const key = treeKeys[Math.floor(Math.random() * treeKeys.length)];
+            placeOnce(key, p.x, p.z, { scale: 1.1 + Math.random() * 0.5 });
+        }
+        // A few animals just outside the wall — wandering peacefully
+        const animalKeys = ['sheep', 'pig', 'chicken', 'cat'];
+        for (let i = 0; i < 8; i++) {
+            const p = sampleRing();
+            const key = animalKeys[Math.floor(Math.random() * animalKeys.length)];
+            const animal = placeOnce(key, p.x, p.z, { scale: 0.9 + Math.random() * 0.3 });
+            if (animal) {
+                animal.userData = animal.userData || {};
+                animal.userData._anim = {
+                    home: new THREE.Vector3(p.x, 0, p.z),
+                    t: Math.random() * Math.PI * 2,
+                    wobble: 0.4 + Math.random() * 0.3,
+                };
+            }
+        }
+
+        // --- Inside the arena: sparse decor near the edges so combat space stays clear ---
+        const sampleInner = () => {
+            // Donut between r=half-9 and r=half-2
+            const ang = Math.random() * Math.PI * 2;
+            const r = (half - 9) + Math.random() * 7;
+            return { x: Math.cos(ang) * r, z: Math.sin(ang) * r };
+        };
+
+        // Dead trees inside (matches volcanic theme)
+        for (let i = 0; i < 5; i++) {
+            const p = sampleInner();
+            const key = Math.random() < 0.5 ? 'deadTree1' : 'deadTree2';
+            placeOnce(key, p.x, p.z, { scale: 0.9 + Math.random() * 0.4 });
+        }
+        // Rocks
+        for (let i = 0; i < 6; i++) {
+            const p = sampleInner();
+            const key = Math.random() < 0.5 ? 'rock1' : 'rock2';
+            placeOnce(key, p.x, p.z, { scale: 0.8 + Math.random() * 0.6 });
+        }
+        // Bushes + flowers + grass tufts
+        const flora = ['bush', 'flowers1', 'flowers2', 'grassBig', 'mushroom'];
+        for (let i = 0; i < 14; i++) {
+            const p = sampleInner();
+            const key = flora[Math.floor(Math.random() * flora.length)];
+            placeOnce(key, p.x, p.z, { scale: 0.8 + Math.random() * 0.5 });
+        }
+        // Chests / crates — possible loot vibes; cosmetic only
+        for (let i = 0; i < 4; i++) {
+            const p = sampleInner();
+            const key = Math.random() < 0.6 ? 'chest' : 'crate';
+            placeOnce(key, p.x, p.z, { scale: 0.9 + Math.random() * 0.3 });
+        }
+    }
+
+    spawnArenaEnemy() {
+        if (!this.arena.active) return;
+        if (this.playMode.enemies.length >= this.maxEnemies) return;
+        const half = this.arena.arenaHalf;
+        const ang = Math.random() * Math.PI * 2;
+        const r = half - 2.5;
+        const x = Math.cos(ang) * r;
+        const z = Math.sin(ang) * r;
+        const m = this.createEnemyAt(x, z);
+        m.userData.speed = 1.6 + Math.random() * 1.0;
+        // Bias direction toward center on spawn
+        const toC = new THREE.Vector2(-x, -z); if (toC.lengthSq() > 0) toC.normalize();
+        m.userData.dir = toC;
+        this.playMode.enemiesGroup.add(m);
+        this.playMode.enemies.push(m);
+        this.arena.enemiesSpawnedThisWave++;
+    }
+
+    spawnBoss() {
+        // Boss rises from lava roughly in front of the volcano
+        const bossZ = -Math.min(12, this.arena.arenaHalf - 8);
+        const m = this.createEnemyAt(0, bossZ);
+        m.scale.setScalar(2.4);
+        m.traverse((child) => {
+            if (child.isMesh && child.material && child.material.color) {
+                child.material = child.material.clone();
+                child.material.color.lerp(new THREE.Color(0xaa1818), 0.65);
+                if (child.material.emissive) {
+                    child.material.emissive = new THREE.Color(0x441010);
+                }
+            }
+        });
+        m.userData.hp = 400;
+        m.userData.hpMax = 400;
+        m.userData.speed = 2.4;
+        m.userData.isBoss = true;
+        m.userData.bodyColor = 0xaa1818;
+        m.userData.hitRadius = (m.userData.hitRadius || 0.8) * 2.2;
+        m.userData.hitHeight = (m.userData.hitHeight || 1.8) * 2.2;
+        if (m.userData.hpBar) {
+            m.userData.hpBar.position.y = (m.userData.hitHeight || 4) + 0.4;
+        }
+        // Boss emerges from lava center
+        m.position.y = -3;
+        m.userData.bossRise = 1.2;
+        this.playMode.enemiesGroup.add(m);
+        this.playMode.enemies.push(m);
+        this.arena.boss = m;
+        this.audio && this.audio.play('enemyDeath');
+        this.showMessage('⚠ BOSS APPROACHES', 1800);
+    }
+
+    triggerEruption() {
+        const a = this.arena;
+        a.phase = 'eruption';
+        a.eruptionTimer = 0;
+        a.shake.intensity = 0.6;
+        a.shake.duration = a.eruptionDuration;
+        a.shake.elapsed = 0;
+        a.lava.rising = true;
+        a.lava.targetY = a.lava.peakY;
+        if (a.volcano && a.volcano.light) {
+            a.volcano.light.intensity = 4.5;
+        }
+        // Emit an initial burst of particles
+        for (let i = 0; i < 24; i++) this._emitVolcanoParticle();
+        this.audio && this.audio.play('gameOver');
+        this.showMessage('🌋 THE GROUND SHAKES — VOLCANO ERUPTS!', 2200);
+    }
+
+    endEruption() {
+        const a = this.arena;
+        a.phase = 'boss-fight';
+        // Lava keeps creeping up during the boss fight — by ~0.18 u/s it will
+        // submerge the shortest platforms within ~10s and tallest within ~30s.
+        a.lava.riseSpeed = 0.18;
+        if (a.volcano && a.volcano.light) {
+            a.volcano.light.intensity = 2.5;
+        }
+        this.spawnBoss();
+    }
+
+    onArenaBossKilled() {
+        const a = this.arena;
+        if (!a || !a.active) return;
+        a.phase = 'wave-complete';
+        a.waveCompleteTimer = 0;
+        a.lava.rising = false;
+        a.lava.riseSpeed = -40.0; // fast recede back below ground
+        if (a.volcano && a.volcano.light) {
+            a.volcano.light.intensity = 0;
+        }
+        // Drop a couple of pickups for the next wave
+        if (this.spawnPickup) {
+            this.spawnPickup(this.player.position.x + 1.2, this.player.position.z + 0.4);
+            this.spawnPickup(this.player.position.x - 1.2, this.player.position.z - 0.4);
+        }
+        this.showMessage(`Wave ${a.wave} cleared!`, 1800);
+        this.audio && this.audio.play('levelComplete');
+    }
+
+    startNextWave() {
+        const a = this.arena;
+        a.wave++;
+        a.phase = 'wave-active';
+        a.enemiesSpawnedThisWave = 0;
+        a.enemiesToSpawn = 4 + a.wave * 2;
+        a.spawnTimer = 0;
+        a.boss = null;
+        a.spawnInterval = Math.max(0.55, 1.4 - a.wave * 0.06);
+        this.showMessage(`Wave ${a.wave}`, 1500);
+    }
+
+    updateArena(deltaTime) {
+        if (!this.arena || !this.arena.active) return;
+        this._updateVolcanoParticles(deltaTime);
+        this._updateCameraShake(deltaTime);
+        this._updateLava(deltaTime);
+        this._updateLavaDamage(deltaTime);
+        this._updateBossRise(deltaTime);
+        this._updateArenaDecor(deltaTime);
+
+        const a = this.arena;
+        switch (a.phase) {
+            case 'intro': {
+                a.introTimer += deltaTime;
+                // Player can't be hurt during the countdown
+                this.player.invulnerable = true;
+                this.player.invulnerabilityTimer = Math.max(this.player.invulnerabilityTimer, 0.1);
+                // Beep on each tick boundary
+                const ticks = [1.0, 2.0, 3.0, 4.0];
+                const prevTick = ticks.findIndex(t => a.introTimer - deltaTime < t && a.introTimer >= t);
+                if (prevTick >= 0) {
+                    this.audio && this.audio.play(prevTick === 3 ? 'pickupFlag' : 'uiHover');
+                }
+                if (a.introTimer >= a.introDuration) {
+                    a.phase = 'wave-active';
+                    a.spawnTimer = a.spawnInterval; // spawn first enemy promptly
+                    this.player.invulnerable = false;
+                    this.player.invulnerabilityTimer = 0;
+                }
+                return; // skip the wave loop while the countdown plays
+            }
+            case 'wave-active': {
+                if (a.enemiesSpawnedThisWave < a.enemiesToSpawn) {
+                    a.spawnTimer += deltaTime;
+                    if (a.spawnTimer >= a.spawnInterval) {
+                        a.spawnTimer = 0;
+                        this.spawnArenaEnemy();
+                    }
+                } else if (this.playMode.enemies.length === 0) {
+                    this.triggerEruption();
+                }
+                break;
+            }
+            case 'eruption': {
+                a.eruptionTimer += deltaTime;
+                // Continuous particle stream during eruption
+                if (Math.random() < 0.7) this._emitVolcanoParticle();
+                if (a.eruptionTimer >= a.eruptionDuration) {
+                    this.endEruption();
+                }
+                break;
+            }
+            case 'boss-fight': {
+                if (Math.random() < 0.08) this._emitVolcanoParticle();
+                // Boss death detection is done in killEnemy → onArenaBossKilled
+                break;
+            }
+            case 'wave-complete': {
+                a.waveCompleteTimer += deltaTime;
+                if (a.lava.y <= a.lava.restY + 0.05 && a.waveCompleteTimer > 2.0) {
+                    this.startNextWave();
+                }
+                break;
+            }
+        }
+    }
+
+    _emitVolcanoParticle() {
+        const v = this.arena.volcano;
+        if (!v) return;
+        const top = v.craterTop;
+        const geo = new THREE.SphereGeometry(0.28 + Math.random() * 0.28, 6, 6);
+        const palette = [0xff8822, 0xff5510, 0xffaa33, 0xff3300, 0xffd24a];
+        const c = palette[Math.floor(Math.random() * palette.length)];
+        const mat = new THREE.MeshBasicMaterial({ color: c, transparent: true });
+        const m = new THREE.Mesh(geo, mat);
+        m.position.copy(top);
+        const ang = Math.random() * Math.PI * 2;
+        const speed = 3.5 + Math.random() * 6;
+        const upSpeed = 8 + Math.random() * 7;
+        m.userData = {
+            v: new THREE.Vector3(Math.cos(ang) * speed, upSpeed, Math.sin(ang) * speed),
+            t: 0, ttl: 1.3 + Math.random() * 0.9
+        };
+        this.scene.add(m);
+        this.arena.volcanoParticles.push(m);
+    }
+
+    _updateVolcanoParticles(deltaTime) {
+        const list = this.arena.volcanoParticles;
+        if (!list || !list.length) return;
+        const g = -9.8;
+        for (let i = list.length - 1; i >= 0; i--) {
+            const p = list[i];
+            const ud = p.userData;
+            ud.t += deltaTime;
+            if (ud.t >= ud.ttl) {
+                this.scene.remove(p);
+                list.splice(i, 1);
+                continue;
+            }
+            ud.v.y += g * deltaTime;
+            p.position.x += ud.v.x * deltaTime;
+            p.position.y += ud.v.y * deltaTime;
+            p.position.z += ud.v.z * deltaTime;
+            if (p.material) p.material.opacity = Math.max(0, 1 - ud.t / ud.ttl);
+        }
+    }
+
+    _updateCameraShake(deltaTime) {
+        const s = this.arena.shake;
+        if (!s || s.duration <= 0 || s.elapsed >= s.duration) return;
+        s.elapsed += deltaTime;
+        const k = Math.max(0, 1 - (s.elapsed / s.duration));
+        const mag = s.intensity * k;
+        if (this.camera) {
+            this.camera.position.x += (Math.random() - 0.5) * mag * 2;
+            this.camera.position.y += (Math.random() - 0.5) * mag * 1.0;
+            this.camera.position.z += (Math.random() - 0.5) * mag * 2;
+        }
+    }
+
+    _updateLava(deltaTime) {
+        const lava = this.arena.lava;
+        if (!lava || !lava.mesh) return;
+        const a = this.arena;
+        if (a.phase === 'eruption') {
+            const k = Math.min(1, a.eruptionTimer / a.eruptionDuration);
+            const eased = 1 - Math.pow(1 - k, 2);
+            lava.y = lava.restY + (lava.peakY - lava.restY) * eased;
+        } else if (a.phase === 'boss-fight') {
+            lava.y += lava.riseSpeed * deltaTime;
+            lava.y = Math.min(lava.y, lava.bossCap);
+        } else if (a.phase === 'wave-complete') {
+            lava.y += lava.riseSpeed * deltaTime;
+            if (lava.y <= lava.restY) {
+                lava.y = lava.restY;
+                lava.riseSpeed = 0;
+            }
+        }
+        lava.mesh.position.y = lava.y;
+        if (lava.mesh.material) {
+            this._lavaPulseT = (this._lavaPulseT || 0) + deltaTime;
+            lava.mesh.material.opacity = 0.85 + Math.sin(this._lavaPulseT * 4) * 0.08;
+        }
+    }
+
+    _updateLavaDamage(deltaTime) {
+        const lava = this.arena.lava;
+        if (!lava || !lava.mesh) return;
+        if (lava.y < lava.restY + 0.25) return;
+        // Player's feet below lava surface => damage
+        if (this.player.position.y < lava.y + 0.05) {
+            lava.tickTimer = (lava.tickTimer || 0) + deltaTime;
+            if (lava.tickTimer >= 0.18) {
+                lava.tickTimer = 0;
+                // Bypass invulnerability for lava (continuous hazard)
+                this.player.invulnerable = false;
+                this.player.invulnerabilityTimer = 0;
+                this.damagePlayer(8);
+                this.player.invulnerable = false;
+                this.player.invulnerabilityTimer = 0;
+            }
+        }
+    }
+
+    _updateBossRise(deltaTime) {
+        const b = this.arena.boss;
+        if (!b || !b.userData) return;
+        if (b.userData.bossRise && b.userData.bossRise > 0) {
+            b.userData.bossRise -= deltaTime;
+            const k = Math.max(0, b.userData.bossRise / 1.2);
+            b.position.y = -3 * k;
+            if (b.userData.bossRise <= 0) {
+                b.position.y = 0;
+                b.userData.bossRise = 0;
+            }
+        }
+    }
+
+    _updateArenaDecor(deltaTime) {
+        // Subtle idle wobble + bobbing on animals so the scene feels alive.
+        const list = this.arena.decor;
+        if (!list || !list.length) return;
+        for (const o of list) {
+            const ud = o.userData && o.userData._anim;
+            if (!ud) continue;
+            ud.t += deltaTime * (1.5 + ud.wobble);
+            o.rotation.y += Math.sin(ud.t * 0.5) * deltaTime * 0.3;
+            o.position.y = ud.home.y + Math.abs(Math.sin(ud.t)) * 0.08;
+        }
+    }
+
+    _updateArenaCountdownUI() {
+        const el = document.getElementById('arena-countdown');
+        if (!el) return;
+        const a = this.arena;
+        if (!a || !a.active || a.phase !== 'intro') {
+            if (el.style.display !== 'none') el.style.display = 'none';
+            a && (a.introLastLabel = null);
+            return;
+        }
+        el.style.display = 'flex';
+        const t = a.introTimer;
+        let label, isGo = false, sub = '';
+        if (t < 1.0)        { label = ''; sub = `Wave ${a.wave} — get ready`; }
+        else if (t < 2.0)   { label = '3'; }
+        else if (t < 3.0)   { label = '2'; }
+        else if (t < 4.0)   { label = '1'; }
+        else if (t < a.introDuration) { label = 'GO!'; isGo = true; }
+        else { label = ''; }
+
+        const bigEl = el.querySelector('.ac-big');
+        const subEl = el.querySelector('.ac-sub');
+        if (bigEl && a.introLastLabel !== label) {
+            bigEl.textContent = label;
+            bigEl.classList.toggle('go', isGo);
+            // Force animation restart
+            bigEl.style.animation = 'none';
+            void bigEl.offsetWidth;
+            bigEl.style.animation = '';
+            a.introLastLabel = label;
+        }
+        if (subEl) subEl.textContent = sub;
     }
 
     updateFacingIndicator() {
@@ -7101,314 +9604,6 @@ class Game3D {
             }
         }
     }
-    
-    // Game state management methods
-    showOpeningScreen() {
-        this.gameState = 'menu';
-        this.hideAllScreens();
-        const openingScreen = document.getElementById('opening-screen');
-        if (openingScreen) {
-            openingScreen.style.display = 'flex';
-        }
-        // Ensure cursor is always visible on welcome screen
-        document.body.style.cursor = 'default';
-        document.body.style.pointerEvents = 'auto';
-        // Exit pointer lock if active
-        if (document.pointerLockElement) {
-            document.exitPointerLock();
-        }
-        
-        // Force cursor visibility with a slight delay to ensure it takes effect
-        setTimeout(() => {
-            document.body.style.cursor = 'default';
-        }, 100);
-    }
-    
-    startGame() {
-        console.log('Starting new game from opening screen');
-        this.gameState = 'playing';
-        this.currentLevel = 1;
-        this.playerLives = 3;
-        this.totalScore = 0;
-        this.hideAllScreens();
-        console.log(`Starting Level ${this.currentLevel}`);
-        this.startLevel(this.currentLevel);
-    }
-    
-    startLevel(level) {
-        console.log(`startLevel called with level: ${level}`);
-        this.currentLevel = level;
-        this.levelStartTime = Date.now();
-        this.gameState = 'playing';
-        console.log(`Game state set to: ${this.gameState}, Current level: ${this.currentLevel}`);
-        
-        // Set maze difficulty based on level (1-10)
-        this.mazeDifficulty = Math.min(level, 10);
-        // Create the maze (this sets up levelStartWorld and levelEndWorld)
-        this.createLabyrinth();
-        
-        // Set up play mode
-        this.setGameMode('play');
-        this.setViewMode('fpv');
-        
-        // Reset player (but don't reset position yet)
-        if (this.player) {
-            this.player.hp = this.player.maxHp;
-            this.player.velocity.set(0, 0, 0);
-            this.player.invulnerable = false;
-        }
-        
-        // Reset maze timer (keep best time across levels)
-        const currentBestTime = this.mazeTimer.bestTime;
-        this.resetMazeTimer();
-        this.mazeTimer.bestTime = currentBestTime; // Preserve best time
-        
-        // Reset level statistics
-        this.levelStats = {
-            enemiesNeutralized: 0,
-            flagsUsed: 0
-        };
-        
-        // Position player outside maze entry, facing the green start marker
-        if (this.levelStartWorld) {
-            console.log(`Spawning player outside maze entry:`, this.levelStartWorld);
-            
-            // Calculate direction from entry to exit to determine which way is "into" the maze
-            let directionIntoMaze = new THREE.Vector3(1, 0, 0); // Default to positive X direction
-            if (this.levelEndWorld) {
-                directionIntoMaze = new THREE.Vector3(
-                    this.levelEndWorld.x - this.levelStartWorld.x,
-                    0,
-                    this.levelEndWorld.z - this.levelStartWorld.z
-                ).normalize();
-            }
-            
-            // Spawn player outside the maze entry (one cell size away from entry point)
-            const cellSize = 3; // This should match the cellSize used in createLabyrinth
-            const spawnOffset = directionIntoMaze.clone().multiplyScalar(-cellSize);
-            const spawnPosition = this.levelStartWorld.clone().add(spawnOffset);
-            
-            this.player.position.set(spawnPosition.x, 0, spawnPosition.z);
-            
-            // Face toward the green start marker (entry point)
-            const directionToStart = new THREE.Vector3(
-                this.levelStartWorld.x - spawnPosition.x,
-                0,
-                this.levelStartWorld.z - spawnPosition.z
-            ).normalize();
-            this.characterRotation = Math.atan2(directionToStart.x, directionToStart.z);
-            
-            console.log(`Player spawned outside maze at:`, spawnPosition);
-            console.log(`Player facing green start marker at:`, this.levelStartWorld);
-        } else {
-            console.log(`No entry point found, spawning at center`);
-            // Fallback to center if no entry point found
-            this.player.position.set(0, 0, 0);
-        }
-        
-        // Show level UI
-        this.updateLevelUI();
-        
-        console.log(`Starting Level ${level} with difficulty ${this.mazeDifficulty}`);
-    }
-    
-    completeLevel() {
-        this.gameState = 'levelComplete';
-        this.levelCompleteTime = Date.now();
-        
-        // Calculate detailed score breakdown
-        const mazeTime = this.mazeTimer.hasFinished ? this.mazeTimer.currentTime : 
-                        this.mazeTimer.isActive ? (Date.now() - this.mazeTimer.startTime) / 1000 : 
-                        (this.levelCompleteTime - this.levelStartTime) / 1000;
-        const enemiesKilled = this.levelStats ? this.levelStats.enemiesNeutralized : 0;
-        const flagsUsed = this.levelStats ? this.levelStats.flagsUsed : 0;
-        
-        // Enhanced scoring system
-        const baseScore = 1000;
-        const timeBonus = Math.max(0, (120 - mazeTime) * 50); // 50 points per second under 2 minutes
-        const enemyBonus = enemiesKilled * 50;
-        const flagPenalty = flagsUsed * 25;
-        const levelScore = Math.round(Math.max(0, baseScore + timeBonus + enemyBonus - flagPenalty));
-        
-        // Store score breakdown for display
-        this.lastLevelStats = {
-            mazeTime: mazeTime,
-            baseScore: baseScore,
-            timeBonus: timeBonus,
-            enemyBonus: enemyBonus,
-            flagPenalty: flagPenalty,
-            levelScore: levelScore,
-            enemiesKilled: enemiesKilled,
-            flagsUsed: flagsUsed
-        };
-        
-        this.totalScore = Math.round(this.totalScore + levelScore);
-        
-        // Show level complete screen
-        this.showLevelCompleteScreen();
-        
-        console.log(`Level ${this.currentLevel} completed! Time: ${mazeTime.toFixed(1)}s, Score: ${levelScore}`);
-        console.log(`Breakdown - Base: ${baseScore}, Time: +${timeBonus}, Enemies: +${enemyBonus}, Flags: -${flagPenalty}`);
-    }
-    
-    nextLevel() {
-        if (this.currentLevel < this.maxLevel) {
-            this.currentLevel++;
-            this.startLevel(this.currentLevel);
-        } else {
-            // Game completed!
-            this.showGameCompleteScreen();
-        }
-    }
-    
-    gameOver() {
-        this.gameState = 'gameOver';
-        this.playerLives--;
-        
-        if (this.playerLives > 0) {
-            // Restart current level
-            this.showGameOverScreen();
-        } else {
-            // Game over completely
-            this.showGameOverScreen(true);
-        }
-    }
-    
-    resetPlayer() {
-        if (this.player) {
-            this.player.hp = this.player.maxHp;
-            this.player.position.set(0, 0, 0);
-            this.player.velocity.set(0, 0, 0);
-            this.player.invulnerable = false;
-        }
-    }
-    
-    // Screen management
-    hideAllScreens() {
-        const screens = ['opening-screen', 'level-complete-screen', 'game-over-screen'];
-        screens.forEach(id => {
-            const screen = document.getElementById(id);
-            if (screen) screen.style.display = 'none';
-        });
-    }
-    
-    showLevelCompleteScreen() {
-        this.hideAllScreens();
-        const screen = document.getElementById('level-complete-screen');
-        const text = document.getElementById('level-complete-text');
-        
-        // Ensure cursor is always visible on complete screen
-        document.body.style.cursor = 'default';
-        document.body.style.pointerEvents = 'auto';
-        // Exit pointer lock if active
-        if (document.pointerLockElement) {
-            document.exitPointerLock();
-        }
-        
-        if (screen && text) {
-            const stats = this.lastLevelStats || {};
-            const mazeTime = stats.mazeTime || 0;
-            const levelScore = stats.levelScore || 0;
-            
-            if (this.currentLevel >= this.maxLevel) {
-                text.innerHTML = `
-                    <div style="font-size: 24px; margin-bottom: 20px; color: #00ff00;">
-                        🏆 CONGRATULATIONS!
-                    </div>
-                    <div style="margin-bottom: 15px;">All ${this.maxLevel} levels completed!</div>
-                    <div style="margin-bottom: 20px; font-size: 18px;">Final Score: ${this.totalScore}</div>
-                    <div style="font-size: 14px; opacity: 0.8;">
-                        Final Level Time: ${mazeTime.toFixed(0)}s
-                    </div>
-                `;
-                const nextBtn = document.getElementById('next-level-btn');
-                if (nextBtn) nextBtn.textContent = 'PLAY AGAIN';
-            } else {
-                text.innerHTML = `
-                    <div style="font-size: 22px; margin-bottom: 20px; color: #00ff00;">
-                        Level ${this.currentLevel} Complete!
-                    </div>
-                    <div style="font-size: 20px; margin-bottom: 20px;">
-                        Time: ${mazeTime.toFixed(0)}s
-                    </div>
-                    <div style="font-size: 16px;">
-                        Total Score: ${this.totalScore}
-                    </div>
-                `;
-            }
-            screen.style.display = 'flex';
-        }
-    }
-    
-    showGameOverScreen(isFinal = false) {
-        this.hideAllScreens();
-        const screen = document.getElementById('game-over-screen');
-        const text = document.getElementById('game-over-text');
-        
-        // Ensure cursor is always visible on game over screen
-        document.body.style.cursor = 'default';
-        document.body.style.pointerEvents = 'auto';
-        // Exit pointer lock if active
-        if (document.pointerLockElement) {
-            document.exitPointerLock();
-        }
-        
-        if (screen && text) {
-            if (isFinal) {
-                text.textContent = `Final Score: ${this.totalScore} | Reached Level ${this.currentLevel}`;
-            } else {
-                text.textContent = `Lives: ${this.playerLives} | Level ${this.currentLevel}`;
-            }
-            screen.style.display = 'flex';
-        }
-    }
-    
-    showGameCompleteScreen() {
-        this.showLevelCompleteScreen();
-    }
-    
-    updateLevelUI() {
-        // Create or update level display
-        let levelUI = document.getElementById('level-ui');
-        if (!levelUI) {
-            levelUI = document.createElement('div');
-            levelUI.id = 'level-ui';
-            levelUI.style.position = 'absolute';
-            levelUI.style.top = '20px';
-            levelUI.style.right = '20px';
-            levelUI.style.background = 'rgba(0,0,0,0.8)';
-            levelUI.style.border = '2px solid #00ff00';
-            levelUI.style.borderRadius = '8px';
-            levelUI.style.padding = '10px 15px';
-            levelUI.style.color = '#00ff00';
-            levelUI.style.fontFamily = 'Courier New, monospace';
-            levelUI.style.fontSize = '14px';
-            levelUI.style.fontWeight = 'bold';
-            levelUI.style.zIndex = '1000';
-            document.body.appendChild(levelUI);
-        }
-        
-        levelUI.innerHTML = `
-            <div>Level: ${this.currentLevel}/${this.maxLevel}</div>
-            <div>Lives: ${this.playerLives}</div>
-            <div>Score: ${this.totalScore}</div>
-        `;
-    }
-    
-    checkLevelCompletion() {
-        // Only check in play mode
-        if (this.gameState !== 'playing' || this.gameMode !== 'play') {
-            return;
-        }
-        
-        // Check if player has reached the exit
-        if (this.levelEndWorld && this.player) {
-            const distance = this.player.position.distanceTo(this.levelEndWorld);
-            if (distance < 2.0) { // Within 2 units of exit
-                this.completeLevel();
-            }
-        }
-    }
 }
 
 // Start the game
@@ -7421,12 +9616,22 @@ window.addEventListener('load', () => {
     
     // Setup modal event listeners
     game.setupModalListeners();
-    
-    // Setup screen button event listeners
-    setupScreenButtons(game);
+    // Render character thumbnails for the settings picker
+    game.generateCharacterPreviews();
     // Using custom in-code lion archer model (no external GLTF)
 
-    // Legacy crosshair code removed - now using new crosshair system
+    // Ensure crosshair element exists
+    const crosshairCheck = document.getElementById('crosshair');
+    if (!crosshairCheck) {
+        const crosshair = document.createElement('div');
+        crosshair.id = 'crosshair';
+        crosshair.style.cssText = 'position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 18px; height: 18px; pointer-events: none; z-index: 999999; display: none;';
+        crosshair.innerHTML = `
+            <div style="position: absolute; top: 50%; left: 50%; width: 8px; height: 8px; background: #ffb347; box-shadow: 0 0 10px #ffb347, 0 0 20px #ffb347; border-radius: 50%; transform: translate(-50%, -50%);"></div>
+        `;
+        document.body.appendChild(crosshair);
+    } else {
+    }
 
     // Global inventory hotkeys
     document.addEventListener('keydown', (event) => {
@@ -7458,59 +9663,3 @@ window.addEventListener('load', () => {
         }
     });
 });
-
-// Setup screen button event listeners
-function setupScreenButtons(game) {
-    // Start game button
-    const startBtn = document.getElementById('start-game-btn');
-    if (startBtn) {
-        startBtn.addEventListener('click', () => {
-            game.startGame();
-        });
-    }
-    
-    // Next level button
-    const nextLevelBtn = document.getElementById('next-level-btn');
-    if (nextLevelBtn) {
-        nextLevelBtn.addEventListener('click', () => {
-            if (game.currentLevel < game.maxLevel) {
-                game.nextLevel();
-            } else {
-                // Play again
-                game.startGame();
-            }
-        });
-    }
-    
-    // Retry level button
-    const retryLevelBtn = document.getElementById('retry-level-btn');
-    if (retryLevelBtn) {
-        retryLevelBtn.addEventListener('click', () => {
-            game.startLevel(game.currentLevel);
-        });
-    }
-    
-    // Main menu buttons
-    const mainMenuBtns = document.querySelectorAll('#main-menu-btn, #game-over-menu-btn');
-    mainMenuBtns.forEach(btn => {
-        btn.addEventListener('click', () => {
-            game.gameState = 'menu';
-            game.hideAllScreens();
-            document.getElementById('opening-screen').style.display = 'flex';
-            // Ensure cursor is visible on start screen
-            document.body.style.cursor = 'default';
-            // Exit pointer lock if active
-            if (document.pointerLockElement) {
-                document.exitPointerLock();
-            }
-        });
-    });
-    
-    // Restart game button
-    const restartBtn = document.getElementById('restart-game-btn');
-    if (restartBtn) {
-        restartBtn.addEventListener('click', () => {
-            game.startLevel(game.currentLevel);
-        });
-    }
-}

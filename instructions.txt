@@ -22,4 +22,3 @@ Features (Fayek)
 - enemies bliver gradvist flere og stærkere
 - welcome + loading screen
 - gå, skyde, blive ramt, starte, slutte, samle ting op, stille flag, samle flag op
-- gemme labyrinter
