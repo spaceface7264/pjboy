@@ -1523,6 +1523,32 @@ body.qb-dragging #inventory-grid-ui::after {
     box-shadow: 0 0 14px rgba(255,106,42,0.6);
 }
 
+/* Open World button — purple/cyan portal vibe */
+.mode-btn.mode-btn-openworld {
+    background: linear-gradient(135deg, rgba(40,10,80,0.92), rgba(15,5,40,0.95));
+    border-color: #b6a4ff;
+    color: #e6dcff;
+    text-shadow: 0 0 6px rgba(150,80,255,0.8);
+}
+.mode-btn.mode-btn-openworld:hover {
+    background: linear-gradient(135deg, rgba(80,30,140,0.95), rgba(30,10,70,1));
+    box-shadow: 0 0 14px rgba(150,80,255,0.6);
+}
+
+/* Portal-transition fade overlay */
+#portal-fade {
+    position: fixed;
+    inset: 0;
+    background: radial-gradient(ellipse at center, #1a0030 0%, #000 80%);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.36s ease;
+    z-index: 99999;
+}
+#portal-fade.show {
+    opacity: 1;
+}
+
 /* ------------------------------------------------------------------ */
 /* Touch controls (iPad / mobile)                                      */
 /* ------------------------------------------------------------------ */

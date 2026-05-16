@@ -1582,6 +1582,12 @@ class Game3D {
 
         // Default to first-person view (runs setViewMode side effects: hide model, etc.)
         this.setViewMode('fpv');
+
+        // Open-world system (hub + 4 portal-linked sub-worlds). Reuses player,
+        // collision, gravity. Activated via setGameMode('openworld').
+        if (typeof OpenWorldSystem !== 'undefined') {
+            this.openWorld = new OpenWorldSystem(this);
+        }
     }
 
     createPlayer() {
@@ -2703,6 +2709,15 @@ class Game3D {
     }
     
     setGameMode(mode) {
+        // Open World: hub-and-spoke themed worlds linked by portals.
+        if (mode === 'openworld') {
+            this.enterOpenWorld();
+            return;
+        }
+        // Leaving open world: tear it down before switching to anything else.
+        if (this.openWorld && this.openWorld.active) {
+            this.exitOpenWorld();
+        }
         // Arena is a special play sub-mode: it tears down the maze and runs the wave loop
         if (mode === 'arena') {
             this.startArenaMode();
@@ -2751,9 +2766,41 @@ class Game3D {
             // Setup play mode camera/controls and enemies
             this.setupPlayMode();
         }
-        
+
     }
-    
+
+    enterOpenWorld() {
+        if (!this.openWorld) {
+            console.warn('OpenWorldSystem unavailable');
+            return;
+        }
+        if (this.openWorld.active) return;
+        // Tear down maze + enemies + arena so the open world has a clean stage.
+        if (this.arena && this.arena.active) {
+            this.arena.active = false;
+            this.arena.phase = 'idle';
+            if (this._clearArenaObjects) this._clearArenaObjects();
+        }
+        if (this.clearEnemies) this.clearEnemies();
+        if (this.clearMaze) this.clearMaze();
+        // Stay in 'play' mode so existing WASD + gravity + collision branches run.
+        this.gameMode = 'play';
+        document.body.style.cursor = 'default';
+        if (document.pointerLockElement) document.exitPointerLock();
+        // Isometric reads much better for open-world exploration than fpv (cursor
+        // stays visible, no pointer-lock dance required).
+        if (this.setViewMode) this.setViewMode('iso');
+        this.openWorld.enter().catch((err) => console.error('[openworld] enter failed', err));
+    }
+
+    exitOpenWorld() {
+        if (!this.openWorld || !this.openWorld.active) return;
+        this.openWorld.exit();
+        // Re-create the maze world the player came from so play mode is intact.
+        if (this.createLabyrinth) this.createLabyrinth();
+        if (this.setupPlayMode) this.setupPlayMode();
+    }
+
     clearMaze() {
         // Remove all walls from scene
         this.walls.forEach(wall => {
@@ -6868,20 +6915,36 @@ class Game3D {
         this.updateDamageVignette(deltaTime);
         this.updatePlayerLocomotion(deltaTime);
 
+        // Open-world tick (animals, portal anim, transition trigger). Runs before
+        // the play-mode combat block so peaceful worlds can suppress it below.
+        if (this.openWorld && this.openWorld.active) {
+            this.openWorld.update(deltaTime);
+        }
+
         // Update projectiles and other play-mode systems
         if (this.gameMode === 'play') {
+            const owActive = this.openWorld && this.openWorld.active;
+
+            // Always run: weapons, projectiles, dying animations, FX. Open-world
+            // animals are registered into playMode.enemies so these are the same
+            // pipes that make them shootable.
             this.updateProjectiles(deltaTime);
-            this.updateEnemies(deltaTime);
             this.updateDyingEnemies(deltaTime);
-            this.updatePickups(deltaTime);
-            this.updateJetpackParticles(deltaTime);
-            this.updateEnemySpawning(deltaTime);
             this.updateMuzzleFlash(deltaTime);
             this.updatePickupCollectFx(deltaTime);
             this.updateEnemyDeathFragments(deltaTime);
             this.updateFootDust(deltaTime);
             this.updateWorldMuzzleSprites(deltaTime);
-            if (this.arena && this.arena.active) this.updateArena(deltaTime);
+            this.updateJetpackParticles(deltaTime);
+
+            // Maze-only systems — skipped entirely in open world (animals run
+            // their own behavior in OpenWorldSystem.update; no pickups; no waves).
+            if (!owActive) {
+                this.updateEnemies(deltaTime);
+                this.updateEnemySpawning(deltaTime);
+                this.updatePickups(deltaTime);
+                if (this.arena && this.arena.active) this.updateArena(deltaTime);
+            }
         }
         
         // Update facing indicator position/target
