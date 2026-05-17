@@ -377,22 +377,6 @@
             }
         }
 
-        // Fire-and-forget gameplay events (e.g. shot fired, melee hit).
-        sendEvent(eventObj) {
-            if (!this.isConnected) return;
-            const msg = { type: 'event', e: eventObj };
-            if (this.isHost) {
-                const fanout = { type: 'peer-event', id: this.localId, e: eventObj };
-                this.peers.forEach((p) => {
-                    if (p.conn && p.conn.open) {
-                        try { p.conn.send(fanout); } catch (_) {}
-                    }
-                });
-            } else if (this.hostConn && this.hostConn.open) {
-                try { this.hostConn.send(msg); } catch (_) {}
-            }
-        }
-
         disconnect() {
             try {
                 if (this.hostConn) this.hostConn.close();

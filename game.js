@@ -64,10 +64,6 @@ class AudioBus {
         } catch (_) {}
     }
 
-    _now() {
-        return this.ctx ? this.ctx.currentTime : 0;
-    }
-
     // Core building block: an oscillator with an envelope.
     _tone({ type = 'sine', freq = 440, freqEnd = null, dur = 0.15, gain = 0.3, attack = 0.005, release = null, detune = 0, delay = 0 }) {
         const ctx = this.ctx;
@@ -151,6 +147,20 @@ class AudioBus {
                 this._tone({ type: 'sawtooth', freq: 380, freqEnd: 70, dur: 0.35, gain: 0.28 });
                 this._noise({ dur: 0.18, gain: 0.16, lowpass: 1600 });
                 break;
+            case 'wallChip':
+                this._noise({ dur: 0.05, gain: 0.16, lowpass: 1400, highpass: 500 });
+                this._tone({ type: 'square', freq: 210, freqEnd: 120, dur: 0.06, gain: 0.10 });
+                break;
+            case 'wallBreak':
+                this._noise({ dur: 0.32, gain: 0.32, lowpass: 1200 });
+                this._tone({ type: 'sawtooth', freq: 160, freqEnd: 60, dur: 0.28, gain: 0.22 });
+                this._tone({ type: 'square', freq: 80,  freqEnd: 40, dur: 0.32, gain: 0.18, delay: 0.04 });
+                break;
+            case 'crystalBreak':
+                this._tone({ type: 'triangle', freq: 1200, freqEnd: 400, dur: 0.22, gain: 0.22 });
+                this._tone({ type: 'sine', freq: 1800, freqEnd: 700, dur: 0.22, gain: 0.18, delay: 0.02 });
+                this._noise({ dur: 0.12, gain: 0.18, lowpass: 4000, highpass: 1200 });
+                break;
             case 'pickupHealth':
                 this._tone({ type: 'sine', freq: 660, dur: 0.09, gain: 0.22 });
                 this._tone({ type: 'sine', freq: 880, dur: 0.12, gain: 0.22, delay: 0.06 });
@@ -230,6 +240,11 @@ class Game3D {
         this.orbitDistance = 10;
         this.orbitHeight = 5;
         this.walls = []; // Store wall objects for collision detection
+        // Spatial hash bucketing walls by `_wallHashCell`-unit XZ cells. Hot
+        // collision paths query nearby cells instead of scanning all walls —
+        // critical now that walls are decomposed into thousands of 1×1 cubes.
+        this._wallHashCell = 4;
+        this.wallHash = new Map();
         this.currentMazeIndex = 0; // Current maze index
         this.savedMazes = []; // Store saved mazes
         this.modalOpen = false; // Track if settings modal is open
@@ -701,7 +716,7 @@ class Game3D {
                 apply() { g.inventory.health = Math.min(g.inventory.maxHealth, g.inventory.health + 25);
                           g.player.hp = Math.min(g.player.maxHp, g.player.hp + 25); } },
             ammo:        { emoji: '🔸', color: 0xffff66, weight: 22, labelKey: 'ammo',        labelSuffix: ' +10', autoApply: true,
-                apply() { g.inventory.ammo = Math.min(g.inventory.ammo + 10, g.AMMO_MAX); g.updateWeaponPowerUpUI(); } },
+                apply() { g.inventory.ammo = Math.min(g.inventory.ammo + 10, g.AMMO_MAX); } },
             jetpack:     { emoji: '🚀', color: 0xffaa66, weight: 16, labelKey: 'jetpackFuel', labelSuffix: ' +50', autoApply: true,
                 apply() { g.powerUps.jetpackFuel += 50; } },
             speed:       { emoji: '⚡', color: 0x66ccff, weight: 12, labelKey: 'speedBoost',  labelSuffix: ' +1',
@@ -1682,12 +1697,135 @@ class Game3D {
             return true;
         }
 
-        // Miss — keep the slash; add a faint ground ping at the aim cursor if
-        // it's in reach so the player gets a clear "where did the swing land" cue.
+        // No enemy in range — but maybe there's a destructible brick wall in the
+        // swing arc. If so, chip it for 1 hp and bail (no enemy-miss ping).
+        const wallHit = this._findMeleeWall(px, pz, fx, fz, range);
+        if (wallHit) {
+            this._damageWall(wallHit, 1);
+            return false;
+        }
+
+        // True miss — faint ground ping at the aim cursor if it's in reach so
+        // the player gets a clear "where did the swing land" cue.
         if (aimGround && Math.hypot(aimGround.x - px, aimGround.z - pz) <= range) {
             this.spawnImpact(aimGround, missColor);
         }
         return false;
+    }
+
+    // Closest destructible wall whose AABB intersects the player's melee arc.
+    _findMeleeWall(px, pz, fx, fz, range) {
+        const arcCos = Math.cos(Math.PI / 3);
+        let best = null;
+        let bestDist = Infinity;
+        this._iterWallsNear(px, pz, range + 1, (w) => {
+            if (!w.destructible) return;
+            const halfX = w.size.x / 2;
+            const halfZ = w.size.z / 2;
+            const cx = Math.max(w.position.x - halfX, Math.min(px, w.position.x + halfX));
+            const cz = Math.max(w.position.z - halfZ, Math.min(pz, w.position.z + halfZ));
+            const dx = cx - px;
+            const dz = cz - pz;
+            const dist = Math.hypot(dx, dz);
+            if (dist > range || dist < 0.001) return;
+            const dot = (fx * dx + fz * dz) / dist;
+            if (dot < arcCos) return;
+            if (dist < bestDist) { bestDist = dist; best = w; }
+        });
+        return best;
+    }
+
+    // Apply damage to a destructible wall; remove from scene + walls list on
+    // death, with a chunky burst + audio + small camera punch. Survivors flash
+    // and darken so the player can see the damage progression.
+    _damageWall(wall, damage = 1) {
+        if (!wall || !wall.destructible) return;
+        wall.hp = (wall.hp != null ? wall.hp : (wall.maxHp || 4)) - damage;
+        const center = wall.position.clone();
+        center.y = Math.max(0.2, center.y - wall.size.y * 0.25);
+        if (wall.hp <= 0) {
+            this.audio && this.audio.play && this.audio.play('wallBreak');
+            this.spawnImpact(center, 0xb88a5a);
+            this._spawnWallFragments(wall);
+            this._triggerHitShake && this._triggerHitShake(0.18, 0.18);
+            // 15% chance the rubble leaves a pickup behind.
+            if (Math.random() < 0.15 && this.spawnPickup) {
+                this.spawnPickup(wall.position.x, wall.position.z);
+            }
+            const i = this.walls.indexOf(wall);
+            if (i !== -1) this.walls.splice(i, 1);
+            this._removeWallFromHash(wall);
+            if (wall.mesh) this.scene.remove(wall.mesh);
+            return;
+        }
+        this.audio && this.audio.play && this.audio.play('wallChip');
+        this.spawnImpact(center, 0xffeacc);
+        this._flashWall(wall);
+        this._tintDamagedWall(wall);
+    }
+
+    _flashWall(wall) {
+        if (!wall.mesh) return;
+        const flashed = [];
+        wall.mesh.traverse((c) => {
+            if (c.isMesh && c.material && c.material.color) {
+                flashed.push({ mat: c.material, orig: c.material.color.getHex() });
+                c.material.color.setHex(0xffffff);
+            }
+        });
+        setTimeout(() => flashed.forEach(({ mat, orig }) => mat.color.setHex(orig)), 70);
+    }
+
+    // Visually telegraph wall HP by darkening the mesh as it takes hits.
+    // `_origColor` is captured once so repeated darkening compounds correctly.
+    _tintDamagedWall(wall) {
+        if (!wall.mesh) return;
+        const ratio = Math.max(0.35, wall.hp / (wall.maxHp || 4));
+        wall.mesh.traverse((c) => {
+            if (!c.isMesh || !c.material || !c.material.color) return;
+            if (c.userData._origColor == null) c.userData._origColor = c.material.color.getHex();
+            const base = c.userData._origColor;
+            const r = ((base >> 16) & 0xff) * ratio;
+            const g = ((base >> 8) & 0xff) * ratio;
+            const b = (base & 0xff) * ratio;
+            const tinted = (Math.round(r) << 16) | (Math.round(g) << 8) | Math.round(b);
+            // Reapply on a tick after _flashWall's white pulse so it sticks.
+            setTimeout(() => c.material.color.setHex(tinted), 80);
+        });
+    }
+
+    _spawnWallFragments(wall) {
+        // 6 small cubes that fly outward from the wall and fade in ~0.5s.
+        const color = 0x8a6238;
+        const center = wall.position.clone();
+        for (let i = 0; i < 6; i++) {
+            const m = new THREE.Mesh(
+                new THREE.BoxGeometry(0.28, 0.28, 0.28),
+                new THREE.MeshLambertMaterial({ color, transparent: true, opacity: 1 })
+            );
+            m.position.copy(center);
+            m.position.y = Math.max(0.4, center.y - wall.size.y * 0.25 + Math.random() * wall.size.y * 0.5);
+            const ang = Math.random() * Math.PI * 2;
+            const vx = Math.cos(ang) * (2 + Math.random() * 2);
+            const vz = Math.sin(ang) * (2 + Math.random() * 2);
+            const vy = 3 + Math.random() * 2;
+            this.scene.add(m);
+            const start = performance.now();
+            const dur = 500;
+            const tick = () => {
+                const t = (performance.now() - start) / dur;
+                if (t >= 1) { this.scene.remove(m); m.geometry.dispose(); m.material.dispose(); return; }
+                const dt = 1 / 60;
+                m.position.x += vx * dt;
+                m.position.z += vz * dt;
+                m.position.y += (vy - 14 * t) * dt;
+                m.rotation.x += 0.2;
+                m.rotation.y += 0.15;
+                m.material.opacity = 1 - t;
+                requestAnimationFrame(tick);
+            };
+            requestAnimationFrame(tick);
+        }
     }
 
     // Translucent wedge that pops in front of the player and fades over ~140ms.
@@ -1906,7 +2044,9 @@ class Game3D {
             invulnerabilityTimer: 0,
             weapons: [],
             currentWeaponIndex: 0,
-            weaponModel: null
+            weaponModel: null,
+            ducked: false,
+            duckBlend: 0
         };
         
         // Registry of swappable player characters (key matches data-character on the UI buttons)
@@ -2303,137 +2443,6 @@ class Game3D {
         }
     }
     
-    createFallbackCharacter() {
-        // Create a simple low-poly character using basic geometries
-        const characterGroup = new THREE.Group();
-        
-        // Head — warm desert tan
-        const headGeometry = new THREE.BoxGeometry(1, 1, 1);
-        const headMaterial = new THREE.MeshLambertMaterial({
-            color: 0xd9a76a,
-            emissive: 0x2a1808
-        });
-        const head = new THREE.Mesh(headGeometry, headMaterial);
-        head.position.y = 1.5;
-        head.castShadow = true;
-        characterGroup.add(head);
-        
-        
-        // Body — khaki tunic
-        const bodyGeometry = new THREE.BoxGeometry(1.2, 2, 0.8);
-        const bodyMaterial = new THREE.MeshLambertMaterial({
-            color: 0x8a6a3a,
-            emissive: 0x1a0e04
-        });
-        const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
-        body.position.y = 0.5;
-        body.castShadow = true;
-        characterGroup.add(body);
-        
-        // Arms — sand tone
-        const armGeometry = new THREE.BoxGeometry(0.3, 1.5, 0.3);
-        const armMaterial = new THREE.MeshLambertMaterial({
-            color: 0xd9a76a,
-            emissive: 0x2a1808
-        });
-        
-        const leftArm = new THREE.Mesh(armGeometry, armMaterial);
-        leftArm.position.set(-0.8, 0.5, 0);
-        leftArm.castShadow = true;
-        characterGroup.add(leftArm);
-        
-        const rightArm = new THREE.Mesh(armGeometry, armMaterial);
-        rightArm.position.set(0.8, 0.5, 0);
-        rightArm.castShadow = true;
-        characterGroup.add(rightArm);
-        
-        // Legs — darker khaki
-        const legGeometry = new THREE.BoxGeometry(0.4, 1.5, 0.4);
-        const legMaterial = new THREE.MeshLambertMaterial({
-            color: 0x6a4e22,
-            emissive: 0x1a0e04
-        });
-        
-        const leftLeg = new THREE.Mesh(legGeometry, legMaterial);
-        leftLeg.position.set(-0.3, -1, 0);
-        leftLeg.castShadow = true;
-        characterGroup.add(leftLeg);
-        
-        const rightLeg = new THREE.Mesh(legGeometry, legMaterial);
-        rightLeg.position.set(0.3, -1, 0);
-        rightLeg.castShadow = true;
-        characterGroup.add(rightLeg);
-        
-        // Add to scene
-        this.scene.add(characterGroup);
-        this.player.model = characterGroup;
-        
-        // Store references for animation
-        this.player.head = head;
-        this.player.body = body;
-        this.player.leftArm = leftArm;
-        this.player.rightArm = rightArm;
-        this.player.leftLeg = leftLeg;
-        this.player.rightLeg = rightLeg;
-        
-        // Add weapon if it exists
-        if (this.player.weaponModel) {
-            this.player.model.add(this.player.weaponModel);
-        }
-    }
-    
-    
-    loadCharacterModel(filePath) {
-        const loader = new THREE.GLTFLoader();
-        loader.load(filePath, (gltf) => {
-            // Remove fallback character
-            if (this.player.model) {
-                this.scene.remove(this.player.model);
-            }
-            
-            // Add new character model
-            const character = gltf.scene;
-            character.scale.set(1, 1, 1);
-            character.position.copy(this.player.position);
-            character.castShadow = true;
-            character.receiveShadow = true;
-            
-            // Apply desert hero materials
-            character.traverse((child) => {
-                if (child.isMesh) {
-                    child.material = new THREE.MeshLambertMaterial({
-                        color: 0xd9a76a,
-                        emissive: 0x2a1808
-                    });
-                    child.castShadow = true;
-                    child.receiveShadow = true;
-                }
-            });
-            
-            
-            this.scene.add(character);
-            this.player.model = character;
-            // Align model forward; adjust at runtime with Y/U/F keys if needed
-            this.modelYawOffset = 0;
-            
-            // Add weapon if it exists
-            if (this.player.weaponModel) {
-                this.player.model.add(this.player.weaponModel);
-            }
-            
-            // Set up animation mixer if animations exist
-            if (gltf.animations && gltf.animations.length > 0) {
-                this.player.mixer = new THREE.AnimationMixer(character);
-                gltf.animations.forEach((clip) => {
-                    this.player.mixer.clipAction(clip).play();
-                });
-            }
-            
-        }, undefined, (error) => {
-            console.error('Error loading character model:', error);
-        });
-    }
-
     preloadZombieTemplate() {
         // Roster of all enemy types. The original `zombieTemplate` field is kept
         // for back-compat with anything that still reads it; new code reads
@@ -2717,6 +2726,14 @@ class Game3D {
         const bb = this.roofSourceGeometry.boundingBox;
         // Bottom face of block in world = center.y + bb.min.y * scale → place center so bottom sits at roofY
         const blockCenterY = this.roofY - bb.min.y * scale;
+
+        // Per-tile destructible state. Key = "x,z" (tile center coords);
+        // tracks the InstancedMesh slot, hp, and an `alive` flag used by the
+        // ceiling collision checks so projectiles can fly through broken gaps.
+        this.roofTiles = new Map();
+        this._roofTileHalf = tile / 2;
+        this._roofTileMaxHp = 4;
+
         let i = 0;
         for (let x = -half; x <= half; x += tile) {
             for (let z = -half; z <= half; z += tile) {
@@ -2724,13 +2741,119 @@ class Game3D {
                 dummy.scale.set(scale, scale, scale);
                 dummy.rotation.y = 0;
                 dummy.updateMatrix();
-                mesh.setMatrixAt(i++, dummy.matrix);
+                mesh.setMatrixAt(i, dummy.matrix);
+                this.roofTiles.set(`${x},${z}`, {
+                    idx: i, x, z, alive: true,
+                    hp: this._roofTileMaxHp, maxHp: this._roofTileMaxHp,
+                });
+                i++;
             }
         }
         mesh.count = i;
         mesh.instanceMatrix.needsUpdate = true;
         this.scene.add(mesh);
         this.crystalRoof = mesh;
+    }
+
+    // Locate the roof tile under world coords (x, z). Returns the tile record
+    // or null (off-grid / already destroyed).
+    _roofTileAt(x, z) {
+        if (!this.roofTiles || !this.roofTileSize) return null;
+        const t = this.roofTileSize;
+        const tx = Math.round(x / t) * t;
+        const tz = Math.round(z / t) * t;
+        const rec = this.roofTiles.get(`${tx},${tz}`);
+        return (rec && rec.alive) ? rec : null;
+    }
+
+    _damageRoofTile(tile, damage = 1) {
+        if (!tile || !tile.alive) return;
+        tile.hp -= damage;
+        const impactPos = new THREE.Vector3(tile.x, this.roofY - 0.1, tile.z);
+        if (tile.hp <= 0) {
+            tile.alive = false;
+            if (this.crystalRoof) {
+                const m = new THREE.Matrix4().makeScale(0, 0, 0);
+                this.crystalRoof.setMatrixAt(tile.idx, m);
+                this.crystalRoof.instanceMatrix.needsUpdate = true;
+            }
+            this.audio && this.audio.play && this.audio.play('crystalBreak');
+            this.spawnImpact(impactPos, 0xff66ff);
+            this._spawnCrystalShards(tile);
+            this._spawnRoofLightShaft(tile);
+            this._triggerHitShake && this._triggerHitShake(0.10, 0.12);
+            return;
+        }
+        this.audio && this.audio.play && this.audio.play('wallChip');
+        this.spawnImpact(impactPos, 0xffaaff);
+    }
+
+    // Pink crystal shards rain down from a broken roof tile and fade.
+    _spawnCrystalShards(tile) {
+        const color = 0xff66ff;
+        const sz = this.roofTileSize * 0.18;
+        for (let i = 0; i < 7; i++) {
+            const m = new THREE.Mesh(
+                new THREE.BoxGeometry(sz, sz, sz),
+                new THREE.MeshLambertMaterial({
+                    color, emissive: color, emissiveIntensity: 0.55,
+                    transparent: true, opacity: 1
+                })
+            );
+            m.position.set(
+                tile.x + (Math.random() - 0.5) * this.roofTileSize * 0.6,
+                this.roofY - 0.2,
+                tile.z + (Math.random() - 0.5) * this.roofTileSize * 0.6
+            );
+            const vx = (Math.random() - 0.5) * 2.2;
+            const vz = (Math.random() - 0.5) * 2.2;
+            let vy = -1.0 - Math.random() * 1.5;
+            this.scene.add(m);
+            const start = performance.now();
+            const dur = 1200;
+            const tick = () => {
+                const t = (performance.now() - start) / dur;
+                if (t >= 1) { this.scene.remove(m); m.geometry.dispose(); m.material.dispose(); return; }
+                const dt = 1 / 60;
+                m.position.x += vx * dt;
+                m.position.z += vz * dt;
+                vy -= 18 * dt;
+                m.position.y += vy * dt;
+                m.rotation.x += 0.25;
+                m.rotation.y += 0.18;
+                m.material.opacity = 1 - t;
+                if (m.position.y < 0.2) {
+                    m.position.y = 0.2;
+                    vy = 0;
+                }
+                requestAnimationFrame(tick);
+            };
+            requestAnimationFrame(tick);
+        }
+    }
+
+    // Thin downward beam of light through a freshly-opened roof hole.
+    // Fades in ~1.5s and then sticks at low intensity until next reset.
+    _spawnRoofLightShaft(tile) {
+        const r = this.roofTileSize * 0.45;
+        const h = this.roofY;
+        const geo = new THREE.CylinderGeometry(r, r * 1.4, h, 12, 1, true);
+        const mat = new THREE.MeshBasicMaterial({
+            color: 0xffe7ff, transparent: true, opacity: 0,
+            blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide
+        });
+        const beam = new THREE.Mesh(geo, mat);
+        beam.position.set(tile.x, h / 2, tile.z);
+        this.scene.add(beam);
+        const start = performance.now();
+        const dur = 1400;
+        const tick = () => {
+            const t = (performance.now() - start) / dur;
+            if (t >= 1) { mat.opacity = 0.18; return; }
+            mat.opacity = 0.45 * (1 - Math.abs(0.5 - t) * 2) + 0.18 * t;
+            requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
     }
 
     loadCheeseFloor() {
@@ -2977,42 +3100,37 @@ class Game3D {
     }
     
     initializeCreateMode() {
-        // Initialize empty custom maze
         this.createMode.customMaze = [];
         for (let y = 0; y < this.createMode.gridSize; y++) {
             this.createMode.customMaze[y] = [];
             for (let x = 0; x < this.createMode.gridSize; x++) {
-                this.createMode.customMaze[y][x] = '.'; // Empty space
+                this.createMode.customMaze[y][x] = '.';
             }
         }
-        
-        // Create grid highlighting system
         this.createGridHighlights();
     }
-    
+
     createGridHighlights() {
-        // Clear existing highlights
         this.createMode.highlightObjects.forEach(obj => {
             this.scene.remove(obj);
         });
         this.createMode.highlightObjects = [];
-        
+
         if (this.gameMode !== 'create') return;
-        
-        // Create-mode placement highlight (sand-yellow)
+
+        // Sand-yellow placement highlight
         const highlightMaterial = new THREE.MeshBasicMaterial({
             color: 0xffe8a0,
             transparent: true,
             opacity: 0.25,
             side: THREE.DoubleSide
         });
-        
-        // Create grid highlights
+
         const gridSize = this.createMode.gridSize;
         const cellSize = 2;
         const startX = -gridSize;
         const startZ = -gridSize;
-        
+
         for (let y = 0; y < gridSize; y++) {
             for (let x = 0; x < gridSize; x++) {
                 const highlight = new THREE.Mesh(
@@ -3025,8 +3143,8 @@ class Game3D {
                     startZ + y * cellSize
                 );
                 highlight.rotation.x = -Math.PI / 2;
-                highlight.visible = true; // Make highlights visible
-                highlight.userData = { gridX: x, gridZ: y }; // Store grid coordinates
+                highlight.visible = true;
+                highlight.userData = { gridX: x, gridZ: y };
                 this.scene.add(highlight);
                 this.createMode.highlightObjects.push(highlight);
             }
@@ -3058,15 +3176,10 @@ class Game3D {
         this.gameMode = mode;
 
         if (mode === 'create') {
-            // Clear maze walls and markers
             this.clearMaze();
-            // Fresh empty grid and highlights
             this.initializeCreateMode();
-            // Initialize preview system
             this.updateToolPreview();
-            // Ensure cursor is visible in create mode
             document.body.style.cursor = 'crosshair';
-            // Exit pointer lock if active
             if (document.pointerLockElement) {
                 document.exitPointerLock();
             }
@@ -3075,7 +3188,6 @@ class Game3D {
             this.player.position.set(spawn.x, 1, spawn.z);
             this.characterRotation = spawn.facingY;
         } else {
-            // Clear highlights and preview
             this.createMode.highlightObjects.forEach(obj => {
                 this.scene.remove(obj);
             });
@@ -3084,11 +3196,8 @@ class Game3D {
                 this.scene.remove(this.createMode.previewObject);
                 this.createMode.previewObject = null;
             }
-            // Restore normal cursor behavior
             document.body.style.cursor = 'default';
-            // Rebuild current maze
             this.createLabyrinth();
-            // Setup play mode camera/controls and enemies
             this.setupPlayMode();
         }
 
@@ -3127,39 +3236,33 @@ class Game3D {
     }
 
     clearMaze() {
-        // Remove all walls from scene
         this.walls.forEach(wall => {
             const mesh = wall.mesh ? wall.mesh : wall;
             this.scene.remove(mesh);
         });
         this.walls = [];
+        this.wallHash = new Map();
 
-        // Remove labyrinth markers if any
         if (this.labyrinthMarkers && this.labyrinthMarkers.length) {
             this.labyrinthMarkers.forEach(m => this.scene.remove(m));
             this.labyrinthMarkers = [];
         }
 
-        // No props cleanup needed
-
-        // Clear pickups
         if (this.pickups && this.pickups.length) {
             this.pickups.forEach(p => this.pickupsGroup.remove(p));
             this.pickups = [];
         }
     }
-    
-    
+
+
     setupToolboxListeners() {
-        // Toolbox modal close
         const closeToolbox = document.querySelector('.close-toolbox');
         if (closeToolbox) {
             closeToolbox.addEventListener('click', () => {
                 this.toggleToolboxModal();
             });
         }
-        
-        // Close modal when clicking outside
+
         const toolboxModal = document.getElementById('toolbox-modal');
         if (toolboxModal) {
             toolboxModal.addEventListener('click', (e) => {
@@ -3168,36 +3271,31 @@ class Game3D {
                 }
             });
         }
-        
-        // Tool selection
+
         document.querySelectorAll('.tool-btn').forEach(btn => {
             btn.addEventListener('click', () => {
                 const tool = btn.dataset.tool;
                 this.setCreateTool(tool);
-                // Close modal immediately after tool selection
                 this.toggleToolboxModal();
             });
         });
     }
-    
+
     toggleToolboxModal() {
         const modal = document.getElementById('toolbox-modal');
         if (modal.style.display === 'block') {
             modal.style.display = 'none';
             this.modalOpen = false;
             document.body.classList.remove('modal-open');
-            // Restore create mode cursor
             if (this.gameMode === 'create') {
                 document.body.style.cursor = 'crosshair';
             }
         } else {
-            // Close any other open modals first
             this.closeAllModals();
-            
+
             modal.style.display = 'block';
             this.modalOpen = true;
             document.body.classList.add('modal-open');
-            // Ensure cursor is immediately active
             document.body.style.cursor = 'default';
             this.updateToolboxContent();
         }
@@ -3238,15 +3336,13 @@ class Game3D {
     }
     
     updateToolPreview() {
-        // Remove existing preview
         if (this.createMode.previewObject) {
             this.scene.remove(this.createMode.previewObject);
             this.createMode.previewObject = null;
         }
-        
+
         if (this.gameMode !== 'create') return;
-        
-        // Create preview object based on tool
+
         let previewGeometry, previewMaterial;
         
         switch(this.createMode.tool) {
@@ -3289,30 +3385,17 @@ class Game3D {
         }
         
         this.createMode.previewObject = new THREE.Mesh(previewGeometry, previewMaterial);
-        this.createMode.previewObject.visible = false; // Hidden by default
+        this.createMode.previewObject.visible = false;
         this.scene.add(this.createMode.previewObject);
     }
-    
+
     updateToolboxContent() {
-        // Update tool buttons
         document.querySelectorAll('.tool-btn').forEach(btn => {
             btn.classList.remove('active');
             if (btn.dataset.tool === this.createMode.tool) {
                 btn.classList.add('active');
             }
         });
-    }
-    
-    getGridPositionFromWorld(worldX, worldZ) {
-        const gridSize = this.createMode.gridSize;
-        const cellSize = 2;
-        const startX = -gridSize;
-        const startZ = -gridSize;
-        
-        const gridX = Math.floor((worldX - startX) / cellSize);
-        const gridZ = Math.floor((worldZ - startZ) / cellSize);
-        
-        return { x: gridX, z: gridZ };
     }
     
     getWorldPositionFromGrid(gridX, gridZ) {
@@ -3329,59 +3412,49 @@ class Game3D {
     
     handleCreateModeHover() {
         if (this.gameMode !== 'create' || !this.createMode.previewObject) return;
-        
-        // Create raycaster from camera
+
         const raycaster = new THREE.Raycaster();
         const mouse = new THREE.Vector2();
-        
-        // Get mouse position in normalized device coordinates
+
         const canvas = document.getElementById('gameCanvas');
         const rect = canvas.getBoundingClientRect();
         const x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
         const y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-        
+
         mouse.x = x;
         mouse.y = y;
-        
+
         raycaster.setFromCamera(mouse, this.camera);
-        
-        // Intersect with highlight objects to get exact grid position
+
         const intersects = raycaster.intersectObjects(this.createMode.highlightObjects);
-        
+
         if (intersects.length > 0) {
             const highlight = intersects[0].object;
             const { gridX, gridZ } = highlight.userData;
-            
-            // Check bounds
+
             if (gridX >= 0 && gridX < this.createMode.gridSize && gridZ >= 0 && gridZ < this.createMode.gridSize) {
-                // Show preview at this position (with tool-specific visibility rules)
                 const worldPos = this.getWorldPositionFromGrid(gridX, gridZ);
                 this.createMode.previewObject.position.set(worldPos.x, 2, worldPos.z);
                 if (this.createMode.tool === 'erase') {
-                    // Only show red erase preview if there's an existing wall
+                    // Suppress the red erase preview on empty cells
                     const hasWall = this.createMode.customMaze[gridZ][gridX] === '#';
                     this.createMode.previewObject.visible = hasWall;
                 } else {
                     this.createMode.previewObject.visible = true;
                 }
-                
-                // Handle continuous placement if mouse is down
+
                 if (this.createMode.isMouseDown) {
                     const currentGridPos = { x: gridX, z: gridZ };
                     const lastPos = this.createMode.lastGridPos;
-                    
+
                     if (this.createMode.isShiftHeld) {
-                        // Straight line mode
                         if (!this.createMode.startLinePos) {
-                            // First click - set start position
                             this.createMode.startLinePos = currentGridPos;
                             this.handleContinuousPlacement(gridX, gridZ);
                         } else {
-                            // Draw straight line from start to current position
                             this.drawStraightLine(this.createMode.startLinePos, currentGridPos);
                         }
                     } else {
-                        // Normal continuous placement
                         if (!lastPos || lastPos.x !== currentGridPos.x || lastPos.z !== currentGridPos.z) {
                             this.createMode.lastGridPos = currentGridPos;
                             this.handleContinuousPlacement(gridX, gridZ);
@@ -3395,9 +3468,8 @@ class Game3D {
             this.createMode.previewObject.visible = false;
         }
     }
-    
+
     handleContinuousPlacement(gridX, gridZ) {
-        // Only allow continuous placement for wall and erase tools
         if (this.createMode.tool === 'wall' || this.createMode.tool === 'erase') {
             switch(this.createMode.tool) {
                 case 'wall':
@@ -3409,12 +3481,10 @@ class Game3D {
             }
         }
     }
-    
+
     drawStraightLine(startPos, endPos) {
-        // Calculate line points using Bresenham's line algorithm
         const points = this.getLinePoints(startPos.x, startPos.z, endPos.x, endPos.z);
-        
-        // Place/erase at each point
+
         points.forEach(point => {
             if (point.x >= 0 && point.x < this.createMode.gridSize && 
                 point.z >= 0 && point.z < this.createMode.gridSize) {
@@ -3462,43 +3532,36 @@ class Game3D {
     
     handleCreateModeClick() {
         if (this.gameMode !== 'create') return;
-        
-        // Create raycaster from camera
+
         const raycaster = new THREE.Raycaster();
         const mouse = new THREE.Vector2();
-        
-        // Get mouse position in normalized device coordinates
+
         const canvas = document.getElementById('gameCanvas');
         const rect = canvas.getBoundingClientRect();
         const x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
         const y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-        
+
         mouse.x = x;
         mouse.y = y;
-        
+
         raycaster.setFromCamera(mouse, this.camera);
-        
-        // Intersect with highlight objects to get exact grid position
+
         const intersects = raycaster.intersectObjects(this.createMode.highlightObjects);
-        
+
         if (intersects.length > 0) {
             const highlight = intersects[0].object;
             const { gridX, gridZ } = highlight.userData;
-            
-            // Check bounds
+
             if (gridX >= 0 && gridX < this.createMode.gridSize && gridZ >= 0 && gridZ < this.createMode.gridSize) {
                 if (this.createMode.isShiftHeld) {
-                    // Straight line mode
+                    // Shift = straight-line drag; first click anchors, hover draws.
                     if (!this.createMode.startLinePos) {
-                        // First click - set start position
                         this.createMode.startLinePos = { x: gridX, z: gridZ };
                         this.handleContinuousPlacement(gridX, gridZ);
                     }
-                    // Line drawing is handled in hover function
                 } else {
-                    // Normal mode
                     this.createMode.lastGridPos = { x: gridX, z: gridZ };
-                    
+
                     switch(this.createMode.tool) {
                         case 'wall':
                             this.placeWall(gridX, gridZ);
@@ -3517,23 +3580,22 @@ class Game3D {
             }
         }
     }
-    
+
     placeWall(gridX, gridZ) {
-        if (this.createMode.customMaze[gridZ][gridX] === '#') return; // Already a wall
-        
+        if (this.createMode.customMaze[gridZ][gridX] === '#') return;
+
         this.createMode.customMaze[gridZ][gridX] = '#';
         this.createWallAtGrid(gridX, gridZ);
     }
-    
+
     eraseWall(gridX, gridZ) {
-        if (this.createMode.customMaze[gridZ][gridX] === '.') return; // Already empty
-        
+        if (this.createMode.customMaze[gridZ][gridX] === '.') return;
+
         this.createMode.customMaze[gridZ][gridX] = '.';
         this.removeWallAtGrid(gridX, gridZ);
     }
-    
+
     placeStartPoint(gridX, gridZ) {
-        // Remove existing start point
         for (let y = 0; y < this.createMode.gridSize; y++) {
             for (let x = 0; x < this.createMode.gridSize; x++) {
                 if (this.createMode.customMaze[y][x] === 'S') {
@@ -3541,7 +3603,7 @@ class Game3D {
                 }
             }
         }
-        
+
         this.createMode.customMaze[gridZ][gridX] = 'S';
         this.player.position.set(
             this.getWorldPositionFromGrid(gridX, gridZ).x,
@@ -3549,9 +3611,8 @@ class Game3D {
             this.getWorldPositionFromGrid(gridX, gridZ).z
         );
     }
-    
+
     placeEndPoint(gridX, gridZ) {
-        // Remove existing end point
         for (let y = 0; y < this.createMode.gridSize; y++) {
             for (let x = 0; x < this.createMode.gridSize; x++) {
                 if (this.createMode.customMaze[y][x] === 'E') {
@@ -3559,46 +3620,155 @@ class Game3D {
                 }
             }
         }
-        
+
         this.createMode.customMaze[gridZ][gridX] = 'E';
     }
     
     createWallAtGrid(gridX, gridZ) {
         const worldPos = this.getWorldPositionFromGrid(gridX, gridZ);
-        const t = this.themes.desert;
-        const wallMaterial = (this.materials && this.materials.wall) || new THREE.MeshLambertMaterial({
-            color: t.wall,
-            emissive: t.wallEmissive,
-            transparent: true,
-            opacity: 0.95
-        });
-        
-        const wall = this.createBrickWallMesh(2, 4, 2) || new THREE.Mesh(
-            new THREE.BoxGeometry(2, 4, 2),
-            wallMaterial
-        );
-        wall.position.set(worldPos.x, 2, worldPos.z);
-        this.scene.add(wall);
-        this.walls.push({
-            mesh: wall,
-            position: wall.position,
-            size: { x: 2, y: 4, z: 2 }
-        });
+        // Build the 2×4×2 wall as a stack of 1×1×1 destructible sub-blocks.
+        // Each sub-block has its own AABB + HP, so melee/projectile hits chip
+        // away one Minecraft-style cube at a time instead of removing the wall.
+        this._addDestructibleBlockColumn(worldPos.x, 0, worldPos.z, 2, 4, 2);
     }
-    
+
+    // ===== Spatial hash for walls =====
+    _wallCellsForBox(px, pz, sx, sz) {
+        const c = this._wallHashCell;
+        const minX = Math.floor((px - sx / 2) / c);
+        const maxX = Math.floor((px + sx / 2) / c);
+        const minZ = Math.floor((pz - sz / 2) / c);
+        const maxZ = Math.floor((pz + sz / 2) / c);
+        const out = [];
+        for (let cx = minX; cx <= maxX; cx++)
+            for (let cz = minZ; cz <= maxZ; cz++)
+                out.push(`${cx},${cz}`);
+        return out;
+    }
+
+    _addWallToHash(wall) {
+        if (!wall || !wall.size || !wall.position) return;
+        const keys = this._wallCellsForBox(wall.position.x, wall.position.z, wall.size.x, wall.size.z);
+        wall._hashKeys = keys;
+        for (const k of keys) {
+            let arr = this.wallHash.get(k);
+            if (!arr) { arr = []; this.wallHash.set(k, arr); }
+            arr.push(wall);
+        }
+    }
+
+    _removeWallFromHash(wall) {
+        if (!wall || !wall._hashKeys) return;
+        for (const k of wall._hashKeys) {
+            const arr = this.wallHash.get(k);
+            if (!arr) continue;
+            const i = arr.indexOf(wall);
+            if (i !== -1) arr.splice(i, 1);
+            if (arr.length === 0) this.wallHash.delete(k);
+        }
+        wall._hashKeys = null;
+    }
+
+    _rehashAllWalls() {
+        this.wallHash = new Map();
+        for (const w of this.walls) {
+            if (w._hashKeys) w._hashKeys = null;
+            this._addWallToHash(w);
+        }
+    }
+
+    // Iterate every wall whose bucket overlaps the XZ disc (cx, cz, radius).
+    // Callback may return false to short-circuit (e.g. first-hit found).
+    _iterWallsNear(cx, cz, radius, cb) {
+        const c = this._wallHashCell;
+        const minX = Math.floor((cx - radius) / c);
+        const maxX = Math.floor((cx + radius) / c);
+        const minZ = Math.floor((cz - radius) / c);
+        const maxZ = Math.floor((cz + radius) / c);
+        const seen = new Set();
+        for (let ix = minX; ix <= maxX; ix++) {
+            for (let iz = minZ; iz <= maxZ; iz++) {
+                const arr = this.wallHash.get(`${ix},${iz}`);
+                if (!arr) continue;
+                for (const w of arr) {
+                    if (seen.has(w)) continue;
+                    seen.add(w);
+                    if (cb(w) === false) return;
+                }
+            }
+        }
+    }
+
+    // Decompose a (sizeX × sizeY × sizeZ) brick column centered at (cx, cz)
+    // and sitting on top of baseY into 1×1×1 destructible cubes. Each cube
+    // gets pushed into this.walls as its own entry with hp=1 so any single
+    // hit chips it off, leaving the rest of the wall intact.
+    _addDestructibleBlockColumn(cx, baseY, cz, sizeX, sizeY, sizeZ) {
+        const nx = Math.max(1, Math.round(sizeX));
+        const ny = Math.max(1, Math.round(sizeY));
+        const nz = Math.max(1, Math.round(sizeZ));
+        const x0 = cx - nx / 2 + 0.5;
+        const z0 = cz - nz / 2 + 0.5;
+        const y0 = baseY + 0.5;
+        for (let iy = 0; iy < ny; iy++) {
+            for (let ix = 0; ix < nx; ix++) {
+                for (let iz = 0; iz < nz; iz++) {
+                    const mesh = this._createUnitBrickMesh();
+                    mesh.position.set(x0 + ix, y0 + iy, z0 + iz);
+                    this.scene.add(mesh);
+                    const entry = {
+                        mesh,
+                        position: mesh.position,
+                        size: { x: 1, y: 1, z: 1 },
+                        destructible: true,
+                        hp: 1,
+                        maxHp: 1,
+                    };
+                    this.walls.push(entry);
+                    this._addWallToHash(entry);
+                }
+            }
+        }
+    }
+
+    // Single 1×1×1 brick mesh, using the loaded bricks GLTF when available so
+    // the visual matches the rest of the maze. Falls back to a flat-colored
+    // cube while the template is still loading.
+    _createUnitBrickMesh() {
+        if (this.bricksTemplate && this.bricksTemplate.geometry) {
+            const bb = this.bricksTemplate.geometry.boundingBox;
+            const native = (bb && (bb.max.y - bb.min.y)) || 2;
+            const m = new THREE.Mesh(this.bricksTemplate.geometry, this.bricksTemplate.material);
+            m.scale.setScalar(1 / native);
+            m.castShadow = true;
+            m.receiveShadow = true;
+            return m;
+        }
+        const t = (this.themes && this.themes.desert) || {};
+        const mat = (this.materials && this.materials.wall) || new THREE.MeshLambertMaterial({
+            color: t.wall || 0x8a6238,
+            emissive: t.wallEmissive || 0x140a04,
+        });
+        const m = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), mat);
+        m.castShadow = true;
+        m.receiveShadow = true;
+        return m;
+    }
+
     removeWallAtGrid(gridX, gridZ) {
         const worldPos = this.getWorldPositionFromGrid(gridX, gridZ);
-        
-        // Find and remove wall at this position
+        // Walls are now stacks of 1×1×1 sub-blocks; remove every sub-block
+        // whose center sits within the cell (±cellHalf on X/Z, any Y).
+        const cellHalf = 1; // 2-unit cells → ±1u from center
         for (let i = this.walls.length - 1; i >= 0; i--) {
             const w = this.walls[i];
             const mesh = w.mesh ? w.mesh : w;
             const pos = w.position ? w.position : mesh.position;
-            if (Math.abs(pos.x - worldPos.x) < 1 && 
-                Math.abs(pos.z - worldPos.z) < 1) {
+            if (Math.abs(pos.x - worldPos.x) <= cellHalf &&
+                Math.abs(pos.z - worldPos.z) <= cellHalf) {
                 this.scene.remove(mesh);
+                this._removeWallFromHash(w);
                 this.walls.splice(i, 1);
-                break;
             }
         }
     }
@@ -3627,6 +3797,7 @@ class Game3D {
             this.scene.remove(wall.mesh);
         });
         this.walls = [];
+        this.wallHash = new Map();
         
         // Create new maze
         this.createLabyrinth();
@@ -3645,47 +3816,41 @@ class Game3D {
     
     
     closeAllModals() {
-        // Close settings modal
         const settingsModal = document.getElementById('settings-modal');
         if (settingsModal) {
             settingsModal.style.display = 'none';
         }
-        
-        // Close toolbox modal
+
         const toolboxModal = document.getElementById('toolbox-modal');
         if (toolboxModal) {
             toolboxModal.style.display = 'none';
         }
-        
+
         this.modalOpen = false;
         document.body.classList.remove('modal-open');
-        
-        // Restore appropriate cursor based on game mode
+
         if (this.gameMode === 'create') {
             document.body.style.cursor = 'crosshair';
         } else {
             document.body.style.cursor = 'default';
         }
     }
-    
+
     toggleSettingsModal() {
         const modal = document.getElementById('settings-modal');
         if (modal.style.display === 'block') {
             modal.style.display = 'none';
             this.modalOpen = false;
-            // Remove cursor class and re-enable pointer lock
             document.body.classList.remove('modal-open');
-            // In play mode, re-acquire pointer lock for continuous mouse aim (desktop only).
+            // Re-acquire pointer lock for continuous mouse aim (desktop only).
             if (this.gameMode === 'play' && !this.isPointerLocked && !this.isTouchDevice) {
                 setTimeout(() => document.body.requestPointerLock(), 50);
             }
         } else {
-            // Close any other open modals first
             this.closeAllModals();
-            
+
             modal.style.display = 'block';
             this.modalOpen = true;
-            // Add cursor class and exit pointer lock
             document.body.classList.add('modal-open');
             if (document.pointerLockElement) {
                 document.exitPointerLock();
@@ -3693,36 +3858,31 @@ class Game3D {
             this.updateModalContent();
         }
     }
-    
+
     updateModalContent() {
-        // Update view buttons
         document.querySelectorAll('.view-btn').forEach(btn => {
             btn.classList.remove('active');
             if (btn.dataset.view === this.viewMode) {
                 btn.classList.add('active');
             }
         });
-        
-        // Update maze buttons
+
         document.querySelectorAll('.maze-btn').forEach(btn => {
             btn.classList.remove('active');
             if (parseInt(btn.dataset.maze) === this.currentMazeIndex) {
                 btn.classList.add('active');
             }
         });
-        
-        // Update maze description
+
         const mazeDesc = document.getElementById('maze-desc');
         if (mazeDesc) {
             mazeDesc.textContent = this.savedMazes[this.currentMazeIndex].description;
         }
-        // Reflect difficulty slider
         const diff = document.getElementById('maze-difficulty');
         const diffVal = document.getElementById('maze-difficulty-value');
         if (diff) diff.value = this.mazeDifficulty;
         if (diffVal) diffVal.textContent = String(this.mazeDifficulty);
-        
-        // Update language buttons
+
         document.querySelectorAll('.language-btn').forEach(btn => {
             btn.classList.remove('active');
             if (btn.dataset.language === this.language) {
@@ -3730,19 +3890,14 @@ class Game3D {
             }
         });
 
-        // Update character buttons
         document.querySelectorAll('.character-btn').forEach(btn => {
             btn.classList.toggle('active', btn.dataset.character === this.currentCharacterKey);
         });
-        
-        // Update modal text elements
+
         this.updateModalText();
-        
-        // Update game info - removed old UI elements
     }
-    
+
     updateModalText() {
-        // Update modal headers and labels
         const settingsTitle = document.getElementById('settings-title');
         if (settingsTitle) settingsTitle.textContent = this.t('settings');
         
@@ -3766,14 +3921,12 @@ class Game3D {
         if (gameInfoTitle) gameInfoTitle.textContent = this.t('gameInfo');
         
         
-        // Update view button labels
         document.querySelectorAll('.view-btn').forEach(btn => {
             const view = btn.dataset.view;
             if (view === 'iso') btn.textContent = 'Isometrisk';
             if (view === 'fpv') btn.textContent = 'Første Person';
         });
-        
-        // Update mode button labels
+
         document.querySelectorAll('.mode-btn').forEach(btn => {
             const mode = btn.dataset.mode;
             if (mode === 'play') btn.textContent = this.t('playMode');
@@ -3784,15 +3937,13 @@ class Game3D {
     
     
     setupModalListeners() {
-        // Close modal when clicking X
         const closeBtn = document.querySelector('.close');
         if (closeBtn) {
             closeBtn.addEventListener('click', () => {
                 this.toggleSettingsModal();
             });
         }
-        
-        // Close modal when clicking outside
+
         const modal = document.getElementById('settings-modal');
         if (modal) {
             modal.addEventListener('click', (e) => {
@@ -3801,16 +3952,14 @@ class Game3D {
                 }
             });
         }
-        
-        // Close modal with Escape key
+
         document.addEventListener('keydown', (event) => {
             if (event.code === 'Escape' && this.modalOpen) {
                 this.toggleSettingsModal();
             }
         });
-        
 
-        // View mode buttons
+
         document.querySelectorAll('.view-btn').forEach(btn => {
             btn.addEventListener('click', () => {
                 const view = btn.dataset.view;
@@ -3818,8 +3967,7 @@ class Game3D {
                 this.toggleSettingsModal();
             });
         });
-        
-        // Language buttons
+
         document.querySelectorAll('.language-btn').forEach(btn => {
             btn.addEventListener('click', () => {
                 const language = btn.dataset.language;
@@ -3827,17 +3975,15 @@ class Game3D {
                 this.toggleSettingsModal();
             });
         });
-        
-        // Maze selection buttons
+
         document.querySelectorAll('.maze-btn').forEach(btn => {
             btn.addEventListener('click', () => {
                 const mazeIndex = parseInt(btn.dataset.maze);
                 this.switchMaze(mazeIndex);
-                this.toggleSettingsModal(); // Close modal immediately
+                this.toggleSettingsModal();
             });
         });
 
-        // Difficulty slider wiring
         const diff = document.getElementById('maze-difficulty');
         const diffVal = document.getElementById('maze-difficulty-value');
         if (diff) {
@@ -3856,7 +4002,6 @@ class Game3D {
             });
         }
 
-        // Audio settings wiring
         const aEnabled = document.getElementById('audio-enabled');
         const aVol = document.getElementById('audio-volume');
         const aVolVal = document.getElementById('audio-volume-value');
@@ -3878,16 +4023,14 @@ class Game3D {
         }
 
 
-        // Game mode buttons
         document.querySelectorAll('.mode-btn').forEach(btn => {
             btn.addEventListener('click', () => {
                 const mode = btn.dataset.mode;
                 this.setGameMode(mode);
-                this.toggleSettingsModal(); // Close modal immediately
+                this.toggleSettingsModal();
             });
         });
 
-        // Character selection buttons
         document.querySelectorAll('.character-btn').forEach(btn => {
             btn.addEventListener('click', () => {
                 const key = btn.dataset.character;
@@ -3902,66 +4045,58 @@ class Game3D {
     generateMaze(width, height) {
         // Create a maze using recursive backtracking algorithm with wide halls
         const maze = [];
-        
-        // Initialize maze with all walls
+
         for (let y = 0; y < height; y++) {
             maze[y] = [];
             for (let x = 0; x < width; x++) {
                 maze[y][x] = '#';
             }
         }
-        
-        // Carve out paths starting from (3,3) - accounting for wider halls
+
+        // Carve from (3,3) — first interior cell that respects 5-wide halls.
         this.carvePath(maze, 3, 3, width, height);
-        
-        // Ensure entrance and exit are open with wide openings
+
+        // Wide entrance/exit gaps
         for (let i = 0; i < 5; i++) {
             if (maze[3 + i]) {
-                maze[3 + i][0] = '.'; // Wide entrance
+                maze[3 + i][0] = '.';
             }
             if (maze[height-4 + i]) {
-                maze[height-4 + i][width-1] = '.'; // Wide exit
+                maze[height-4 + i][width-1] = '.';
             }
         }
-        
+
         return maze;
     }
-    
+
     carvePath(maze, x, y, width, height) {
-        // Carve a 5x5 area around the current position
         this.carveArea(maze, x, y, 5, 5);
-        
-        // Define directions (up, down, left, right) with 6-unit spacing for wide halls
+
+        // 6-unit jumps so wide-hall carving leaves a 3-cell-wide corridor between rooms
         const directions = [
-            [0, -6], // up
-            [0, 6],  // down
-            [-6, 0], // left
-            [6, 0]   // right
+            [0, -6],
+            [0, 6],
+            [-6, 0],
+            [6, 0]
         ];
-        
-        // Shuffle directions for randomness
+
         for (let i = directions.length - 1; i > 0; i--) {
             const j = Math.floor(Math.random() * (i + 1));
             [directions[i], directions[j]] = [directions[j], directions[i]];
         }
-        
-        // Try each direction
+
         for (const [dx, dy] of directions) {
             const nx = x + dx;
             const ny = y + dy;
-            
-            // Check if the new position is valid and unvisited
+
             if (nx > 2 && nx < width - 3 && ny > 2 && ny < height - 3 && maze[ny][nx] === '#') {
-                // Carve the wall between current and new position (3-unit wide corridor)
                 this.carveArea(maze, x + dx/2, y + dy/2, 3, 3);
-                // Recursively carve from the new position
                 this.carvePath(maze, nx, ny, width, height);
             }
         }
     }
-    
+
     carveArea(maze, startX, startY, width, height) {
-        // Carve out a rectangular area
         for (let y = startY - Math.floor(height/2); y < startY + Math.ceil(height/2); y++) {
             for (let x = startX - Math.floor(width/2); x < startX + Math.ceil(width/2); x++) {
                 if (x >= 0 && x < maze[0].length && y >= 0 && y < maze.length && maze[y]) {
@@ -4060,27 +4195,13 @@ class Game3D {
                     if (currentMaze.type === 'generated' && !isBorder) {
                         if (Math.random() > this.wallDensity) continue; // skip most interior walls
                     }
-                     // Vary wall height for visual interest
-                    const h = (currentMaze.type === 'labyrinth') ? wallHeight : (wallHeight * THREE.MathUtils.lerp(0.7, 1.6, Math.random()));
-                    const wall = this.createBrickWallMesh(cellSize, h, cellSize) || (() => {
-                        const m = new THREE.Mesh(new THREE.BoxGeometry(cellSize, h, cellSize), wallMaterial);
-                        m.castShadow = true;
-                        m.receiveShadow = true;
-                        return m;
-                    })();
-                    wall.position.set(
-                        startX + col * cellSize,
-                        h / 2,
-                        startZ + row * cellSize
-                    );
-                    this.scene.add(wall);
-                    
-                    // Store wall for collision detection
-                    this.walls.push({
-                        mesh: wall,
-                        position: wall.position,
-                        size: { x: cellSize, y: h, z: cellSize }
-                    });
+                     // Vary wall height for visual interest. Round to whole
+                     // units so the sub-block decomposition lines up cleanly.
+                    const hRaw = (currentMaze.type === 'labyrinth') ? wallHeight : (wallHeight * THREE.MathUtils.lerp(0.7, 1.6, Math.random()));
+                    const h = Math.max(1, Math.round(hRaw));
+                    const cx = startX + col * cellSize;
+                    const cz = startZ + row * cellSize;
+                    this._addDestructibleBlockColumn(cx, 0, cz, cellSize, h, cellSize);
                 }
             }
         }
@@ -4209,47 +4330,6 @@ class Game3D {
     // Build a static ASCII labyrinth with wide corridors and small loops.
     // baseSize: odd number (e.g., 61); passageScale: width of corridors in cells (e.g., 5)
     // braidFactor: 0..1 chance to open a wall between parallel passages to create loops
-    generateWideImperfectLabyrinth(baseSize = 61, passageScale = 1, braidFactor = 0.12) {
-        const { grid } = this.generatePerfectLabyrinth(baseSize); // '.' and '#'
-        const H = grid.length, W = grid[0].length;
-        // Upscale: '.' -> passageScale x passageScale block; '#' stays 1x1 to keep walls 1 cell thick
-        const out = [];
-        for (let y = 0; y < H; y++) {
-            const row = grid[y];
-            const expandedRow = [];
-            for (let x = 0; x < W; x++) {
-                if (row[x] === '.') {
-                    for (let k = 0; k < passageScale; k++) expandedRow.push('.');
-                } else {
-                    expandedRow.push('#');
-                }
-            }
-            const vrep = row.some(c => c === '.') ? passageScale : 1;
-            for (let r = 0; r < vrep; r++) out.push(expandedRow.slice());
-        }
-        const H2 = out.length, W2 = out[0].length;
-        // Outer border walls
-        for (let x = 0; x < W2; x++) { out[0][x] = '#'; out[H2-1][x] = '#'; }
-        for (let y = 0; y < H2; y++) { out[y][0] = '#'; out[y][W2-1] = '#'; }
-        // Punch some internal walls to add loops
-        for (let y = 1; y < H2 - 1; y++) {
-            for (let x = 1; x < W2 - 1; x++) {
-                if (out[y][x] !== '#') continue;
-                const left = out[y][x-1] === '.'; const right = out[y][x+1] === '.';
-                const up = out[y-1][x] === '.'; const down = out[y+1][x] === '.';
-                const separatesHoriz = left && right && !(up || down);
-                const separatesVert = up && down && !(left || right);
-                if ((separatesHoriz || separatesVert) && Math.random() < braidFactor) out[y][x] = '.';
-            }
-        }
-        // Entrance on left, exit on right
-        let entY = Math.floor(H2/2), extY = Math.floor(H2/2);
-        for (let y = 1; y < H2 - 1; y++) if (out[y][1] === '.') { entY = y; break; }
-        for (let y = H2 - 2; y >= 1; y--) if (out[y][W2-2] === '.') { extY = y; break; }
-        out[entY][0] = '.'; out[extY][W2-1] = '.';
-        return out.map(r => r.join(''));
-    }
-
     // ===== ASCII perfect maze (strings) with difficulty =====
     generateAsciiPerfectMaze(width, height) {
         let w = (width % 2 === 0) ? width - 1 : width;
@@ -4297,67 +4377,23 @@ class Game3D {
     }
 
     // ===== Static Labyrinth Editing Helpers =====
-    findMazeIndexByName(name) {
-        return this.savedMazes.findIndex(m => m.name === name);
-    }
-
-    exportCurrentMazeASCII() {
-        if (!this.lastMazeInfo || !this.lastMazeInfo.maze) {
-            console.warn('No maze built yet');
-            return '';
-        }
-        const lines = this.lastMazeInfo.maze.map(row => Array.isArray(row) ? row.join('') : row);
-        const text = lines.join('\n');
-        try { console.log(text); } catch(_) {}
-        return text;
-    }
-
-    setLabyrinthLayout(layoutLines) {
-        // Accept array of strings or single text
-        const lines = Array.isArray(layoutLines) ? layoutLines : String(layoutLines).trim().split(/\r?\n/);
-        const idx = this.findMazeIndexByName('Labyrinth');
-        if (idx === -1) { console.error('Labyrinth entry not found'); return; }
-        // Validate rectangular
-        const w = lines[0].length;
-        if (!lines.every(l => l.length === w)) {
-            console.error('Layout rows must be equal length'); return;
-        }
-        this.savedMazes[idx] = {
-            name: 'Labyrinth',
-            size: lines.length,
-            type: 'static',
-            layout: lines,
-            description: `Static labyrinth ${lines.length}x${w}`
-        };
-        // Switch to it and rebuild
-        this.currentMazeIndex = idx;
-        this.rebuildMaze();
-    }
-
-
     // --- Play Mode (Diablo-style) helpers ---
     setupPlayMode() {
-        // Use pointer lock aiming; cursor hidden in play mode
         if (!document.pointerLockElement) {
-            // Will be acquired on first click (user gesture)
+            // Lock acquired on first click; hide cursor in the meantime.
             document.body.style.cursor = 'none';
         }
-        // Clear existing click target
         this.playMode.clickTarget = null;
-        // (Re)spawn targets
         this.respawnEnemies();
-        
-        // Reset enemy spawn timer for continuous spawning
         this.enemySpawnTimer = 0;
     }
 
     spawnTestEnemies(count = this.enemyCount) {
-        // Don't spawn if we're at max capacity
         if (this.playMode.enemies.length >= this.maxEnemies) {
             return;
         }
-        
-        // Prefer spawning on open maze cells for reliability
+
+        // Prefer placing on open maze cells; falls through to random sampling.
         let placed = 0;
         if (this.lastMazeInfo && this.lastMazeInfo.maze) {
             const { maze, startX, startZ, cellSize } = this.lastMazeInfo;
@@ -4368,7 +4404,6 @@ class Game3D {
                     if (maze[r][c] === '.') openCells.push({ r, c });
                 }
             }
-            // Shuffle cells for randomness
             for (let i = openCells.length - 1; i > 0; i--) {
                 const j = Math.floor(Math.random() * (i + 1));
                 [openCells[i], openCells[j]] = [openCells[j], openCells[i]];
@@ -4391,7 +4426,6 @@ class Game3D {
                 }
             }
         }
-        // If not enough placed (e.g., no maze info), fallback to random world sampling
         if (placed < count) {
             const bounds = this.getMazeBounds();
             let attempts = 0;
@@ -4448,7 +4482,7 @@ class Game3D {
                 if (walk) mixer.clipAction(walk).play();
                 m.userData.mixer = mixer;
             }
-            m.userData.zombieClone = clone; // legacy field name still read elsewhere
+            m.userData.zombieClone = clone; // legacy name kept for back-compat with old callers
         } else {
             const fallback = new THREE.Mesh(
                 new THREE.SphereGeometry(0.5, 12, 12),
@@ -4481,7 +4515,6 @@ class Game3D {
             ranged: cfg.ranged ? Object.assign({}, cfg.ranged) : null,
             rangedTimer: cfg.ranged ? Math.random() * (cfg.ranged.cooldown || 2) : 0,
         });
-        // Add simple health bar (initially hidden)
         const barW = 1.4, barH = 0.15;
         const back = new THREE.Mesh(
             new THREE.PlaneGeometry(barW, barH),
@@ -4496,7 +4529,7 @@ class Game3D {
         bar.add(back); bar.add(front);
         bar.position.set(0, m.userData.hpBarY || 2.2, 0);
         bar.userData = { back, front, width: barW, showTimer: 0 };
-        bar.visible = false; // Initially hidden
+        bar.visible = false;
         m.add(bar);
         m.userData.hpBar = bar;
         return m;
@@ -4507,14 +4540,13 @@ class Game3D {
         for (let i = this.playMode.enemies.length - 1; i >= 0; i--) {
             const e = this.playMode.enemies[i];
             const ud = e.userData;
-            // Stun: pause wandering/movement while knocked back
+            // Stun pauses wander/movement while knockback is still being applied below.
             if (ud.stunT > 0) {
                 ud.stunT -= deltaTime;
             } else {
-                // Wander; occasionally turn or bounce off walls
                 ud.changeT -= deltaTime;
                 if (ud.changeT <= 0) {
-                    // Random new direction, slight bias toward player
+                    // New wander direction biased toward player
                     const toPlayer = new THREE.Vector2(
                         this.player.position.x - e.position.x,
                         this.player.position.z - e.position.z
@@ -4523,12 +4555,11 @@ class Game3D {
                     ud.dir = toPlayer.multiplyScalar(0.5).add(rand).normalize();
                     ud.changeT = 1 + Math.random() * 2;
                 }
-                // Try to move
                 const nextX = e.position.x + ud.dir.x * ud.speed * deltaTime;
                 const nextZ = e.position.z + ud.dir.y * ud.speed * deltaTime;
                 const test = new THREE.Vector3(nextX, e.position.y, nextZ);
                 if (this.pointHitsWall(test)) {
-                    // Bounce: flip direction and try again next frame
+                    // Bounce off wall; retry direction shortly
                     ud.dir.x *= -1; ud.dir.y *= -1;
                     ud.changeT = 0.2;
                 } else {
@@ -4536,7 +4567,7 @@ class Game3D {
                     e.position.z = nextZ;
                 }
             }
-            // Apply decaying knockback impulse (works during and after stun)
+            // Knockback decays even while stun is active (so the body slides to rest)
             if (ud.knockback) {
                 const kbX = ud.knockback.x * deltaTime;
                 const kbZ = ud.knockback.y * deltaTime;
@@ -4548,7 +4579,6 @@ class Game3D {
                 ud.knockback.multiplyScalar(Math.pow(0.001, deltaTime));
                 if (ud.knockback.lengthSq() < 0.05) ud.knockback = null;
             }
-            // Face direction of travel
             if (ud.dir && (ud.dir.x !== 0 || ud.dir.y !== 0)) {
                 e.rotation.y = Math.atan2(ud.dir.x, ud.dir.y);
             }
@@ -4585,15 +4615,13 @@ class Game3D {
             if (ud.mixer) ud.mixer.update(deltaTime);
             // Update health bar visibility and display
             if (ud.hpBar) {
-                // Update show timer
                 if (ud.hpBar.userData.showTimer > 0) {
                     ud.hpBar.userData.showTimer -= deltaTime;
                     if (ud.hpBar.userData.showTimer <= 0) {
                         ud.hpBar.visible = false;
                     }
                 }
-                
-                // Only update bar if it's visible
+
                 if (ud.hpBar.visible) {
                     const cam = this.camera.position;
                     ud.hpBar.lookAt(cam.x, ud.hpBar.position.y + e.position.y, cam.z);
@@ -4617,14 +4645,13 @@ class Game3D {
         
         this.player.hp = Math.max(0, this.player.hp - amount);
         this.player.invulnerable = true;
-        this.player.invulnerabilityTimer = 1.0; // 1 second invulnerability
+        this.player.invulnerabilityTimer = 1.0;
         this.audio && this.audio.play('playerHurt');
         this._damageVignetteT = 0.45;
 
-        // Visual feedback
         this.showMessage(`${this.t('playerHit')} - ${this.t('health')}: ${this.player.hp}/${this.player.maxHp}`);
-        
-        // Flash effect
+
+        // Brief red flash on every material in the player model
         if (this.player.model) {
             const originalMaterials = [];
             this.player.model.traverse((child) => {
@@ -4633,15 +4660,14 @@ class Game3D {
                     child.material.color.setHex(0xff0000);
                 }
             });
-            
+
             setTimeout(() => {
                 originalMaterials.forEach(({ child, original }) => {
                     child.material.color.setHex(original);
                 });
             }, 200);
         }
-        
-        // Check for death
+
         if (this.player.hp <= 0) {
             this.showMessage(this.t('playerDeath'));
             this.audio && this.audio.play('gameOver');
@@ -4649,7 +4675,6 @@ class Game3D {
                 // Arena run failed — restart from wave 1
                 this.startArenaMode();
             } else {
-                // Reset player position or respawn
                 this.player.position.set(0, 1, 0);
                 this.player.hp = this.player.maxHp;
             }
@@ -4659,7 +4684,6 @@ class Game3D {
     // ===== Audio-driven feel helpers =====
     updatePlayerLocomotion(deltaTime) {
         if (!this.player || !this.player.model) return;
-        // Sync model position/rotation with the logical player
         const m = this.player.model;
         m.position.copy(this.player.position);
         // Procedural model: animate limbs based on horizontal velocity
@@ -4670,12 +4694,11 @@ class Game3D {
             const walkAmt = Math.min(1, speed / 6);
             const swing = Math.sin(this._locoT * 2) * 0.6 * walkAmt;
             const idleBob = (1 - walkAmt) * Math.sin((this._locoT) * 1.5) * 0.05;
-            // Legs swing forward/back
             const restLx = this.player._legRestX.L;
             const restRx = this.player._legRestX.R;
             if (this.player.leftLeg) this.player.leftLeg.rotation.x = restLx + swing;
             if (this.player.rightLeg) this.player.rightLeg.rotation.x = restRx - swing;
-            // Arms counter-swing on Z; skip while attacking so the swing anim takes over
+            // Skip arm counter-swing while attacking so the swing anim wins
             if (!this._attackPoseT) {
                 const restLz = this.player._armRestZ.L;
                 const restRz = this.player._armRestZ.R;
@@ -4684,7 +4707,6 @@ class Game3D {
                 if (this.player.leftArm) this.player.leftArm.rotation.z = restLz;
                 if (this.player.rightArm) this.player.rightArm.rotation.z = restRz;
             }
-            // Small vertical body bob
             if (this.player.body) this.player.body.position.y = (this.player.body.userData._restY ?? this.player.body.position.y);
             if (this.player.body && this.player.body.userData._restY === undefined) {
                 this.player.body.userData._restY = this.player.body.position.y;
@@ -4861,18 +4883,18 @@ class Game3D {
     }
 
     pointHitsWall(pos, radius = 0.6) {
-        for (const w of this.walls) {
+        let hit = false;
+        this._iterWallsNear(pos.x, pos.z, radius + 1, (w) => {
             const p = w.position; const s = w.size;
             if (pos.x + radius > p.x - s.x/2 && pos.x - radius < p.x + s.x/2 &&
                 pos.z + radius > p.z - s.z/2 && pos.z - radius < p.z + s.z/2) {
-                return true;
+                hit = true; return false;
             }
-        }
-        return false;
+        });
+        return hit;
     }
 
     getMazeBounds() {
-        // Approximate bounds from current maze or ground size
         const currentMaze = this.savedMazes[this.currentMazeIndex];
         if (currentMaze) {
             if (currentMaze.type === 'generated') {
@@ -4886,25 +4908,20 @@ class Game3D {
                 return { minX: -Math.floor(cols / 2) * cellSize, maxX: Math.floor(cols / 2) * cellSize, minZ: -Math.floor(rows / 2) * cellSize, maxZ: Math.floor(rows / 2) * cellSize };
             }
         }
-        // Fallback to ground area
+        // Fallback to ground plane size
         return { minX: -50, maxX: 50, minZ: -50, maxZ: 50 };
     }
 
     isPositionFree(x, z, radius = 0.8) {
-        // Simple overlap test against walls
-        const testPos = new THREE.Vector3(x, 1, z);
-        // Reuse checkCollision logic with temporary radius by inflating test
-        for (let wall of this.walls) {
-            const wallPos = wall.position;
-            const wallSize = wall.size;
-            if (x + radius > wallPos.x - wallSize.x/2 &&
-                x - radius < wallPos.x + wallSize.x/2 &&
-                z + radius > wallPos.z - wallSize.z/2 &&
-                z - radius < wallPos.z + wallSize.z/2) {
-                return false;
+        let free = true;
+        this._iterWallsNear(x, z, radius + 1, (wall) => {
+            const wp = wall.position; const ws = wall.size;
+            if (x + radius > wp.x - ws.x/2 && x - radius < wp.x + ws.x/2 &&
+                z + radius > wp.z - ws.z/2 && z - radius < wp.z + ws.z/2) {
+                free = false; return false;
             }
-        }
-        return true;
+        });
+        return free;
     }
 
     clearEnemies() {
@@ -4930,23 +4947,18 @@ class Game3D {
     }
     
     updateEnemySpawning(deltaTime) {
-        // Only spawn continuously in play mode
         if (this.gameMode !== 'play') return;
         // Arena mode owns its own spawn cadence
         if (this.arena && this.arena.active) return;
-        
-        // Update spawn timer
+
         this.enemySpawnTimer += deltaTime;
-        
-        // Spawn new enemies periodically
+
         if (this.enemySpawnTimer >= this.enemySpawnInterval) {
             this.enemySpawnTimer = 0;
-            
-            // Spawn 1-3 enemies at a time
+
             const spawnCount = 1 + Math.floor(Math.random() * 3);
             this.spawnTestEnemies(spawnCount);
-            
-            // Show spawn message occasionally
+
             if (Math.random() < 0.3) {
                 this.showMessage(`${this.t('enemiesApproaching')} (${this.playMode.enemies.length}/${this.maxEnemies})`);
             }
@@ -5121,13 +5133,6 @@ class Game3D {
         this.spawnImpact(endPoint, 0xcccccc);
     }
 
-    shootAt(targetPos) {
-        // Backward compatibility: derive ray from player/camera toward targetPos
-        const origin = (this.viewMode === 'fpv') ? this.camera.position.clone() : this.player.position.clone().add(new THREE.Vector3(0,1.2,0));
-        const dir = targetPos.clone().sub(origin).normalize();
-        this.shootRay(origin, dir);
-    }
-
     shootRay(origin, dir) {
         // Create a projectile traveling along a ray, supports vertical aim.
         // Visual: a small round pellet with a soft additive halo — no arrow tail.
@@ -5189,18 +5194,39 @@ class Game3D {
             const prevPos = p.position.clone();
             const step = p.userData.dir.clone().multiplyScalar(speed * deltaTime);
             const nextPos = prevPos.clone().add(step);
-            let collidedWall = null;
-            for (const w of this.walls) {
-                const wp = w.position; const s = w.size; const r = p.userData.radius;
-                if (nextPos.x + r > wp.x - s.x/2 && nextPos.x - r < wp.x + s.x/2 &&
-                    nextPos.y + r > wp.y - s.y/2 && nextPos.y - r < wp.y + s.y/2 &&
-                    nextPos.z + r > wp.z - s.z/2 && nextPos.z - r < wp.z + s.z/2) {
-                    collidedWall = w;
-                    break;
+            // Solid ceiling — chip the roof tile at this XZ; despawn the shot
+            // if the tile is still alive (otherwise the shot passes through
+            // the hole the previous hits opened).
+            if (this.roofY != null && nextPos.y + p.userData.radius >= this.roofY) {
+                const tile = this._roofTileAt(nextPos.x, nextPos.z);
+                if (tile) {
+                    this._damageRoofTile(tile, 1);
+                    this.scene.remove(p);
+                    this.playMode.projectiles.splice(i, 1);
+                    continue;
                 }
+                // No tile here (off-grid or already destroyed): let it fly.
             }
+            let collidedWall = null;
+            const _pr = p.userData.radius;
+            this._iterWallsNear(nextPos.x, nextPos.z, _pr + 1.5, (w) => {
+                const wp = w.position; const s = w.size;
+                if (nextPos.x + _pr > wp.x - s.x/2 && nextPos.x - _pr < wp.x + s.x/2 &&
+                    nextPos.y + _pr > wp.y - s.y/2 && nextPos.y - _pr < wp.y + s.y/2 &&
+                    nextPos.z + _pr > wp.z - s.z/2 && nextPos.z - _pr < wp.z + s.z/2) {
+                    collidedWall = w;
+                    return false; // short-circuit
+                }
+            });
             if (collidedWall) {
                 this.spawnImpact(nextPos);
+                // Destructible maze bricks take damage; bullets are consumed on hit.
+                if (collidedWall.destructible) {
+                    this._damageWall(collidedWall, 1);
+                    this.scene.remove(p);
+                    this.playMode.projectiles.splice(i, 1);
+                    continue;
+                }
 
                 const data = p.userData;
                 if ((data.bounces || 0) >= 2) {
@@ -5348,16 +5374,28 @@ class Game3D {
             const step = d.dir.clone().multiplyScalar(d.speed * deltaTime);
             const next = p.position.clone().add(step);
 
-            // Wall collision — despawn with a small impact ping.
-            let hitWall = false;
-            for (const w of this.walls) {
-                const wp = w.position; const s = w.size; const r = d.radius;
-                if (next.x + r > wp.x - s.x/2 && next.x - r < wp.x + s.x/2 &&
-                    next.y + r > wp.y - s.y/2 && next.y - r < wp.y + s.y/2 &&
-                    next.z + r > wp.z - s.z/2 && next.z - r < wp.z + s.z/2) {
-                    hitWall = true; break;
+            // Solid ceiling — chip the roof tile, or pass through if it's
+            // already been broken open.
+            if (this.roofY != null && next.y + d.radius >= this.roofY) {
+                const tile = this._roofTileAt(next.x, next.z);
+                if (tile) {
+                    this._damageRoofTile(tile, 1);
+                    this.scene.remove(p);
+                    list.splice(i, 1);
+                    continue;
                 }
             }
+            // Wall collision — despawn with a small impact ping.
+            let hitWall = false;
+            const _dr = d.radius;
+            this._iterWallsNear(next.x, next.z, _dr + 1.5, (w) => {
+                const wp = w.position; const s = w.size;
+                if (next.x + _dr > wp.x - s.x/2 && next.x - _dr < wp.x + s.x/2 &&
+                    next.y + _dr > wp.y - s.y/2 && next.y - _dr < wp.y + s.y/2 &&
+                    next.z + _dr > wp.z - s.z/2 && next.z - _dr < wp.z + s.z/2) {
+                    hitWall = true; return false;
+                }
+            });
             if (hitWall) {
                 this.spawnImpact(next, d.color);
                 this.scene.remove(p);
@@ -5662,27 +5700,24 @@ class Game3D {
     // ===== Jetpack System =====
     createJetpackParticles() {
         if (!this.isJetpackActive || this.jetpackThrust < 0.1) return;
-        
-        // Create particles below the player
+
         const particleCount = Math.floor(this.jetpackThrust * 8);
         for (let i = 0; i < particleCount; i++) {
             const particle = new THREE.Mesh(
                 new THREE.SphereGeometry(0.1, 4, 4),
-                new THREE.MeshBasicMaterial({ 
+                new THREE.MeshBasicMaterial({
                     color: new THREE.Color().setHSL(0.1 + Math.random() * 0.1, 1, 0.6),
                     transparent: true,
                     opacity: 0.8
                 })
             );
-            
-            // Position below player with some randomness
+
             particle.position.set(
                 this.player.position.x + (Math.random() - 0.5) * 2,
                 this.player.position.y - 1,
                 this.player.position.z + (Math.random() - 0.5) * 2
             );
-            
-            // Add velocity
+
             particle.userData = {
                 velocity: new THREE.Vector3(
                     (Math.random() - 0.5) * 4,
@@ -5692,25 +5727,23 @@ class Game3D {
                 life: 1.0,
                 maxLife: 1.0
             };
-            
+
             this.scene.add(particle);
             this.jetpackParticles.push(particle);
         }
     }
-    
+
     updateJetpackParticles(deltaTime) {
         for (let i = this.jetpackParticles.length - 1; i >= 0; i--) {
             const particle = this.jetpackParticles[i];
             const userData = particle.userData;
-            
-            // Update position
+
             particle.position.add(userData.velocity.clone().multiplyScalar(deltaTime));
-            
-            // Update life
+
             userData.life -= deltaTime * 2;
             particle.material.opacity = userData.life;
-            
-            // Remove dead particles
+
+
             if (userData.life <= 0) {
                 this.scene.remove(particle);
                 this.jetpackParticles.splice(i, 1);
@@ -5719,70 +5752,6 @@ class Game3D {
     }
     
     // ===== Item Activation =====
-    // Create 32-bit style icons for inventory items
-    createItemIcon(type, size = 24) {
-        const canvas = document.createElement('canvas');
-        canvas.width = size;
-        canvas.height = size;
-        const ctx = canvas.getContext('2d');
-        
-        // 32-bit style: pixelated, limited colors
-        ctx.imageSmoothingEnabled = false;
-        
-        switch (type) {
-            case 'health':
-                // Heart icon
-                ctx.fillStyle = '#ff6666';
-                ctx.fillRect(8, 4, 8, 8);
-                ctx.fillRect(6, 6, 12, 8);
-                ctx.fillRect(4, 8, 16, 6);
-                ctx.fillRect(6, 10, 12, 4);
-                ctx.fillRect(8, 12, 8, 2);
-                break;
-                
-            case 'ammo':
-                // Military crosshair/target icon
-                ctx.fillStyle = '#ffff66';
-                ctx.fillRect(10, 2, 4, 20);
-                ctx.fillRect(2, 10, 20, 4);
-                ctx.fillRect(8, 8, 8, 8);
-                ctx.fillStyle = '#000000';
-                ctx.fillRect(10, 10, 4, 4);
-                break;
-                
-            case 'speed':
-                // Arrow up icon
-                ctx.fillStyle = '#66ccff';
-                ctx.fillRect(10, 16, 4, 6);
-                ctx.fillRect(6, 12, 12, 4);
-                ctx.fillRect(8, 8, 8, 4);
-                ctx.fillRect(10, 4, 4, 4);
-                break;
-                
-            case 'jetpack':
-                // Jetpack icon (rocket/arrow up with flames)
-                ctx.fillStyle = '#ffaa66';
-                ctx.fillRect(10, 4, 4, 12);
-                ctx.fillRect(8, 16, 8, 4);
-                ctx.fillStyle = '#ff6666';
-                ctx.fillRect(6, 18, 12, 2);
-                ctx.fillRect(8, 20, 8, 2);
-                break;
-                
-            case 'flag':
-                // Flag icon
-                ctx.fillStyle = '#ff66aa';
-                ctx.fillRect(4, 4, 2, 16);
-                ctx.fillRect(6, 4, 12, 8);
-                ctx.fillStyle = '#ffffff';
-                ctx.fillRect(8, 6, 8, 2);
-                ctx.fillRect(8, 8, 8, 2);
-                break;
-        }
-        
-        return canvas.toDataURL();
-    }
-
     // Consume one stack of `itemId` from the player's inventory and apply it.
     // autoApply pickups (ammo/jetpack/flag) don't sit in items, so we just
     // surface a hint when the player clicks them in the quickbar.
@@ -6076,106 +6045,83 @@ class Game3D {
     }
     
     shouldBlockInput(event) {
-        // Block input when modals/inputs are focused
         if (this.isDrawerOpen) {
-            // Allow drawer-specific keys
             const allowedKeys = ['KeyM', 'Escape', 'Tab', 'Enter', 'ArrowUp', 'ArrowDown', 'KeyV', 'KeyG'];
             return !allowedKeys.includes(event.code);
         }
-        
-        // Block input when settings modal is open
+
         if (this.modalOpen) {
-            // Allow modal-specific keys
             const allowedKeys = ['Escape', 'KeyP', 'KeyV', 'KeyG'];
             return !allowedKeys.includes(event.code);
         }
-        
-        // Block input when toolbox modal is open (create mode)
+
         if (this.gameMode === 'create' && this.toolboxModalOpen) {
-            // Allow modal-specific keys
             const allowedKeys = ['Escape', 'KeyT', 'KeyV', 'KeyG'];
             return !allowedKeys.includes(event.code);
         }
-        
-        // Block weapon switching keys (1-9) when not in play mode
+
+        // Quickbar number keys only fire in play mode
         if (event.code >= 'Digit1' && event.code <= 'Digit9') {
             if (this.gameMode !== 'play') {
                 return true;
             }
         }
-        
-        // Block input when game is not in play mode (except for specific keys)
+
         if (this.gameMode !== 'play') {
             const allowedKeys = [
                 'KeyP', 'Escape', 'ArrowLeft', 'ArrowRight', 'Digit1', 'Digit3', // Settings and maze switching
-                'KeyT', 'KeyQ', 'KeyE', 'ShiftLeft', 'ShiftRight', 'KeyV', 'KeyG' // Create mode tools & view toggles
+                'KeyT', 'KeyQ', 'KeyE', 'ShiftLeft', 'ShiftRight', 'KeyV', 'KeyG' // Create-mode tools & view toggles
             ];
             return !allowedKeys.includes(event.code);
         }
-        
+
         return false;
     }
     
     setupEventListeners() {
-        // Keyboard events
         document.addEventListener('keydown', (event) => {
             this.keys[event.code] = true;
-            
-            // Debug: Log all key presses
-            if (event.code === 'KeyV') {
-            }
-            
-            // Comprehensive input blocking system
+
             if (this.shouldBlockInput(event)) {
                 return;
             }
-            
-            // Track SHIFT key for create mode
+
             if (event.code === 'ShiftLeft' || event.code === 'ShiftRight') {
                 if (this.gameMode === 'create') {
                     this.createMode.isShiftHeld = true;
+                } else {
+                    this.player.ducked = true;
                 }
             }
-            
-            // Control scheme switching — disabled: Digit1/Digit3 are quickbar slots in play mode.
-            // Use the settings modal (P) to change control scheme.
 
-
-            // Maze switching controls
+            // Arrow keys switch maze
             if (event.code === 'ArrowLeft') {
                 this.switchMaze((this.currentMazeIndex - 1 + this.savedMazes.length) % this.savedMazes.length);
             }
             if (event.code === 'ArrowRight') {
                 this.switchMaze((this.currentMazeIndex + 1) % this.savedMazes.length);
             }
-            
-            // Open settings modal with P key
+
             if (event.code === 'KeyP') {
                 this.toggleSettingsModal();
             }
-            
-            // Close drawer with ESC
+
             if (event.code === 'Escape' && this.isDrawerOpen) {
                 this.isDrawerOpen = false;
                 this.hideDrawerCursor();
                 this.updateDrawerUI();
             }
-            
-            // Open drawer with M key
+
             if (event.code === 'KeyM') {
                 this.toggleMoreDrawer();
             }
-            
-            // Open toolbox modal with T key (create mode only)
+
             if (event.code === 'KeyT' && this.gameMode === 'create') {
                 this.toggleToolboxModal();
             }
-            
-            // Weapon switching is now handled by selectGridItemByShortcut()
-            
-            // Q and E for tank controls (scheme 3) or create mode tools
+
+            // Q/E: create-mode tools, OR tank turn (scheme 3)
             if (this.gameMode === 'create' && !this.modalOpen) {
-                // Create mode: Q for wall, E for erase
                 if (event.code === 'KeyQ') {
                     this.setCreateTool('wall');
                 }
@@ -6183,16 +6129,15 @@ class Game3D {
                     this.setCreateTool('erase');
                 }
             } else if (this.controlScheme === 3) {
-                // Tank controls: Q and E for turning
                 if (event.code === 'KeyE') {
-                    this.characterRotation -= Math.PI / 2; // 90 degrees left
+                    this.characterRotation -= Math.PI / 2;
                 }
                 if (event.code === 'KeyQ') {
-                    this.characterRotation += Math.PI / 2; // 90 degrees right
+                    this.characterRotation += Math.PI / 2;
                 }
             }
-            
-            // Command: cycle camera angle (isometric only)
+
+            // Cmd: cycle camera angle (isometric only)
             if (event.code === 'MetaLeft' || event.code === 'MetaRight') {
                 event.preventDefault();
                 if (this.viewMode !== 'fpv') {
@@ -6200,16 +6145,15 @@ class Game3D {
                 }
             }
 
-            // Toggle isometric orbit with O in play mode
+            // O: toggle isometric orbit (not valid in FPV)
             if (event.code === 'KeyO' && this.gameMode === 'play') {
-                // Disable orbit in FPV; only allowed in isometric view
                 if (this.viewMode !== 'fpv') {
                     this.playMode.orbitEnabled = !this.playMode.orbitEnabled;
                     this.playMode.lastMouseX = null;
                 }
             }
 
-            // Toggle between first-person and second-person (iso) only
+            // V: swap FPV / iso
             if (event.code === 'KeyV' && !event.repeat) {
                 this.setViewMode(this.viewMode === 'fpv' ? 'iso' : 'fpv');
             }
@@ -6243,33 +6187,22 @@ class Game3D {
                 return;
             }
 
-            // Test crosshair visibility (temporary)
-            if (event.code === 'KeyC') {
-                const testCrosshair = document.getElementById('crosshair');
-                if (testCrosshair) {
-                    testCrosshair.style.display = 'block';
-                }
-            }
-            
-            // Reload weapon
             if (event.code === 'KeyR') {
                 this.reloadWeapon();
             }
-            
-            // Grid item shortcuts (1-9)
+
+            // Quickbar slot shortcuts
             if (event.code >= 'Digit1' && event.code <= 'Digit9') {
                 const shortcut = event.code.replace('Digit', '');
                 this.selectGridItemByShortcut(shortcut);
             }
 
-            // Reset view/spawn if things go off-screen
+            // T: reset view / spawn (escape hatch when something goes off-screen)
             if (event.code === 'KeyT') {
-                // Exit pointer lock for clarity
                 if (document.pointerLockElement) document.exitPointerLock();
                 this.setViewMode('iso');
                 this.currentCameraAngle = 0;
                 this.playMode.mouseNDC.set(0, 0);
-                // Prefer labyrinth start if available
                 const cur = this.savedMazes[this.currentMazeIndex];
                 if (cur && cur.type === 'labyrinth' && this.levelStartWorld) {
                     this.player.position.copy(this.levelStartWorld);
@@ -6277,49 +6210,42 @@ class Game3D {
                     this.player.position.set(0, 0, 0);
                 }
                 this.characterRotation = 0;
-                // Nudge camera immediately
                 this.updateCamera();
             }
 
-            // Runtime model yaw alignment helpers
+            // Y/U: nudge model yaw offset (debug alignment for new character GLTFs)
             if (event.code === 'KeyY') {
-                // Rotate model yaw offset +90°
                 this.modelYawOffset = (this.modelYawOffset + Math.PI / 2) % (Math.PI * 2);
             }
             if (event.code === 'KeyU') {
-                // Rotate model yaw offset -90°
                 this.modelYawOffset = (this.modelYawOffset - Math.PI / 2 + Math.PI * 2) % (Math.PI * 2);
             }
         });
-        
+
         document.addEventListener('keyup', (event) => {
             this.keys[event.code] = false;
-            
-            // Track SHIFT key release for create mode
+
             if (event.code === 'ShiftLeft' || event.code === 'ShiftRight') {
                 if (this.gameMode === 'create') {
                     this.createMode.isShiftHeld = false;
-                    this.createMode.startLinePos = null; // Reset line start
+                    this.createMode.startLinePos = null;
+                } else {
+                    this.player.ducked = false;
                 }
             }
-            
-            // No special handling needed on space release now
         });
-        
-        // Mouse events - behavior depends on control scheme
+
+        // Mouse behavior depends on control scheme + view mode
         document.addEventListener('mousemove', (event) => {
-            // Block mouse input when drawer is open
             if (this.isDrawerOpen) {
                 return;
             }
-            
-            // Handle create mode preview
+
             if (this.gameMode === 'create' && !this.modalOpen) {
                 this.handleCreateModeHover();
-                // Don't process other mouse events in create mode
                 return;
             } else if (this.gameMode === 'play' && !this.modalOpen) {
-                // Track mouse for aim/orbit. Use pointer lock deltas if locked; otherwise client coords.
+                // Pointer-lock deltas when locked, client coords otherwise.
                 const canvas = document.getElementById('gameCanvas');
                 const rect = canvas.getBoundingClientRect();
                 if (this.isPointerLocked) {
@@ -6333,27 +6259,22 @@ class Game3D {
                         this.playMode.mouseNDC.y - event.movementY * scaleY,
                         -1, 1
                     );
-                    // In FPV, mouse controls pitch directly
                     if (this.viewMode === 'fpv' && !this.playMode.orbitEnabled) {
                         this.fpvPitch = (this.fpvPitch || 0) - event.movementY * 0.0025;
-                        // Yaw from mouse X
                         this.characterRotation -= event.movementX * this.fpvYawSensitivity;
-                        const limit = Math.PI / 3; // ~60 degrees up/down
+                        const limit = Math.PI / 3; // ~60° up/down
                         this.fpvPitch = Math.max(-limit, Math.min(limit, this.fpvPitch));
                     }
                     if (this.playMode.orbitEnabled && this.viewMode !== 'fpv') {
                         this.currentCameraAngle = (this.currentCameraAngle + event.movementX * 0.2) % 360;
                     }
-                    // Ghost camera mouse look
                     if (this.viewMode === 'ghost') {
-                        // Update yaw (Y rotation) and pitch (X rotation) separately
                         this.ghostCamera.rotation.y -= event.movementX * this.ghostCamera.mouseSensitivity;
                         this.ghostCamera.rotation.x -= event.movementY * this.ghostCamera.mouseSensitivity;
-                        
-                        // Clamp pitch to prevent over-rotation
+
                         this.ghostCamera.rotation.x = Math.max(-Math.PI/2, Math.min(Math.PI/2, this.ghostCamera.rotation.x));
-                        
-                        // Update quaternion from Euler angles (Y first, then X to avoid roll)
+
+                        // Y first then X to avoid roll
                         const quatY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), this.ghostCamera.rotation.y);
                         const quatX = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), this.ghostCamera.rotation.x);
                         this.ghostCamera.quaternion.multiplyQuaternions(quatY, quatX);
@@ -6373,41 +6294,34 @@ class Game3D {
                 return;
             } else if (this.isPointerLocked && !this.modalOpen) {
                 if (this.controlScheme === 1) {
-                    // Scheme 1: Mouse controls character rotation
                     this.characterRotation -= event.movementX * 0.002;
                 } else if (this.controlScheme === 2 && this.cameraMode === 'orbit') {
-                    // Scheme 2: Mouse controls camera orbit only when Space is held
+                    // Mouse orbits camera only while Space is held
                     this.orbitMouseX += event.movementX * 0.002;
                     this.orbitMouseY += event.movementY * 0.002;
                     this.orbitMouseY = Math.max(-Math.PI/2, Math.min(Math.PI/2, this.orbitMouseY));
                 } else if (this.controlScheme === 4) {
-                    // Scheme 4: Mouse controls character facing direction
                     this.mouse.x += event.movementX * 0.002;
                     this.mouse.y += event.movementY * 0.002;
                     this.mouse.y = Math.max(-Math.PI/2, Math.min(Math.PI/2, this.mouse.y));
-                    
-                    // Character faces mouse direction
+
                     this.characterRotation = this.mouse.x;
                 }
-                // Scheme 3: No mouse control (tank controls)
+                // Scheme 3 is tank controls — no mouse contribution.
             }
         });
-        
-        // Mouse down events
+
         document.addEventListener('mousedown', (event) => {
-            // Block mouse input when drawer is open
             if (this.isDrawerOpen) {
                 return;
             }
-            
+
             if (this.gameMode === 'create' && !this.modalOpen) {
                 this.createMode.isMouseDown = true;
                 this.handleCreateModeClick(event);
             } else if (this.gameMode === 'play' && !this.modalOpen) {
-                // Handle press-and-drag continuous move if holding button (optional)
                 this.handlePlayClick(event);
-                // Start continuous firing for machine gun
-                if (event.button === 0) { // Left click
+                if (event.button === 0) {
                     const weapon = this.getCurrentWeapon();
                     if (weapon && weapon.isContinuous) {
                         this.isFiring = true;
@@ -6415,27 +6329,23 @@ class Game3D {
                 }
             }
         });
-        
-        // Mouse up events
+
         document.addEventListener('mouseup', (event) => {
-            // Block mouse input when drawer is open
             if (this.isDrawerOpen) {
                 return;
             }
-            
+
             if (this.gameMode === 'create' && !this.modalOpen) {
                 this.createMode.isMouseDown = false;
                 this.createMode.lastGridPos = null;
-                this.createMode.startLinePos = null; // Reset line start
+                this.createMode.startLinePos = null;
             } else if (this.gameMode === 'play' && !this.modalOpen) {
-                // Stop continuous firing
-                if (event.button === 0) { // Left click
+                if (event.button === 0) {
                     this.isFiring = false;
                 }
             }
         });
-        
-        // Click handler
+
         document.addEventListener('click', (event) => {
             // Drawer is a modal-ish overlay — don't grab pointer-lock or fire.
             if (this.isDrawerOpen) return;
@@ -6444,12 +6354,11 @@ class Game3D {
             } else if (this.gameMode === 'play' && !this.modalOpen) {
                 // On touch devices, the on-screen Fire button drives shooting — skip pointer lock entirely.
                 if (this.isTouchDevice) return;
-                // Ensure pointer lock; first click acquires lock instead of shooting
+                // First click in play mode acquires pointer lock instead of firing.
                 if (!this.isPointerLocked) {
                     document.body.requestPointerLock();
                     return;
                 }
-                // Left click to shoot toward cursor / enemy
                 this.handlePlayClick(event);
             }
         });
@@ -6477,7 +6386,6 @@ class Game3D {
                 document.body.style.cursor = 'default';
                 return;
             }
-            // Cursor visibility based on mode/lock
             if (this.isPointerLocked && this.gameMode === 'play') {
                 document.body.style.cursor = 'none';
             } else if (this.gameMode === 'create') {
@@ -6491,23 +6399,20 @@ class Game3D {
                 ch.style.display = (this.gameMode === 'play' && this.viewMode === 'fpv') ? 'block' : 'none';
             }
         });
-        
-        // Window resize
+
         window.addEventListener('resize', () => {
             this.camera.aspect = window.innerWidth / window.innerHeight;
             this.camera.updateProjectionMatrix();
             this.renderer.setSize(window.innerWidth, window.innerHeight);
         });
-        
-        // Mouse wheel for weapon switching
+
+        // Mouse wheel switches weapon
         document.addEventListener('wheel', (event) => {
-            // Block wheel input when drawer is open
             if (this.isDrawerOpen) {
                 return;
             }
-            
+
             if (this.gameMode === 'play' && !this.modalOpen) {
-                // Weapon switching with mouse wheel
                 const direction = event.deltaY > 0 ? 1 : -1;
                 this.switchWeapon(direction);
             }
@@ -6714,62 +6619,46 @@ class Game3D {
     }
 
     updatePlayer(deltaTime) {
-        // Ghost camera movement
         if (this.viewMode === 'ghost') {
             this.updateGhostCamera(deltaTime);
             this.updateCamera();
             return;
         }
-        
-        // Block player movement when drawer is open
+
         if (this.isDrawerOpen) {
             return;
         }
-        
-        // Apply speed boost
+
         const speedMultiplier = 1 + (this.powerUps.speedBoost * 0.3); // 30% per stack
         const speed = 10 * speedMultiplier;
         const jumpForce = 15;
         const gravity = -30;
-        
-        // Build desired movement vector
+
         const direction = new THREE.Vector3();
 
         if (this.gameMode === 'play') {
-            // WASD movement camera-relative; mouse aims character
-            // Compute camera-aligned basis on XZ plane
+            // WASD is camera-relative; mouse aims character.
             const camForward = new THREE.Vector3();
             this.camera.getWorldDirection(camForward);
             camForward.y = 0; camForward.normalize();
-            // Right vector = forward x up (camera-relative)
             const up = new THREE.Vector3(0,1,0);
             const camRight = camForward.clone().cross(up).normalize();
-            // Inputs
             let forwardIn = 0, strafeIn = 0;
             if (this.keys['KeyW']) forwardIn += 1;
             if (this.keys['KeyS']) forwardIn -= 1;
             if (this.keys['KeyD']) strafeIn += 1;
             if (this.keys['KeyA']) strafeIn -= 1;
             if (forwardIn !== 0 || strafeIn !== 0) {
-                // Move in the camera's facing direction for W (away from camera)
                 direction.add(camForward.clone().multiplyScalar(forwardIn));
                 direction.add(camRight.clone().multiplyScalar(strafeIn));
             }
-            // Third-person facing:
-            //   - When moving with WASD, the body turns to face the movement
-            //     direction so the character actually walks where it's looking
-            //     (no more sliding sideways/backwards with the body locked to the
-            //     mouse).
-            //   - When idle, the body re-orients toward the mouse aim point so
-            //     you can still face/aim while standing still.
-            //   - The mouse is also the "forward reference" for WASD (W goes away
-            //     from camera, etc.), so movement-facing is implicitly relative
-            //     to the mouse-driven view.
+            // Third-person facing: turn toward movement direction while moving,
+            // toward mouse-aim point while idle. Stops the body locking to the
+            // mouse and sliding sideways during WASD.
             if (this.viewMode !== 'fpv') {
                 let targetRot = null;
                 const moving = (forwardIn !== 0 || strafeIn !== 0);
                 if (moving) {
-                    // direction is already a camera-relative XZ vector.
                     targetRot = Math.atan2(direction.x, direction.z);
                 } else {
                     const ray = new THREE.Raycaster();
@@ -6790,10 +6679,8 @@ class Game3D {
                     this.characterRotation += step;
                 }
             }
-            // Normalize desired move direction
             if (direction.lengthSq() > 0) direction.normalize();
-            // Compute desired horizontal velocity (with sprint)
-            const moveSpeed = this.playMode.moveSpeed * ((this.keys['ShiftLeft'] || this.keys['ShiftRight']) ? 1.8 : 1);
+            const moveSpeed = this.playMode.moveSpeed * (this.player.ducked ? 0.45 : 1);
             const desiredVX = direction.x * moveSpeed;
             const desiredVZ = direction.z * moveSpeed;
             const curVX = this.player.velocity.x;
@@ -6806,68 +6693,54 @@ class Game3D {
             };
             let newVX = approach(curVX, desiredVX, accel * deltaTime);
             let newVZ = approach(curVZ, desiredVZ, accel * deltaTime);
-            
-            // Axis-separated collision and movement for smoother sliding and wall-walking
+
+            // Axis-separated collision so the player slides along walls instead of sticking.
             const pos = this.player.position.clone();
-            
-            // X axis movement
+
             let testPos = pos.clone();
             testPos.x += newVX * deltaTime;
             if (this.checkCollisionAxis(testPos, 'x')) {
-                // X collision - try to slide along wall by checking if we can move in Z
                 const slideTest = this.player.position.clone();
                 slideTest.x = testPos.x;
                 if (!this.checkCollision(slideTest)) {
-                    // Can slide - allow X movement
                     this.player.position.x = testPos.x;
                 } else {
-                    // Cannot slide - stop X movement
                     newVX = 0;
                 }
             } else {
-                // No X collision - allow movement
                 this.player.position.x = testPos.x;
             }
-            
-            // Z axis movement
+
             testPos = this.player.position.clone();
             testPos.z += newVZ * deltaTime;
             if (this.checkCollisionAxis(testPos, 'z')) {
-                // Z collision - try to slide along wall by checking if we can move in X
                 const slideTest = this.player.position.clone();
                 slideTest.z = testPos.z;
                 if (!this.checkCollision(slideTest)) {
-                    // Can slide - allow Z movement
                     this.player.position.z = testPos.z;
                 } else {
-                    // Cannot slide - stop Z movement
                     newVZ = 0;
                 }
             } else {
-                // No Z collision - allow movement
                 this.player.position.z = testPos.z;
             }
-            // Commit horizontal velocities
             this.player.velocity.x = newVX;
             this.player.velocity.z = newVZ;
         } else {
-            // Keyboard schemes only in non-play or as fallback
-            // Scheme 3 (Tank): A/D turn, W/S move forward/back relative to facing. No strafe.
+            // Keyboard schemes for non-play or fallback.
+            // Scheme 3 (Tank): A/D turn, W/S forward/back, no strafe.
             // Scheme 1 (Mouse Turn): A/D strafe, mouse controls facing.
             const isTank = this.controlScheme === 3;
-            const turnSpeed = 2.5; // radians per second for smooth tank turning
-            
+            const turnSpeed = 2.5;
+
             if (isTank) {
-                // Turn with A/D (continuous), optional snap with Q/E handled in keydown
                 const turnLeft = this.keys['KeyA'] ? 1 : 0;
                 const turnRight = this.keys['KeyD'] ? 1 : 0;
                 this.characterRotation += (turnRight - turnLeft) * turnSpeed * deltaTime;
-                
-                // Forward/Backward
+
                 if (this.keys['KeyW']) direction.z -= 1;
                 if (this.keys['KeyS']) direction.z += 1;
             } else {
-                // Mouse-turn scheme: WASD with strafe
                 if (this.keys['KeyW']) direction.z -= 1;
                 if (this.keys['KeyS']) direction.z += 1;
                 if (this.keys['KeyA']) direction.x -= 1;
@@ -6875,58 +6748,46 @@ class Game3D {
             }
         }
 
-        // Apply facing to movement when using keyboard schemes
         if (this.gameMode !== 'play') {
             direction.applyEuler(new THREE.Euler(0, this.characterRotation, 0));
         }
         if (this.gameMode !== 'play' && direction.lengthSq() > 0) direction.normalize();
-        
+
         if (this.gameMode !== 'play') {
-            // Apply movement with collision detection (legacy)
             const newVelocityX = direction.x * speed;
             const newVelocityZ = direction.z * speed;
-            
-            // Axis-separated collision for wall-walking in non-play mode
+
+            // Axis-separated collision so the player slides along walls.
             const pos = this.player.position.clone();
-            
-            // X axis movement
+
             let testPos = pos.clone();
             testPos.x += newVelocityX * deltaTime;
             if (this.checkCollisionAxis(testPos, 'x')) {
-                // X collision - try to slide along wall
                 const slideTest = this.player.position.clone();
                 slideTest.x = testPos.x;
                 if (!this.checkCollision(slideTest)) {
-                    // Can slide - allow X movement
                     this.player.position.x = testPos.x;
                     this.player.velocity.x = newVelocityX;
                 } else {
-                    // Cannot slide - stop X movement
                     this.player.velocity.x = 0;
                 }
             } else {
-                // No X collision - allow movement
                 this.player.position.x = testPos.x;
                 this.player.velocity.x = newVelocityX;
             }
-            
-            // Z axis movement
+
             testPos = this.player.position.clone();
             testPos.z += newVelocityZ * deltaTime;
             if (this.checkCollisionAxis(testPos, 'z')) {
-                // Z collision - try to slide along wall
                 const slideTest = this.player.position.clone();
                 slideTest.z = testPos.z;
                 if (!this.checkCollision(slideTest)) {
-                    // Can slide - allow Z movement
                     this.player.position.z = testPos.z;
                     this.player.velocity.z = newVelocityZ;
                 } else {
-                    // Cannot slide - stop Z movement
                     this.player.velocity.z = 0;
                 }
             } else {
-                // No Z collision - allow movement
                 this.player.position.z = testPos.z;
                 this.player.velocity.z = newVelocityZ;
             }
@@ -6982,19 +6843,17 @@ class Game3D {
             this.jetpackThrust = Math.max(this.jetpackThrust - deltaTime * 2, 0);
         }
         
-        // Update vertical position only here; horizontal was applied above for play mode
+        // Vertical only — horizontal was already applied above for play mode.
         this.player.position.y += this.player.velocity.y * deltaTime;
-        
-        // Update player invulnerability timer
+
         if (this.player.invulnerable) {
             this.player.invulnerabilityTimer -= deltaTime;
             if (this.player.invulnerabilityTimer <= 0) {
                 this.player.invulnerable = false;
             }
         }
-        
-        // Check collision with enemies — use the enemy's per-type contactDamage
-        // (giants smash for 20, chicks peck for 3, etc).
+
+        // Enemy contact damage scales by type (giants smash for 20, chicks peck for 3).
         if (this.gameMode === 'play' && this.playMode.enemies) {
             for (const enemy of this.playMode.enemies) {
                 const distance = this.player.position.distanceTo(enemy.position);
@@ -7005,69 +6864,49 @@ class Game3D {
                 }
             }
         }
-        
-        // Wall collision for Y-axis (landing on walls)
+
         this.checkWallCollisionY();
-        
-        // Ground collision
+
         if (this.player.position.y <= 0) {
             this.player.position.y = 0;
             this.player.velocity.y = 0;
             this.player.onGround = true;
         }
-        
-        // Update character model position and rotation
+
         if (this.player.model) {
             this.player.model.position.copy(this.player.position);
-            // Character faces aim/move direction + model yaw offset
             this.player.model.rotation.y = this.characterRotation + (this.modelYawOffset || 0);
         }
-        
-        // Update character animation
+
         this.updateCharacterAnimation(deltaTime);
-        
-        // Update direction indicators
+
         this.updateDirectionIndicators();
-        
-        // Update camera position based on mode
+
         this.updateCamera();
     }
-    
-    
-    setControlScheme(scheme) {
-        // Only allow the two classic schemes: 1 (Mouse Turn) and 3 (Tank)
-        if (scheme !== 1 && scheme !== 3) {
-            scheme = 1;
-        }
-        this.controlScheme = scheme;
-        this.cameraMode = 'fixed';
-    }
-    
-    
+
+
     cycleCameraAngle() {
-        // Cycle through fixed camera angles: 0°, 90°, 180°, 270°
+        // 4 fixed quadrants: 0°, 90°, 180°, 270°.
         this.currentCameraAngle = (this.currentCameraAngle + 90) % 360;
     }
-    
+
     updateDirectionIndicators() {
-        // Update UI indicators
         const facingElement = document.getElementById('facing-direction');
         const cameraElement = document.getElementById('camera-angle');
-        
+
         if (facingElement && cameraElement) {
-            // Convert character rotation to degrees and direction
             const facingDegrees = (this.characterRotation * 180 / Math.PI) % 360;
             const facingDirection = this.getDirectionName(facingDegrees);
-            
+
             facingElement.textContent = `Facing: ${facingDirection} (${Math.round(facingDegrees)}°)`;
             cameraElement.textContent = `Camera: ${this.currentCameraAngle}°`;
         }
     }
-    
+
     getDirectionName(degrees) {
-        // Normalize degrees to 0-360
         degrees = ((degrees % 360) + 360) % 360;
-        
+
         if (degrees >= 337.5 || degrees < 22.5) return 'North';
         if (degrees >= 22.5 && degrees < 67.5) return 'Northeast';
         if (degrees >= 67.5 && degrees < 112.5) return 'East';
@@ -7102,160 +6941,122 @@ class Game3D {
 
     checkCollision(position) {
         if (this.checkEnemyCollision(position)) return true;
-        // Player collision box size
         const playerRadius = 0.8;
         const playerHeight = 2;
 
-        // Check collision with each wall (horizontal only - Y handled separately)
-        for (let wall of this.walls) {
+        // Horizontal only — Y handled by checkWallCollisionY.
+        let collided = false;
+        this._iterWallsNear(position.x, position.z, playerRadius + 1, (wall) => {
             const wallPos = wall.position;
             const wallSize = wall.size;
-            
-            // Check if player is within wall bounds horizontally
             if (position.x + playerRadius > wallPos.x - wallSize.x/2 &&
                 position.x - playerRadius < wallPos.x + wallSize.x/2 &&
                 position.z + playerRadius > wallPos.z - wallSize.z/2 &&
                 position.z - playerRadius < wallPos.z + wallSize.z/2) {
-                
-                // Check if player is at the right height to collide with wall
                 const wallTop = wallPos.y + wallSize.y/2;
                 const wallBottom = wallPos.y - wallSize.y/2;
                 const playerBottom = position.y;
                 const playerTop = position.y + playerHeight;
-                
-                // Only collide if player is at the right height
                 if (playerTop > wallBottom && playerBottom < wallTop) {
-                    return true; // Collision detected
+                    collided = true;
+                    return false;
                 }
             }
-        }
-        
-        return false; // No collision
+        });
+        return collided;
     }
     
     checkCollisionAxis(position, axis) {
         if (this.checkEnemyCollision(position)) return true;
-        // Player collision box size
         const playerRadius = 0.8;
         const playerHeight = 2;
-        
-        // Check collision with each wall for specific axis (horizontal only)
-        for (let wall of this.walls) {
+
+
+        const qx = axis === 'x' ? position.x : this.player.position.x;
+        const qz = axis === 'z' ? position.z : this.player.position.z;
+        let collided = false;
+        this._iterWallsNear(qx, qz, playerRadius + 1, (wall) => {
             const wallPos = wall.position;
             const wallSize = wall.size;
-            
-            if (axis === 'x') {
-                // Check X-axis collision only
-                if (position.x + playerRadius > wallPos.x - wallSize.x/2 &&
-                    position.x - playerRadius < wallPos.x + wallSize.x/2 &&
-                    this.player.position.z + playerRadius > wallPos.z - wallSize.z/2 &&
-                    this.player.position.z - playerRadius < wallPos.z + wallSize.z/2) {
-                    
-                    // Check if player is at the right height to collide with wall
-                    const wallTop = wallPos.y + wallSize.y/2;
-                    const wallBottom = wallPos.y - wallSize.y/2;
-                    const playerBottom = position.y;
-                    const playerTop = position.y + playerHeight;
-                    
-                    if (playerTop > wallBottom && playerBottom < wallTop) {
-                        return true;
-                    }
-                }
-            } else if (axis === 'z') {
-                // Check Z-axis collision only
-                if (this.player.position.x + playerRadius > wallPos.x - wallSize.x/2 &&
-                    this.player.position.x - playerRadius < wallPos.x + wallSize.x/2 &&
-                    position.z + playerRadius > wallPos.z - wallSize.z/2 &&
-                    position.z - playerRadius < wallPos.z + wallSize.z/2) {
-                    
-                    // Check if player is at the right height to collide with wall
-                    const wallTop = wallPos.y + wallSize.y/2;
-                    const wallBottom = wallPos.y - wallSize.y/2;
-                    const playerBottom = position.y;
-                    const playerTop = position.y + playerHeight;
-                    
-                    if (playerTop > wallBottom && playerBottom < wallTop) {
-                        return true;
-                    }
+            const px = axis === 'x' ? position.x : this.player.position.x;
+            const pz = axis === 'z' ? position.z : this.player.position.z;
+            if (px + playerRadius > wallPos.x - wallSize.x/2 &&
+                px - playerRadius < wallPos.x + wallSize.x/2 &&
+                pz + playerRadius > wallPos.z - wallSize.z/2 &&
+                pz - playerRadius < wallPos.z + wallSize.z/2) {
+                const wallTop = wallPos.y + wallSize.y/2;
+                const wallBottom = wallPos.y - wallSize.y/2;
+                const playerBottom = position.y;
+                const playerTop = position.y + playerHeight;
+                if (playerTop > wallBottom && playerBottom < wallTop) {
+                    collided = true; return false;
                 }
             }
-        }
-        
-        return false;
+        });
+        return collided;
     }
     
     checkWallCollisionY() {
-        // Player collision box size
         const playerRadius = 0.8;
         const playerHeight = 2;
-        
-        // Check collision with each wall for Y-axis
-        for (let wall of this.walls) {
+
+        // Solid crystal ceiling — cap the player below the roof so jumps /
+        // jetpack thrust don't pop through into the sky. Destroyed roof tiles
+        // open holes, so check the tile directly over the player first.
+        if (this.roofY != null) {
+            const ceiling = this.roofY;
+            const tileAbove = this._roofTileAt(this.player.position.x, this.player.position.z);
+            if (tileAbove && this.player.position.y + playerHeight >= ceiling) {
+                this.player.position.y = ceiling - playerHeight;
+                if (this.player.velocity.y > 0) this.player.velocity.y = 0;
+            }
+        }
+
+        // Check collision with each wall for Y-axis (spatial-hash limited).
+        let earlyReturn = false;
+        this._iterWallsNear(this.player.position.x, this.player.position.z, playerRadius + 1, (wall) => {
+            if (earlyReturn) return false;
             const wallPos = wall.position;
             const wallSize = wall.size;
-            
-            // Check if player is horizontally within wall bounds
             if (this.player.position.x + playerRadius > wallPos.x - wallSize.x/2 &&
                 this.player.position.x - playerRadius < wallPos.x + wallSize.x/2 &&
                 this.player.position.z + playerRadius > wallPos.z - wallSize.z/2 &&
                 this.player.position.z - playerRadius < wallPos.z + wallSize.z/2) {
-                
-                // Player is horizontally within wall - check Y collision
                 const wallTop = wallPos.y + wallSize.y/2;
                 const wallBottom = wallPos.y - wallSize.y/2;
                 const playerBottom = this.player.position.y;
                 const playerTop = this.player.position.y + playerHeight;
-                
-                // Check if player is falling and would land on top of wall
-                if (this.player.velocity.y <= 0 && 
-                    playerBottom <= wallTop && 
-                    playerTop > wallTop) {
-                    // Land on top of wall
+                if (this.player.velocity.y <= 0 && playerBottom <= wallTop && playerTop > wallTop) {
                     this.player.position.y = wallTop;
                     this.player.velocity.y = 0;
                     this.player.onGround = true;
-                    return;
+                    earlyReturn = true; return false;
                 }
-                
-                // Check if player is moving up and would hit wall ceiling
-                if (this.player.velocity.y > 0 && 
-                    playerTop >= wallBottom && 
-                    playerBottom < wallBottom) {
-                    // Hit wall ceiling
+                if (this.player.velocity.y > 0 && playerTop >= wallBottom && playerBottom < wallBottom) {
                     this.player.position.y = wallBottom - playerHeight;
                     this.player.velocity.y = 0;
-                    return;
+                    earlyReturn = true; return false;
                 }
-                
-                // Check if player is inside wall horizontally - push out
                 if (playerTop > wallBottom && playerBottom < wallTop) {
-                    // Player is inside wall - determine which side to push out to
-                    const distToLeft = Math.abs(this.player.position.x - (wallPos.x - wallSize.x/2));
+                    const distToLeft  = Math.abs(this.player.position.x - (wallPos.x - wallSize.x/2));
                     const distToRight = Math.abs(this.player.position.x - (wallPos.x + wallSize.x/2));
                     const distToFront = Math.abs(this.player.position.z - (wallPos.z - wallSize.z/2));
-                    const distToBack = Math.abs(this.player.position.z - (wallPos.z + wallSize.z/2));
-                    
+                    const distToBack  = Math.abs(this.player.position.z - (wallPos.z + wallSize.z/2));
                     const minDist = Math.min(distToLeft, distToRight, distToFront, distToBack);
-                    
-                    if (minDist === distToLeft) {
-                        this.player.position.x = wallPos.x - wallSize.x/2 - playerRadius;
-                    } else if (minDist === distToRight) {
-                        this.player.position.x = wallPos.x + wallSize.x/2 + playerRadius;
-                    } else if (minDist === distToFront) {
-                        this.player.position.z = wallPos.z - wallSize.z/2 - playerRadius;
-                    } else {
-                        this.player.position.z = wallPos.z + wallSize.z/2 + playerRadius;
-                    }
+                    if (minDist === distToLeft)       this.player.position.x = wallPos.x - wallSize.x/2 - playerRadius;
+                    else if (minDist === distToRight) this.player.position.x = wallPos.x + wallSize.x/2 + playerRadius;
+                    else if (minDist === distToFront) this.player.position.z = wallPos.z - wallSize.z/2 - playerRadius;
+                    else                              this.player.position.z = wallPos.z + wallSize.z/2 + playerRadius;
                 }
             }
-        }
+        });
     }
     
     updateCamera() {
         // Play-mode camera: Isometric or First-Person
         if (this.gameMode === 'play') {
             if (this.viewMode === 'fpv') {
-                const eyeHeight = 1.6;
+                const eyeHeight = 1.6 - this.player.duckBlend * 0.7;
                 const pitch = this.fpvPitch || 0;
                 const dir = new THREE.Vector3(
                     Math.sin(this.characterRotation) * Math.cos(pitch),
@@ -7265,7 +7066,8 @@ class Game3D {
                 const eye = this.player.position.clone();
                 // Head bob on movement
                 const moving = Math.abs(this.player.velocity.x) + Math.abs(this.player.velocity.z) > 0.1;
-                const bob = moving ? Math.sin(performance.now() / 1000 * this.fpvBobFrequency) * this.fpvBobAmplitude : 0;
+                const bobScale = 1 - this.player.duckBlend * 0.7;
+                const bob = moving ? Math.sin(performance.now() / 1000 * this.fpvBobFrequency) * this.fpvBobAmplitude * bobScale : 0;
                 eye.y += eyeHeight + bob;
                 const target = eye.clone().add(dir);
                 this.camera.position.copy(eye);
@@ -7330,17 +7132,23 @@ class Game3D {
     }
     
     updateCharacterAnimation(deltaTime) {
+        // Smooth duck blend (0 = standing, 1 = fully ducked). 8/sec ≈ ~125ms transition.
+        const duckTarget = this.player.ducked ? 1 : 0;
+        const blendRate = 8 * deltaTime;
+        this.player.duckBlend += THREE.MathUtils.clamp(duckTarget - this.player.duckBlend, -blendRate, blendRate);
+        if (this.player.model) {
+            this.player.model.scale.y = 1 - this.player.duckBlend * 0.45;
+        }
         // Drive skeleton clip selection from movement/jump state before stepping the mixer
         if (this.player.clips) {
             const vx = this.player.velocity ? this.player.velocity.x : 0;
             const vz = this.player.velocity ? this.player.velocity.z : 0;
             const horizSpeed = Math.hypot(vx, vz);
-            const sprinting = !!(this.keys && (this.keys['ShiftLeft'] || this.keys['ShiftRight']));
             let target;
             if (this.player.onGround === false && this.player.clips['Jump']) {
                 target = 'Jump';
             } else if (horizSpeed > 0.5) {
-                target = (sprinting && this.player.clips['Run']) ? 'Run' : 'Walk';
+                target = 'Walk';
             } else {
                 target = 'Idle';
             }
@@ -7356,11 +7164,10 @@ class Game3D {
             const t = Date.now() * 0.008;
             const moving = (this.gameMode === 'play' && (this.keys['KeyW'] || this.keys['KeyS'] || this.keys['KeyA'] || this.keys['KeyD'])) ||
                            this.keys['KeyW'] || this.keys['KeyS'] || this.keys['KeyA'] || this.keys['KeyD'];
-            const sprinting = (this.gameMode === 'play') && (this.keys['ShiftLeft'] || this.keys['ShiftRight']) && moving;
 
             if (moving) {
-                const amp = sprinting ? 0.8 : 0.45;
-                const legAmp = sprinting ? 1.0 : 0.6;
+                const amp = 0.45;
+                const legAmp = 0.6;
                 this.player.leftArm.rotation.x = Math.sin(t) * amp;
                 this.player.rightArm.rotation.x = Math.sin(t + Math.PI) * amp;
                 this.player.leftLeg.rotation.x = Math.sin(t) * legAmp;
@@ -7467,18 +7274,16 @@ class Game3D {
     }
     
     render() {
-        // All rendering and UI updates go here - runs at display refresh rate
+        // All rendering and UI updates happen here at display refresh rate.
         this.clearAllUI();
         this.updateControlsUI();
         this.updateHealthUI();
         this.updateCompassUI();
-        // this.updateWeaponPowerUpUI(); // Replaced by new HUD system
         this.updateCrosshairUI();
         this.updateGroundTargetIndicator();
         this.updateInventoryGridUI();
         this.updateToasts();
 
-        // New HUD elements (health bar / vignette / minimap / objective banner)
         this.updateHealthBarUI();
         this.updateDamageVignetteUI();
         this.updateMuzzleFlashUI();
@@ -7486,10 +7291,8 @@ class Game3D {
         this.updateMinimapUI();
         this._updateArenaCountdownUI();
 
-        // Emit UI update for new HUD system
         this.emit('ui:update', this.buildHUDModel());
 
-        // Render the scene
         this.renderer.render(this.scene, this.camera);
     }
 
@@ -7800,7 +7603,6 @@ class Game3D {
                 if (!div.id || (!div.id.includes('health-ui') &&
                     !div.id.includes('health-bar') &&
                     !div.id.includes('compass-ui') &&
-                    !div.id.includes('weapon-powerup-ui') &&
                     !div.id.includes('settings-modal') &&
                     !div.id.includes('toolbox-modal') &&
                     !div.id.includes('inventory-drawer') &&
@@ -7824,53 +7626,7 @@ class Game3D {
         // Replaced by updateHealthBarUI() — keep stub so other call sites don't break.
         const old = document.getElementById('health-ui');
         if (old) old.remove();
-        return;
-        // eslint-disable-next-line no-unreachable
-        if (this.gameMode !== 'play') {
-            return;
-        }
-        let hud = document.getElementById('health-ui');
-        if (!hud) {
-            hud = document.createElement('div');
-            hud.id = 'health-ui';
-            hud.style.position = 'absolute';
-            hud.style.top = '20px';
-            hud.style.right = '20px';
-            hud.style.background = 'rgba(0,0,0,0.8)';
-            hud.style.border = '2px solid #ff6666';
-            hud.style.borderRadius = '8px';
-            hud.style.padding = '12px 16px';
-            hud.style.color = '#ff6666';
-            hud.style.fontFamily = 'Courier New, monospace';
-            hud.style.fontSize = '16px';
-            hud.style.fontWeight = 'bold';
-            hud.style.zIndex = '1000';
-            document.body.appendChild(hud);
-        }
-        
-        const hpPercent = (this.player.hp / this.player.maxHp) * 100;
-        const hpColor = hpPercent > 60 ? '#ffb347' : hpPercent > 30 ? '#ffff00' : '#ff6666';
-        
-        hud.innerHTML = `
-            <div style="text-align: center; margin-bottom: 8px; font-size: 14px; opacity: 0.8;">${this.t('health').toUpperCase()}</div>
-            <div style="text-align: center; font-size: 20px; color: ${hpColor}; margin-bottom: 8px;">
-                ${Math.floor(this.player.hp)}/${this.player.maxHp}
-            </div>
-            <div style="width: 140px; height: 10px; background: rgba(255,255,255,0.2); border-radius: 5px; overflow: hidden;">
-                <div style="
-                    width: ${hpPercent}%; 
-                    height: 100%; 
-                    background: ${hpColor}; 
-                    transition: width 0.1s;
-                "></div>
-            </div>
-        `;
-        hud.style.display = 'block';
     }
-    
-    // Stub kept because the ammo-pickup apply() calls it; the real HUD is the
-    // event-driven one rendered by renderHUD().
-    updateWeaponPowerUpUI() { /* deprecated — see renderHUD */ }
 
     // ===== New HUD System with Cached DOM References =====
 
@@ -7938,16 +7694,15 @@ class Game3D {
     }
     
     updateControlsUI() {
-        // Controls panel is hidden — kept off by default
+        // Controls panel is hidden — kept off by default. The block below is
+        // retained as a reference implementation if it's brought back later.
         const existing = document.getElementById('controls-ui');
         if (existing) existing.style.display = 'none';
         return;
-        // Only show in play mode
         if (this.gameMode !== 'play') {
             return;
         }
-        
-        // Create or update controls UI (top left)
+
         let hud = document.getElementById('controls-ui');
         if (!hud) {
             hud = document.createElement('div');
@@ -7968,28 +7723,24 @@ class Game3D {
             hud.style.boxShadow = '0 4px 20px rgba(255,179,71,0.3)';
             document.body.appendChild(hud);
         }
-        
-        // Get current view mode and control scheme
+
         const viewMode = this.viewMode;
         const isJetpackActive = this.isJetpackActive;
         const isReloading = this.isReloading;
-        
-        // Basic movement controls
+
         const movementControls = [
             'WASD - Move',
             'Mouse - Look Around',
             this.jetpackArmed ? 'Space - Jetpack (hold)' : 'Space - Jump'
         ];
-        
-        // Weapon controls
+
         const weaponControls = [
             'Left Click - Fire',
             'Mouse Wheel - Switch Weapon',
             'R - Reload',
             '1-2 - Select Weapon'
         ];
-        
-        // View controls
+
         const viewControls = [];
         if (viewMode === 'fpv') {
             viewControls.push('V - Birds-eye View');
@@ -8002,8 +7753,7 @@ class Game3D {
             viewControls.push('V - Switch to FPV');
         }
         viewControls.push('Cmd - Cycle Camera Angle');
-        
-        // Game controls
+
         const gameControls = [
             'P - Settings',
             'T - Toolbox',
@@ -8018,8 +7768,7 @@ class Game3D {
         if (this.inventory.flags > 0) {
             gameControls.unshift(`F - Place Flag (${this.inventory.flags})`);
         }
-        
-        // Special states
+
         const specialStates = [];
         if (isJetpackActive) {
             specialStates.push('🚀 Jetpack thrusting');
@@ -8076,7 +7825,6 @@ class Game3D {
     }
     
     updateInventoryGridUI() {
-        // Only show in play mode
         if (this.gameMode !== 'play') {
             const existing = document.getElementById('inventory-grid-ui');
             if (existing) existing.style.display = 'none';
@@ -8097,7 +7845,6 @@ class Game3D {
         if (sig === this._qbSig) return;
         this._qbSig = sig;
 
-        // Create or update inventory grid UI (bottom center)
         let hud = document.getElementById('inventory-grid-ui');
         if (!hud) {
             hud = document.createElement('div');
@@ -8391,7 +8138,7 @@ class Game3D {
         this.setupDrawerKeyboardNavigation();
     }
 
-    // Short effect blurb for an item card (e.g. "+25 HP", "15 dmg · range 2.5").
+    // Short effect blurb for an item card (e.g. "+25 HP", "15 dmg · range 2.5")
     itemEffectText(item) {
         if (item.type === 'weapon') {
             const w = this.WEAPON_STATS[item.id];
@@ -8508,8 +8255,7 @@ class Game3D {
             if (!inBar) return;
             this.clearQuickbarSlot(slotIdx);
         });
-        
-        // Add drag handlers
+
         itemEl.addEventListener('dragstart', (e) => {
             if (isOwned) {
                 this.draggedItem = item.id;
@@ -8622,10 +8368,8 @@ class Game3D {
     }
     
     setupDrawerKeyboardNavigation() {
-        // Remove existing listeners
         document.removeEventListener('keydown', this.drawerKeyHandler);
-        
-        // Create new handler
+
         this.drawerKeyHandler = (e) => {
             if (!this.isDrawerOpen) return;
 
@@ -8705,16 +8449,15 @@ class Game3D {
         const toast = {
             id: this.toastId++,
             message: message,
-            type: type, // 'info', 'success', 'warning', 'error'
+            type: type, // 'info' | 'success' | 'warning' | 'error'
             duration: duration,
             startTime: Date.now(),
             element: null
         };
-        
+
         this.toasts.push(toast);
         this.createToastElement(toast);
-        
-        // Auto-remove after duration
+
         setTimeout(() => {
             this.removeToast(toast.id);
         }, duration);
@@ -8742,8 +8485,7 @@ class Game3D {
         toastEl.style.maxWidth = '400px';
         toastEl.style.textAlign = 'center';
         toastEl.style.wordWrap = 'break-word';
-        
-        // Set type-specific styling
+
         switch (toast.type) {
             case 'success':
                 toastEl.style.border = '2px solid #ffb347';
@@ -8765,39 +8507,37 @@ class Game3D {
         toastEl.innerHTML = toast.message;
         document.body.appendChild(toastEl);
         toast.element = toastEl;
-        
-        // Animate in
+
         setTimeout(() => {
             toastEl.style.opacity = '1';
             toastEl.style.transform = 'translateX(-50%) translateY(0)';
         }, 10);
     }
-    
+
     removeToast(toastId) {
         const toastIndex = this.toasts.findIndex(t => t.id === toastId);
         if (toastIndex === -1) return;
-        
+
         const toast = this.toasts[toastIndex];
         if (toast.element) {
-            // Animate out
             toast.element.style.opacity = '0';
             toast.element.style.transform = 'translateX(-50%) translateY(-20px)';
-            
+
             setTimeout(() => {
                 if (toast.element && toast.element.parentNode) {
                     toast.element.parentNode.removeChild(toast.element);
                 }
             }, 300);
         }
-        
+
         this.toasts.splice(toastIndex, 1);
     }
-    
+
     updateToasts() {
-        // Update toast positions to stack them
+        // Stack toasts vertically at 60px spacing
         this.toasts.forEach((toast, index) => {
             if (toast.element) {
-                const offset = index * 60; // 60px spacing between toasts
+                const offset = index * 60;
                 toast.element.style.top = `${20 + offset}px`;
             }
         });
@@ -8806,9 +8546,7 @@ class Game3D {
     // The drawer used to hide the system cursor and overlay a glowing ring.
     // That made the cursor invisible (and confusing) while interacting with
     // drawer items, so we now keep the OS cursor visible at all times.
-    showDrawerCursor() { document.body.style.cursor = 'default'; }
     hideDrawerCursor() { document.body.style.cursor = ''; }
-    updateDrawerCursorPosition = () => {};
 
     swapQuickbarItems(fromSlot, toSlot) {
         if (fromSlot === toSlot) return;
@@ -8826,12 +8564,10 @@ class Game3D {
     }
     
     updateCompassUI() {
-        // Only show in play mode
         if (this.gameMode !== 'play') {
             return;
         }
-        
-        // Create or update compass UI (bottom right)
+
         let hud = document.getElementById('compass-ui');
         if (!hud) {
             hud = document.createElement('div');
@@ -8855,12 +8591,10 @@ class Game3D {
             hud.style.justifyContent = 'center';
             document.body.appendChild(hud);
         }
-        
-        // Calculate player facing direction
+
         const facingAngle = this.characterRotation * (180 / Math.PI);
         const normalizedAngle = ((facingAngle % 360) + 360) % 360;
-        
-        // Determine cardinal direction
+
         let direction = '';
         let directionSymbol = '';
         if (normalizedAngle >= 337.5 || normalizedAngle < 22.5) {
@@ -8900,7 +8634,6 @@ class Game3D {
     }
     
     updateCrosshairUI() {
-        // Only show crosshair in FPV play mode
         const shouldShow = (this.gameMode === 'play' && this.viewMode === 'fpv');
         const htmlCrosshair = document.getElementById('crosshair');
 
@@ -8930,12 +8663,10 @@ class Game3D {
     }
     
     createGroundTargetIndicator() {
-        // Create a ground target indicator for isometric view
         if (this.groundTargetIndicator) {
             this.scene.remove(this.groundTargetIndicator);
         }
-        
-        // Create outer ring
+
         const outerGeometry = new THREE.RingGeometry(1.2, 1.5, 32);
         const outerMaterial = new THREE.MeshBasicMaterial({
             color: 0xffb347,
@@ -8944,8 +8675,7 @@ class Game3D {
             side: THREE.DoubleSide
         });
         const outerRing = new THREE.Mesh(outerGeometry, outerMaterial);
-        
-        // Create inner ring
+
         const innerGeometry = new THREE.RingGeometry(0.8, 1.0, 32);
         const innerMaterial = new THREE.MeshBasicMaterial({
             color: 0xffb347,
@@ -8954,8 +8684,7 @@ class Game3D {
             side: THREE.DoubleSide
         });
         const innerRing = new THREE.Mesh(innerGeometry, innerMaterial);
-        
-        // Create center dot
+
         const dotGeometry = new THREE.CircleGeometry(0.3, 16);
         const dotMaterial = new THREE.MeshBasicMaterial({
             color: 0xffb347,
@@ -8964,51 +8693,42 @@ class Game3D {
             side: THREE.DoubleSide
         });
         const centerDot = new THREE.Mesh(dotGeometry, dotMaterial);
-        
-        // Group all parts
+
         this.groundTargetIndicator = new THREE.Group();
         this.groundTargetIndicator.add(outerRing);
         this.groundTargetIndicator.add(innerRing);
         this.groundTargetIndicator.add(centerDot);
-        
-        // Position exactly on ground level
+
         this.groundTargetIndicator.position.y = 0;
-        
-        // Rotate to be horizontal (flat on ground)
-        this.groundTargetIndicator.rotation.x = -Math.PI / 2; // Rotate 90 degrees to lay flat
-        
-        // Initially hidden
+        this.groundTargetIndicator.rotation.x = -Math.PI / 2; // lay flat
         this.groundTargetIndicator.visible = false;
-        
+
         this.scene.add(this.groundTargetIndicator);
     }
-    
+
     updateGroundTargetIndicator() {
-        // Only show in isometric, birds-eye, and ghost play modes
+        // Only show in iso/birds-eye/ghost play modes (FPV has a screen-space crosshair instead)
         const shouldShow = (this.gameMode === 'play' && (this.viewMode === 'iso' || this.viewMode === 'birds-eye' || this.viewMode === 'ghost'));
-        
-        
+
+
         if (!this.groundTargetIndicator) {
             this.createGroundTargetIndicator();
         }
-        
+
         if (shouldShow) {
-            // Use raycaster to find ground intersection
             const mouse = new THREE.Vector2();
-            // Use the correct mouse tracking from playMode
             mouse.x = this.playMode.mouseNDC.x;
             mouse.y = this.playMode.mouseNDC.y;
-            
-            
+
+
             const raycaster = new THREE.Raycaster();
             raycaster.setFromCamera(mouse, this.camera);
-            
-            // Create ground plane for intersection
+
             const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
             const intersectionPoint = new THREE.Vector3();
             const intersects = raycaster.ray.intersectPlane(groundPlane, intersectionPoint);
-            
-            
+
+
             if (intersects) {
                 this.groundTargetIndicator.position.x = intersectionPoint.x;
                 this.groundTargetIndicator.position.z = intersectionPoint.z;
@@ -9020,56 +8740,44 @@ class Game3D {
             this.groundTargetIndicator.visible = false;
         }
     }
-    
+
     updateGhostCamera(deltaTime) {
-        // Ghost camera movement controls
         const speed = this.ghostCamera.speed;
         const moveSpeed = speed * deltaTime;
-        
-        // Calculate movement direction based on camera quaternion
+
         const forward = new THREE.Vector3(0, 0, -1);
         const right = new THREE.Vector3(1, 0, 0);
         const up = new THREE.Vector3(0, 1, 0);
-        
-        // Apply camera quaternion to movement vectors
+
         forward.applyQuaternion(this.ghostCamera.quaternion);
         right.applyQuaternion(this.ghostCamera.quaternion);
         up.applyQuaternion(this.ghostCamera.quaternion);
-        
-        // Movement input
+
         const movement = new THREE.Vector3();
-        
+
         if (this.keys['KeyW']) movement.add(forward);
         if (this.keys['KeyS']) movement.sub(forward);
         if (this.keys['KeyA']) movement.sub(right);
         if (this.keys['KeyD']) movement.add(right);
-        if (this.keys['KeyQ']) movement.sub(up); // Q = down
-        if (this.keys['KeyE']) movement.add(up); // E = up
-        if (this.keys['Space']) movement.add(up); // Space = up (height increase)
-        
-        // Apply movement
+        if (this.keys['KeyQ']) movement.sub(up);
+        if (this.keys['KeyE']) movement.add(up);
+        if (this.keys['Space']) movement.add(up);
+
         movement.multiplyScalar(moveSpeed);
         this.ghostCamera.position.add(movement);
-        
-        // Mouse look (only when pointer is locked)
-        if (this.isPointerLocked) {
-            // Mouse look is handled in mousemove event
-        }
+
+        // Mouse look is handled in the mousemove listener.
     }
-    
-    
+
+
     updatePowerUps(deltaTime) {
-        // Health regeneration
         if (this.powerUps.healthRegen > 0) {
-            const regenAmount = this.powerUps.healthRegen * 2 * deltaTime; // 2 HP per second per stack
+            const regenAmount = this.powerUps.healthRegen * 2 * deltaTime; // 2 HP/s per stack
             this.player.hp = Math.min(this.player.maxHp, this.player.hp + regenAmount);
         }
-        
-        // Speed boost (temporary effect)
-        if (this.powerUps.speedBoost > 0) {
-            // Speed boost is handled in movement code
-        }
-        
+
+        // Speed boost is applied directly in the movement code.
+
         // Jetpack fuel consumption
         if (this.isJetpackActive && this.powerUps.jetpackFuel > 0) {
             this.powerUps.jetpackFuel -= 20 * deltaTime; // 20 fuel per second
@@ -9108,12 +8816,11 @@ class Game3D {
         const weapon = this.getCurrentWeapon();
         if (!weapon || !weapon.isContinuous) return;
 
-        // Check if we can fire (cooldown and ammo)
         const weaponId = this.player.weapons[this.player.currentWeaponIndex];
         if (this.weaponCooldowns[weaponId] && this.weaponCooldowns[weaponId] > 0) return;
 
         if (weapon.ammoCost > 0 && this.inventory.ammo < weapon.ammoCost) {
-            this.isFiring = false; // Stop firing if no ammo
+            this.isFiring = false;
             return;
         }
 
@@ -9158,7 +8865,6 @@ class Game3D {
 
     // ================= ARENA / WAVE MODE =================
     startArenaMode() {
-        // Tear down current maze + reset world
         if (this.clearMaze) this.clearMaze();
         if (this.clearEnemies) this.clearEnemies();
         this._clearArenaObjects();
@@ -9184,7 +8890,6 @@ class Game3D {
         a.shake.duration = 0;
         a.shake.elapsed = 0;
 
-        // Build geometry
         this.buildArena();
 
         // Reset player loadout
@@ -9202,20 +8907,9 @@ class Game3D {
         this.score = 0;
         this.kills = 0;
 
-        // Make sure we're in play mode controls
         this.gameMode = 'play';
 
-        // The big centered overlay now does the talking — no toast needed here.
         this.audio && this.audio.play('uiClick');
-    }
-
-    exitArenaMode() {
-        if (!this.arena || !this.arena.active) return;
-        this.arena.active = false;
-        this.arena.phase = 'idle';
-        this._clearArenaObjects();
-        if (this.clearEnemies) this.clearEnemies();
-        if (this.rebuildMaze) this.rebuildMaze();
     }
 
     _clearArenaObjects() {
@@ -9279,6 +8973,7 @@ class Game3D {
                 size: { x: spec.sx, y: wallHeight, z: spec.sz }
             };
             this.walls.push(entry);
+            this._addWallToHash(entry);
             a.perimeterWalls.push(entry);
             a.arenaObjects.push(mesh);
         }
@@ -9326,6 +9021,7 @@ class Game3D {
                 size: { x: footprint, y: height, z: footprint }
             };
             this.walls.push(entry);
+            this._addWallToHash(entry);
             a.pillars.push(entry);
             a.arenaObjects.push(group);
         }
@@ -10071,7 +9767,6 @@ class Game3D {
     tickMultiplayer(deltaTime) {
         if (!this.net) return;
 
-        // Send local snapshot at fixed rate
         if (this.net.isConnected && this.player && this.player.position) {
             this._mpSendAccum += deltaTime;
             if (this._mpSendAccum >= this._mpSendInterval) {
@@ -10302,21 +9997,16 @@ class Game3D {
     }
 }
 
-// Start the game
 window.addEventListener('load', () => {
     const game = new Game3D();
-    
-    // Expose game instance globally for easy character loading
-    window.game = game;
-    
-    
-    // Setup modal event listeners
-    game.setupModalListeners();
-    // Render character thumbnails for the settings picker
-    game.generateCharacterPreviews();
-    // Using custom in-code lion archer model (no external GLTF)
 
-    // Ensure crosshair element exists
+    // Exposed globally for the character picker buttons.
+    window.game = game;
+
+    game.setupModalListeners();
+    game.generateCharacterPreviews();
+
+    // Inject crosshair element if index.html didn't ship one
     const crosshairCheck = document.getElementById('crosshair');
     if (!crosshairCheck) {
         const crosshair = document.createElement('div');
@@ -10326,7 +10016,5 @@ window.addEventListener('load', () => {
             <div style="position: absolute; top: 50%; left: 50%; width: 8px; height: 8px; background: #ffb347; box-shadow: 0 0 10px #ffb347, 0 0 20px #ffb347; border-radius: 50%; transform: translate(-50%, -50%);"></div>
         `;
         document.body.appendChild(crosshair);
-    } else {
     }
-
 });
