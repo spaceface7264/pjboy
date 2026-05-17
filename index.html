@@ -85,14 +85,10 @@
                 <div class="modal-body">
                     <div class="settings-section">
                         <h3 id="maze-selection-title">Maze Selection</h3>
-                        <div class="maze-buttons">
-                            <button class="maze-btn" data-maze="0">Wide Halls</button>
-                            <button class="maze-btn" data-maze="1">Classic Small</button>
-                            <button class="maze-btn" data-maze="2">Open Arena</button>
-                            <button class="maze-btn" data-maze="3">Spiral</button>
-                            <button class="maze-btn" data-maze="4">Labyrinth</button>
-                            <button class="maze-btn" data-maze="5">ASCII Maze</button>
-                        </div>
+                        <!-- Populated by renderMazeButtons() — kept empty so
+                             adding/removing entries from savedMazes is the
+                             single source of truth. -->
+                        <div class="maze-buttons" id="maze-buttons"></div>
                         <div class="maze-description">
                             <p id="maze-desc">Large maze with wide 5-cell halls</p>
                         </div>
@@ -270,6 +266,6 @@
     <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
     <script src="multiplayer.js?v=3"></script>
     <script src="openworld.js?v=2"></script>
-    <script src="game.js?v=53"></script>
+    <script src="game.js?v=67"></script>
 </body>
 </html>

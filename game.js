@@ -428,18 +428,10 @@ class Game3D {
                 
                 // Maze types
                 wideHalls: 'Brede Gange',
-                classicSmall: 'Klassisk Lille',
-                openArena: 'Åben Arena',
-                spiral: 'Spiral',
-                labyrinth: 'Labyrint',
                 asciiMaze: 'ASCII Labyrint',
-                
+
                 // Descriptions
                 wideHallsDesc: 'Stor labyrint med brede 5-celle gange',
-                classicSmallDesc: 'Lille klassisk labyrint',
-                openArenaDesc: 'Åben arena med grænse vægge',
-                spiralDesc: 'Spiral labyrint mønster',
-                labyrinthDesc: 'Statisk 61x61 hegn labyrint med brede korridorer og blindgyder',
                 asciiMazeDesc: 'Genereret ASCII perfekt labyrint (sværhedsgrad-drevet)',
                 
                 // Instructions
@@ -569,18 +561,10 @@ class Game3D {
                 
                 // Maze types
                 wideHalls: 'Wide Halls',
-                classicSmall: 'Classic Small',
-                openArena: 'Open Arena',
-                spiral: 'Spiral',
-                labyrinth: 'Labyrinth',
                 asciiMaze: 'ASCII Maze',
-                
+
                 // Descriptions
                 wideHallsDesc: 'Large maze with wide 5-cell halls',
-                classicSmallDesc: 'Small classic maze',
-                openArenaDesc: 'Open arena with border walls',
-                spiralDesc: 'Spiral maze pattern',
-                labyrinthDesc: 'Static 61x61 hedge maze with wide corridors and dead ends',
                 asciiMazeDesc: 'Generated ASCII perfect maze (difficulty-driven)',
                 
                 // Instructions
@@ -2039,10 +2023,33 @@ class Game3D {
     
     // Update all UI elements with current language
     updateAllUI() {
+        this.renderMazeButtons();
         this.updateModalContent();
         this._qbSig = null;
         this.updateInventoryGridUI && this.updateInventoryGridUI();
         if (this.isDrawerOpen) this.updateDrawerUI();
+    }
+
+    // Render the .maze-btn list from savedMazes. Called on init (after the
+    // settings click delegation is wired) and on language switch. Buttons
+    // are matched by data-maze index → savedMazes index, same contract the
+    // delegated click handler expects.
+    renderMazeButtons() {
+        const container = document.getElementById('maze-buttons');
+        if (!container || !this.savedMazes) return;
+        const html = this.savedMazes.map((maze, i) => {
+            const name = (maze.name || `Maze ${i + 1}`).replace(/[<>&"]/g, (c) => (
+                { '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]
+            ));
+            return `<button class="maze-btn" data-maze="${i}">${name}</button>`;
+        }).join('');
+        container.innerHTML = html;
+        // Re-apply the active highlight after rebuild.
+        container.querySelectorAll('.maze-btn').forEach((btn) => {
+            if (parseInt(btn.dataset.maze) === this.currentMazeIndex) {
+                btn.classList.add('active');
+            }
+        });
     }
 
     // Single source of truth for "is the player model visible?". Call this whenever
@@ -2051,6 +2058,85 @@ class Game3D {
         if (this.player && this.player.model) {
             this.player.model.visible = (this.viewMode !== 'fpv');
         }
+    }
+
+    // ---- Iso wall transparency: fade walls between camera and player ----
+    // Each wall mesh keeps a reference to its opaque material; when it sits
+    // on the line camera→player we swap to a shared faded clone, and swap
+    // back when it no longer occludes. Cheap reference assignment per
+    // transition, not per frame.
+    _getFadedMaterial(origMat) {
+        if (!origMat) return null;
+        // One faded clone per unique opaque material — cached on the mat itself.
+        // Opacity is intentionally very low: standard alpha-blending stacks
+        // multiplicatively, so N walls in a row leave only (1-α)^N of the
+        // background visible. At α=0.10, four stacked walls still transmit
+        // (0.9)^4 ≈ 66% — enough to see the player through chunky cover.
+        if (!origMat.userData._fadedClone) {
+            const f = origMat.clone();
+            f.transparent = true;
+            f.opacity = 0.10;
+            f.depthWrite = false;
+            // Drop emissive on the fade so stacked walls don't accumulate
+            // a glow that defeats the transparency. Lambert/Standard mats.
+            if (f.emissive && f.emissive.setHex) f.emissive.setHex(0x000000);
+            // Very faint white nudge so the fade reads as "intentional" without
+            // washing out the color when only one layer is visible.
+            if (f.color && f.color.lerp) f.color.lerp(new THREE.Color(0xffffff), 0.08);
+            origMat.userData._fadedClone = f;
+        }
+        return origMat.userData._fadedClone;
+    }
+
+    _setWallFaded(wall, faded) {
+        const mesh = wall.mesh || wall;
+        if (!mesh || !mesh.material) return;
+        if (faded) {
+            if (wall._fadedActive) return;
+            wall._origMat = mesh.material;
+            const f = this._getFadedMaterial(mesh.material);
+            if (f) mesh.material = f;
+            wall._fadedActive = true;
+        } else {
+            if (!wall._fadedActive) return;
+            if (wall._origMat) mesh.material = wall._origMat;
+            wall._fadedActive = false;
+        }
+    }
+
+    _updateWallFade() {
+        if (!this._fadedWalls) this._fadedWalls = new Set();
+        const wasFaded = this._fadedWalls;
+        // FPV → restore everything and bail.
+        if (this.viewMode === 'fpv' || !this.player || !this.player.position) {
+            if (wasFaded.size === 0) return;
+            for (const w of wasFaded) this._setWallFaded(w, false);
+            wasFaded.clear();
+            return;
+        }
+        const camX = this.camera.position.x, camZ = this.camera.position.z;
+        const pX = this.player.position.x, pZ = this.player.position.z;
+        const midX = (camX + pX) * 0.5, midZ = (camZ + pZ) * 0.5;
+        const halfLen = Math.hypot(camX - pX, camZ - pZ) * 0.5;
+        const nowFaded = new Set();
+        // Only walls whose top is above the player's mid-height can actually
+        // occlude — skip rubble/low debris so they stay solid.
+        const playerEyeY = (this.player.position.y || 0) + 1.0;
+        this._iterWallsNear(midX, midZ, halfLen + 1, (w) => {
+            const top = w.position.y + (w.size ? w.size.y / 2 : 0.5);
+            if (top < playerEyeY) return;
+            if (this._segmentVsAABB(camX, camZ, pX, pZ,
+                                    w.position.x, w.position.z,
+                                    (w.size ? w.size.x : 1) / 2, (w.size ? w.size.z : 1) / 2)) {
+                this._setWallFaded(w, true);
+                nowFaded.add(w);
+            }
+        });
+        // Restore walls that were faded last frame but no longer occlude.
+        for (const w of wasFaded) {
+            if (!nowFaded.has(w)) this._setWallFaded(w, false);
+        }
+        this._fadedWalls = nowFaded;
     }
 
     setViewMode(mode) {
@@ -3094,110 +3180,15 @@ class Game3D {
     }
     
     initializeSavedMazes() {
-        // Pre-defined maze layouts
+        // Pre-defined maze layouts. We trimmed the old "Classic Small / Open
+        // Arena / Spiral / Labyrinth" entries — Wide Halls is the open
+        // playground; ASCII is the curated maze.
         this.savedMazes = [
             {
                 name: this.t('wideHalls'),
                 size: 100,
                 type: "generated",
                 description: this.t('wideHallsDesc')
-            },
-            {
-                name: this.t('classicSmall'),
-                size: 15,
-                type: "static",
-                layout: [
-                    "###############",
-                    "#.............#",
-                    "#.##.......##.#",
-                    "#.#.........#.#",
-                    "#.#.#######.#.#",
-                    "#.#.........#.#",
-                    "#.##.......##.#",
-                    "#.#.........#.#",
-                    "#.#.#######.#.#",
-                    "#.#.........#.#",
-                    "#.##.......##.#",
-                    "#.#.........#.#",
-                    "#.#.#######.#.#",
-                    "#.............#",
-                    "###############"
-                ],
-                description: this.t('classicSmallDesc')
-            },
-            {
-                name: this.t('openArena'),
-                size: 20,
-                type: "static",
-                layout: [
-                    "####################",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "####################"
-                ],
-                description: this.t('openArenaDesc')
-            },
-            {
-                name: this.t('spiral'),
-                size: 25,
-                type: "static",
-                layout: this.generateSpiralMaze(25),
-                description: this.t('spiralDesc')
-            },
-            {
-                name: this.t('labyrinth'),
-                size: 61,
-                type: "static",
-                layout: [
-                    "#############################################################",
-                    "#############################################################",
-                    "#############################################################",
-                    "##......................................##.......##........##",
-                    "##..######.########.##################..###..######.......###",
-                    "##..##################################..###.#######.##.##..##",
-                    "##..###..######....###.#..#####.....#....##.###.#...#####.###",
-                    "##..##.......##..........................##.##......#####.###",
-                    "##..#..####..##..##########################.###.....###....##",
-                    "##..#..#####.##..##########################..###.##.##.....##",
-                    "##..##....##.##..................................#####..#####",
-                    "##..##....##.##..................................#####.######",
-                    "##..####..##.#########################..###########....##.###",
-                    "##..####..##..########################..###########....##..##",
-                    "#...##....##....##........##.....................##.#####..##",
-                    "#...##...###....##........#.........##...........##..####..##",
-                    "#...##...###....##........#.........##...........##..####..##",
-                    "##..####..##..########################..###########....##..##",
-                    "##..####..##.#########################..###########....##.###",
-                    "##..##....##.##..................................#####.######",
-                    "##..##....##.##..................................#####..#####",
-                    "##..#..#####.##..##########################..###.##.##.....##",
-                    "##..#..####..##..##########################.###.....###....##",
-                    "##..##.......##..........................##.##......#####.###",
-                    "##..###..######....###.#..#####.....#....##.###.#...#####.###",
-                    "##..##################################..###.#######.##.##..##",
-                    "##..######.########.##################..###..######.......###",
-                    "##......................................##.......##........##",
-                    "#############################################################",
-                    "#############################################################",
-                    "#############################################################"
-                ],
-                description: this.t('labyrinthDesc')
             },
             {
                 name: this.t('asciiMaze'),
@@ -3207,38 +3198,8 @@ class Game3D {
             }
         ];
     }
-    
-    generateSpiralMaze(size) {
-        const maze = [];
-        for (let y = 0; y < size; y++) {
-            maze[y] = [];
-            for (let x = 0; x < size; x++) {
-                maze[y][x] = '#';
-            }
-        }
-        
-        // Create spiral pattern
-        let x = 1, y = 1;
-        let dx = 1, dy = 0;
-        let steps = 1;
-        
-        while (x < size-1 && y < size-1) {
-            for (let i = 0; i < steps; i++) {
-                if (x >= 0 && x < size && y >= 0 && y < size) {
-                    maze[y][x] = '.';
-                }
-                x += dx;
-                y += dy;
-            }
-            
-            // Turn right
-            [dx, dy] = [-dy, dx];
-            if (dx === 0) steps++;
-        }
-        
-        return maze;
-    }
-    
+
+
     initializeCreateMode() {
         this.createMode.customMaze = [];
         for (let y = 0; y < this.createMode.gridSize; y++) {
@@ -3840,10 +3801,16 @@ class Game3D {
     }
 
     // Decompose a (sizeX × sizeY × sizeZ) brick column centered at (cx, cz)
-    // and sitting on top of baseY into 1×1×1 destructible cubes. Each cube
-    // gets pushed into this.walls as its own entry with hp=1 so any single
-    // hit chips it off, leaving the rest of the wall intact.
-    _addDestructibleBlockColumn(cx, baseY, cz, sizeX, sizeY, sizeZ) {
+    // and sitting on top of baseY into 1×1×1 cubes. Each cube is its own
+    // wall entry. When opts.destructible is true (default) each brick has
+    // hp=1 so a single hit chips it off; when false they route through the
+    // merged-geometry path: one mesh per column, same brick look, ~64× fewer
+    // draw calls (critical for the ASCII maze).
+    _addDestructibleBlockColumn(cx, baseY, cz, sizeX, sizeY, sizeZ, opts) {
+        const destructible = !opts || opts.destructible !== false;
+        if (!destructible) {
+            return this._addMergedBrickColumn(cx, baseY, cz, sizeX, sizeY, sizeZ);
+        }
         const nx = Math.max(1, Math.round(sizeX));
         const ny = Math.max(1, Math.round(sizeY));
         const nz = Math.max(1, Math.round(sizeZ));
@@ -3861,14 +3828,137 @@ class Game3D {
                         position: mesh.position,
                         size: { x: 1, y: 1, z: 1 },
                         destructible: true,
-                        hp: 1,
-                        maxHp: 1,
+                        hp: 1, maxHp: 1,
                     };
                     this.walls.push(entry);
                     this._addWallToHash(entry);
                 }
             }
         }
+    }
+
+    // Non-destructible wall column. Bakes N copies of the brick template
+    // geometry into one merged BufferGeometry at compile-time positions, so
+    // a 4×4×4 wall ships as a single Mesh instead of 64. Looks identical
+    // to the destructible version (same template, same material). Geometry
+    // is cached per column size — most ASCII walls share one buffer.
+    _addMergedBrickColumn(cx, baseY, cz, sizeX, sizeY, sizeZ) {
+        const tpl = this.bricksTemplate;
+        // Bricks GLTF not loaded yet — fall back to plain boxes; rebuildMaze
+        // fires once the template arrives and we'll re-stamp with the merge.
+        if (!tpl || !tpl.geometry) {
+            const mat = (this.materials && this.materials.wall) || new THREE.MeshLambertMaterial({ color: 0x8a6238 });
+            const mesh = new THREE.Mesh(new THREE.BoxGeometry(sizeX, sizeY, sizeZ), mat);
+            mesh.position.set(cx, baseY + sizeY / 2, cz);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            this.scene.add(mesh);
+            const entry = { mesh, position: mesh.position, size: { x: sizeX, y: sizeY, z: sizeZ }, destructible: false };
+            this.walls.push(entry);
+            this._addWallToHash(entry);
+            return;
+        }
+        const geo = this._getMergedBrickColumnGeometry(sizeX, sizeY, sizeZ);
+        const mesh = new THREE.Mesh(geo, tpl.material);
+        // Mesh sits with its origin at the column's CENTER on every axis so
+        // mesh.position can double as the collision AABB center. The merged
+        // geometry is built centered at origin to match.
+        mesh.position.set(cx, baseY + sizeY / 2, cz);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        this.scene.add(mesh);
+        const entry = {
+            mesh,
+            position: mesh.position,
+            size: { x: sizeX, y: sizeY, z: sizeZ },
+            destructible: false,
+        };
+        this.walls.push(entry);
+        this._addWallToHash(entry);
+    }
+
+    // Build (and cache) the merged BufferGeometry for a wall column of a
+    // given size, by repeating the brick template at nx×ny×nz positions
+    // and baking per-instance offsets directly into the position attribute.
+    _getMergedBrickColumnGeometry(sx, sy, sz) {
+        if (!this._mergedBrickCache) this._mergedBrickCache = {};
+        const key = `${sx}x${sy}x${sz}`;
+        if (this._mergedBrickCache[key]) return this._mergedBrickCache[key];
+
+        const tpl = this.bricksTemplate;
+        const src = tpl.geometry;
+        const bb = src.boundingBox;
+        const native = (bb && (bb.max.y - bb.min.y)) || 2;
+        const scale = 1 / native;
+
+        const nx = Math.max(1, Math.round(sx));
+        const ny = Math.max(1, Math.round(sy));
+        const nz = Math.max(1, Math.round(sz));
+        // Bake bricks centered around the geometry origin on all three axes
+        // so the mesh.position (placed at baseY + sizeY/2) lines up with the
+        // collision AABB center. Without the y centering the top half of
+        // the wall had no collision.
+        const x0 = -nx / 2 + 0.5;
+        const z0 = -nz / 2 + 0.5;
+        const y0 = -ny / 2 + 0.5;
+
+        const srcPos = src.attributes.position ? src.attributes.position.array : null;
+        const srcNorm = src.attributes.normal ? src.attributes.normal.array : null;
+        const srcUV = src.attributes.uv ? src.attributes.uv.array : null;
+        const srcIdx = src.index ? src.index.array : null;
+        if (!srcPos) return new THREE.BoxGeometry(sx, sy, sz);
+        const vertCount = srcPos.length / 3;
+        const totalInst = nx * ny * nz;
+
+        const mPos = new Float32Array(srcPos.length * totalInst);
+        const mNorm = srcNorm ? new Float32Array(srcNorm.length * totalInst) : null;
+        const mUV = srcUV ? new Float32Array(srcUV.length * totalInst) : null;
+        const mIdx = srcIdx ? new Uint32Array(srcIdx.length * totalInst) : null;
+
+        let inst = 0;
+        for (let iy = 0; iy < ny; iy++) {
+            for (let ix = 0; ix < nx; ix++) {
+                for (let iz = 0; iz < nz; iz++) {
+                    const dx = x0 + ix, dy = y0 + iy, dz = z0 + iz;
+                    const posBase = inst * srcPos.length;
+                    for (let v = 0; v < vertCount; v++) {
+                        mPos[posBase + v * 3 + 0] = srcPos[v * 3 + 0] * scale + dx;
+                        mPos[posBase + v * 3 + 1] = srcPos[v * 3 + 1] * scale + dy;
+                        mPos[posBase + v * 3 + 2] = srcPos[v * 3 + 2] * scale + dz;
+                        if (srcNorm) {
+                            mNorm[posBase + v * 3 + 0] = srcNorm[v * 3 + 0];
+                            mNorm[posBase + v * 3 + 1] = srcNorm[v * 3 + 1];
+                            mNorm[posBase + v * 3 + 2] = srcNorm[v * 3 + 2];
+                        }
+                    }
+                    if (srcUV) {
+                        const uvBase = inst * srcUV.length;
+                        for (let v = 0; v < vertCount; v++) {
+                            mUV[uvBase + v * 2 + 0] = srcUV[v * 2 + 0];
+                            mUV[uvBase + v * 2 + 1] = srcUV[v * 2 + 1];
+                        }
+                    }
+                    if (srcIdx) {
+                        const idxBase = inst * srcIdx.length;
+                        const vertOff = inst * vertCount;
+                        for (let i = 0; i < srcIdx.length; i++) {
+                            mIdx[idxBase + i] = srcIdx[i] + vertOff;
+                        }
+                    }
+                    inst++;
+                }
+            }
+        }
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(mPos, 3));
+        if (mNorm) geo.setAttribute('normal', new THREE.BufferAttribute(mNorm, 3));
+        if (mUV) geo.setAttribute('uv', new THREE.BufferAttribute(mUV, 2));
+        if (mIdx) geo.setIndex(new THREE.BufferAttribute(mIdx, 1));
+        geo.computeBoundingBox();
+        geo.computeBoundingSphere();
+        this._mergedBrickCache[key] = geo;
+        return geo;
     }
 
     // Single 1×1×1 brick mesh, using the loaded bricks GLTF when available so
@@ -3943,7 +4033,7 @@ class Game3D {
         this.createLabyrinth();
         // If this is the labyrinth map and start is known, spawn player there
         const cur = this.savedMazes[this.currentMazeIndex];
-        if (cur && (cur.type === 'labyrinth' || cur.name === 'Labyrinth' || cur.type === 'ascii') && this.levelStartWorld) {
+        if (cur && (cur.type === 'labyrinth' || cur.type === 'ascii') && this.levelStartWorld) {
             this.player.position.set(this.levelStartWorld.x, 0, this.levelStartWorld.z);
             // Face toward the maze interior (toward end)
             if (this.levelEndWorld) {
@@ -4116,13 +4206,23 @@ class Game3D {
             });
         });
 
-        document.querySelectorAll('.maze-btn').forEach(btn => {
-            btn.addEventListener('click', () => {
+        // Maze buttons are rendered dynamically from savedMazes — wire a
+        // single delegated click handler on the container so new buttons
+        // pick up the behavior without needing to re-bind on each render.
+        const mazeContainer = document.getElementById('maze-buttons');
+        if (mazeContainer && !mazeContainer._delegated) {
+            mazeContainer.addEventListener('click', (e) => {
+                const btn = e.target.closest('.maze-btn');
+                if (!btn || !mazeContainer.contains(btn)) return;
                 const mazeIndex = parseInt(btn.dataset.maze);
-                this.switchMaze(mazeIndex);
-                this.toggleSettingsModal();
+                if (Number.isFinite(mazeIndex)) {
+                    this.switchMaze(mazeIndex);
+                    this.toggleSettingsModal();
+                }
             });
-        });
+            mazeContainer._delegated = true;
+        }
+        this.renderMazeButtons();
 
         const diff = document.getElementById('maze-difficulty');
         const diffVal = document.getElementById('maze-difficulty-value');
@@ -4290,16 +4390,21 @@ class Game3D {
             startZ = -((rows - 1) * cellSize) / 2;
             this.updateGroundAndFog((cols - 1) * cellSize, (rows - 1) * cellSize);
         } else if (currentMaze.type === "ascii") {
-            // Generate perfect ASCII maze based on difficulty
+            // Generate perfect ASCII maze based on difficulty.
+            // cellSize=4 doubles corridor width (and wall thickness) vs the
+            // previous tight 2-unit grid. wallHeight stays at 4 so brick
+            // count per cell goes 16 → 64. Still cheaper than Wide Halls
+            // overall because there are fewer wall cells in the smaller
+            // ASCII grid (33×33 at diff 5 vs 100×100).
             maze = this.generateAsciiPerfectMazeByDifficulty(this.mazeDifficulty || 5);
-            cellSize = 3;
-            wallHeight = 8;
+            cellSize = 4;
+            wallHeight = 4;
             const cols = maze[0].length;
             const rows = maze.length;
             startX = -((cols - 1) * cellSize) / 2;
             startZ = -((rows - 1) * cellSize) / 2;
             this.updateGroundAndFog((cols - 1) * cellSize, (rows - 1) * cellSize);
-            
+
             // Store maze info for enemy spawning
             this.lastMazeInfo = { maze, startX, startZ, cellSize };
         } else if (currentMaze.type === "generated") {
@@ -4317,7 +4422,7 @@ class Game3D {
             // Use static layout
             maze = currentMaze.layout;
             cellSize = 3;
-            wallHeight = (currentMaze.name === 'Labyrinth') ? 8 : 4;
+            wallHeight = 4;
             const cols = maze[0].length;
             const rows = maze.length;
             startX = -((cols - 1) * cellSize) / 2;
@@ -4325,7 +4430,10 @@ class Game3D {
             this.updateGroundAndFog((cols - 1) * cellSize, (rows - 1) * cellSize);
         }
         
-        // Create walls based on layout
+        // Create walls based on layout. Both maze types use the same brick
+        // decomposition for a consistent visual; ASCII bricks are flagged
+        // non-destructible so wall hits no-op there.
+        const isAscii = currentMaze.type === 'ascii';
         for (let row = 0; row < maze.length; row++) {
             for (let col = 0; col < maze[row].length; col++) {
                 const tile = maze[row][col];
@@ -4335,13 +4443,17 @@ class Game3D {
                     if (currentMaze.type === 'generated' && !isBorder) {
                         if (Math.random() > this.wallDensity) continue; // skip most interior walls
                     }
-                     // Vary wall height for visual interest. Round to whole
-                     // units so the sub-block decomposition lines up cleanly.
-                    const hRaw = (currentMaze.type === 'labyrinth') ? wallHeight : (wallHeight * THREE.MathUtils.lerp(0.7, 1.6, Math.random()));
-                    const h = Math.max(1, Math.round(hRaw));
+                    // Clean fixed height for ASCII/labyrinth, varied for brick
+                    // mazes. Rounded so brick decomposition lines up.
+                    let h;
+                    if (isAscii || currentMaze.type === 'labyrinth') {
+                        h = wallHeight;
+                    } else {
+                        h = Math.max(1, Math.round(wallHeight * THREE.MathUtils.lerp(0.7, 1.6, Math.random())));
+                    }
                     const cx = startX + col * cellSize;
                     const cz = startZ + row * cellSize;
-                    this._addDestructibleBlockColumn(cx, 0, cz, cellSize, h, cellSize);
+                    this._addDestructibleBlockColumn(cx, 0, cz, cellSize, h, cellSize, { destructible: !isAscii });
                 }
             }
         }
@@ -7281,29 +7393,25 @@ class Game3D {
                 direction.add(camForward.clone().multiplyScalar(forwardIn));
                 direction.add(camRight.clone().multiplyScalar(strafeIn));
             }
-            // Third-person facing: turn toward movement direction while moving,
-            // toward mouse-aim point while idle. Stops the body locking to the
-            // mouse and sliding sideways during WASD.
+            // Iso third-person: body ALWAYS faces the mouse cursor's ground
+            // projection. WASD is camera-relative (still computed above) and
+            // moves independently of facing — so you can strafe around a
+            // target while aiming. Uses scratch raycaster/plane to avoid
+            // per-frame allocations.
             if (this.viewMode !== 'fpv') {
+                _sharedRaycaster.setFromCamera(this.playMode.mouseNDC, this.camera);
+                _scratchPlaneGround.constant = 0; // plane y=0
                 let targetRot = null;
-                const moving = (forwardIn !== 0 || strafeIn !== 0);
-                if (moving) {
-                    targetRot = Math.atan2(direction.x, direction.z);
-                } else {
-                    const ray = new THREE.Raycaster();
-                    ray.setFromCamera(this.playMode.mouseNDC, this.camera);
-                    const ground = new THREE.Plane(new THREE.Vector3(0,1,0), 0);
-                    const hit = new THREE.Vector3();
-                    if (ray.ray.intersectPlane(ground, hit)) {
-                        const aim = new THREE.Vector3(hit.x - this.player.position.x, 0, hit.z - this.player.position.z);
-                        if (aim.lengthSq() > 0.0001) targetRot = Math.atan2(aim.x, aim.z);
+                if (_sharedRaycaster.ray.intersectPlane(_scratchPlaneGround, _scratchV3a)) {
+                    const aimX = _scratchV3a.x - this.player.position.x;
+                    const aimZ = _scratchV3a.z - this.player.position.z;
+                    if (aimX * aimX + aimZ * aimZ > 0.0001) {
+                        targetRot = Math.atan2(aimX, aimZ);
                     }
                 }
                 if (targetRot !== null) {
                     const diff = ((targetRot - this.characterRotation + Math.PI) % (Math.PI*2)) - Math.PI;
-                    // Snappier turn while moving; gentler when re-centering on the mouse.
-                    const lerp = moving ? this.playMode.rotateLerp * 1.6 : this.playMode.rotateLerp;
-                    const maxStep = lerp * deltaTime;
+                    const maxStep = this.playMode.rotateLerp * 1.8 * deltaTime;
                     const step = THREE.MathUtils.clamp(diff, -maxStep, maxStep);
                     this.characterRotation += step;
                 }
@@ -7516,6 +7624,10 @@ class Game3D {
             this.player.model.position.copy(this.player.position);
             this.player.model.rotation.y = this.characterRotation + (this.modelYawOffset || 0);
         }
+
+        // Iso wall fade: walls between camera and player become translucent
+        // so the body stays visible behind cover. Hidden in FPV.
+        this._updateWallFade();
 
         this.updateCharacterAnimation(deltaTime);
 
