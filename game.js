@@ -1,5 +1,26 @@
 // 3D Second-Person Game - 128-bit Style
 
+// Stale HUD element IDs swept every frame by clearAllUI. Listed once,
+// hoisted so we don't re-allocate the array every render tick.
+const STALE_UI_IDS = [
+    'player-hp-hud', 'top-center-ui',
+    'jetpack-hud', 'enemy-count-hud', 'compass-hud',
+    'player-pos', 'player-facing', 'camera-info',
+    'objective-msg', 'facing-indicator',
+    'control-ui', 'maze-ui'
+];
+
+// Scratch math objects reused across the frame loop. Allocating these
+// inside per-enemy / per-frame paths was a significant GC source.
+const _scratchV3a = (typeof THREE !== 'undefined') ? new THREE.Vector3() : null;
+const _scratchV3b = (typeof THREE !== 'undefined') ? new THREE.Vector3() : null;
+const _scratchV3c = (typeof THREE !== 'undefined') ? new THREE.Vector3() : null;
+const _scratchV2a = (typeof THREE !== 'undefined') ? new THREE.Vector2() : null;
+const _scratchV2b = (typeof THREE !== 'undefined') ? new THREE.Vector2() : null;
+const _scratchRay = (typeof THREE !== 'undefined') ? new THREE.Ray() : null;
+const _scratchPlaneGround = (typeof THREE !== 'undefined') ? new THREE.Plane(new THREE.Vector3(0,1,0), 0) : null;
+const _sharedRaycaster = (typeof THREE !== 'undefined') ? new THREE.Raycaster() : null;
+
 // =============================================================
 // AudioBus: lightweight procedural Web Audio synth.
 // All sounds are generated on the fly — no asset files needed.
@@ -1594,16 +1615,17 @@ class Game3D {
             return this._performMeleeArc({ damage, range, hitColor, missColor });
         }
 
-        const raycaster = new THREE.Raycaster();
-        raycaster.setFromCamera(new THREE.Vector2(0, 0), this.camera);
+        _scratchV2a.set(0, 0);
+        _sharedRaycaster.setFromCamera(_scratchV2a, this.camera);
 
-        const hits = raycaster.intersectObjects(this.playMode.enemies, true);
+        const hits = _sharedRaycaster.intersectObjects(this.playMode.enemies, true);
         for (const hit of hits) {
             if (hit.distance > range) break;
             const e = this.findEnemyRoot(hit.object);
             if (!e) continue;
             e.userData.hp -= damage;
             this.spawnImpact(hit.point.clone(), hitColor);
+            this.spawnDamageNumber(hit.point, damage);
             this.audio && this.audio.play(isRanged ? 'bulletHit' : 'swordHit');
 
             if (e.userData.hp <= 0) {
@@ -1618,7 +1640,7 @@ class Game3D {
 
         // Miss — show trail/impact at range end
         const origin = this.camera.position.clone();
-        const dir = raycaster.ray.direction.clone();
+        const dir = _sharedRaycaster.ray.direction.clone();
         const endPoint = origin.add(dir.multiplyScalar(range));
         this.spawnImpact(endPoint, missColor);
     }
@@ -1681,6 +1703,7 @@ class Game3D {
             const hitPos = best.position.clone();
             hitPos.y += 1.0;
             this.spawnImpact(hitPos, hitColor);
+            this.spawnDamageNumber(hitPos, damage);
             this.audio && this.audio.play('swordHit');
             // Small forward lunge — "step into" the strike, capped so it can't
             // shove the player through a wall.
@@ -1880,11 +1903,24 @@ class Game3D {
         const dx = e.position.x - sourcePos.x;
         const dz = e.position.z - sourcePos.z;
         const len = Math.hypot(dx, dz) || 1;
-        e.userData.knockback = new THREE.Vector2((dx / len) * strength, (dz / len) * strength);
-        e.userData.stunT = 0.35;
-        // Flinch: brief recoil away from the shot, decays in updateEnemies
-        e.userData.flinchT = 0.25;
-        e.userData.flinchMax = 0.25;
+        if (!e.userData.knockback) e.userData.knockback = new THREE.Vector2();
+        e.userData.knockback.set((dx / len) * strength, (dz / len) * strength);
+        e.userData.stunT = 0.4;
+        // Brief hit-stop so the impact reads visually (~70ms freeze)
+        e.userData.hitStopT = 0.07;
+        // Flinch: stronger recoil away from the shot, decays in updateEnemies
+        e.userData.flinchT = 0.32;
+        e.userData.flinchMax = 0.32;
+        // Getting hit alerts the enemy to the player's position even through
+        // walls — otherwise you could shoot a demon from cover and they'd
+        // just stand there.
+        const ud = e.userData;
+        if (ud.aiCfg) {
+            ud.awareT = Math.max(ud.awareT || 0, (ud.aiCfg.alertMemory || 4.0));
+            if (!ud.lastSeenPos) ud.lastSeenPos = new THREE.Vector2();
+            ud.lastSeenPos.set(this.player.position.x, this.player.position.z);
+            ud.aimPos = ud.lastSeenPos;
+        }
     }
 
     findEnemyRoot(obj) {
@@ -1896,14 +1932,96 @@ class Game3D {
     }
 
     flashEnemy(e) {
-        const flashed = [];
+        // Stash the true base color on each material the first time we ever
+        // flash it. Without this, overlapping flashes capture the *current*
+        // (already-white) color as "original" and revert to white forever.
+        const mats = [];
         e.traverse((child) => {
             if (child.isMesh && child.material && child.material.color) {
-                flashed.push({ mat: child.material, orig: child.material.color.getHex() });
-                child.material.color.setHex(0xffffff);
+                const mat = child.material;
+                if (mat.userData._baseColor == null) mat.userData._baseColor = mat.color.getHex();
+                if (mat.emissive && mat.userData._baseEmissive == null) {
+                    mat.userData._baseEmissive = mat.emissive.getHex();
+                }
+                mat.color.setHex(0xffffff);
+                if (mat.emissive) mat.emissive.setHex(0xffffff);
+                mats.push(mat);
             }
         });
-        setTimeout(() => flashed.forEach(({ mat, orig }) => mat.color.setHex(orig)), 80);
+        // Bump a per-enemy flash counter; only the *last* revert restores,
+        // so a rapid double-hit just extends the flash, never strands it.
+        if (e.userData._flashId == null) e.userData._flashId = 0;
+        const myId = ++e.userData._flashId;
+        setTimeout(() => {
+            if (e.userData._flashId !== myId) return; // a newer flash is active
+            for (const mat of mats) {
+                if (mat.userData._baseColor != null) mat.color.setHex(mat.userData._baseColor);
+                if (mat.emissive && mat.userData._baseEmissive != null) mat.emissive.setHex(mat.userData._baseEmissive);
+            }
+        }, 130);
+    }
+
+    // Floating damage number sprite. Drifts up, fades out, then disposed.
+    // Pooled by reusing canvas-textured sprites where possible.
+    spawnDamageNumber(worldPos, amount, opts = {}) {
+        const color = opts.color || (amount >= 20 ? '#ffd34a' : '#ffffff');
+        const text = String(Math.round(amount));
+        // Build a small canvas; reuse a shared pool to avoid per-hit garbage.
+        if (!this._dmgNumPool) this._dmgNumPool = [];
+        let entry = this._dmgNumPool.find(p => !p.active);
+        if (!entry) {
+            const canvas = document.createElement('canvas');
+            canvas.width = 128; canvas.height = 64;
+            const ctx = canvas.getContext('2d');
+            const tex = new THREE.CanvasTexture(canvas);
+            tex.minFilter = THREE.LinearFilter;
+            const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false });
+            const sprite = new THREE.Sprite(mat);
+            sprite.scale.set(1.6, 0.8, 1);
+            entry = { canvas, ctx, tex, sprite, mat, active: false };
+            this._dmgNumPool.push(entry);
+        }
+        entry.active = true;
+        // Render text
+        const ctx = entry.ctx;
+        ctx.clearRect(0, 0, entry.canvas.width, entry.canvas.height);
+        ctx.font = 'bold 44px Courier New, monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.lineWidth = 6;
+        ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+        ctx.strokeText(text, 64, 32);
+        ctx.fillStyle = color;
+        ctx.fillText(text, 64, 32);
+        entry.tex.needsUpdate = true;
+        // Position above hit, with a tiny random horizontal jitter
+        entry.sprite.position.set(
+            worldPos.x + (Math.random() - 0.5) * 0.4,
+            worldPos.y + 1.2,
+            worldPos.z + (Math.random() - 0.5) * 0.4
+        );
+        entry.mat.opacity = 1;
+        entry.sprite.scale.set(1.6, 0.8, 1);
+        this.scene.add(entry.sprite);
+        // Animate: drift up + fade, release back to pool when done.
+        const start = performance.now();
+        const dur = 800;
+        const startY = entry.sprite.position.y;
+        const tick = () => {
+            const t = (performance.now() - start) / dur;
+            if (t >= 1) {
+                this.scene.remove(entry.sprite);
+                entry.active = false;
+                return;
+            }
+            entry.sprite.position.y = startY + t * 1.4;
+            entry.mat.opacity = 1 - t;
+            // Slight pop early on
+            const s = 1 + (1 - Math.min(1, t * 4)) * 0.4;
+            entry.sprite.scale.set(1.6 * s, 0.8 * s, 1);
+            requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
     }
     
     // Translation helper
@@ -2447,14 +2565,36 @@ class Game3D {
         // Roster of all enemy types. The original `zombieTemplate` field is kept
         // for back-compat with anything that still reads it; new code reads
         // `this.enemyTemplates[typeKey]` instead.
+        // sightRange = how far they can see in a straight line (walls block).
+        // alertMemory = seconds they keep chasing the *last seen* position
+        // after losing line-of-sight; when it expires they go back to idle
+        // wander. Tuned so hiding feels viable but not trivial.
+        // sightRange = how far they can see in a straight line (walls block).
+        // alertMemory = seconds they keep chasing the *last seen* position
+        // after losing LOS; when it expires they go back to idle wander.
+        // viewCone = full FOV in degrees. Outside the cone the enemy is blind
+        // — you can sneak past from behind. Wide for jumpy prey (chicks),
+        // narrow for slow brutes (zombies).
         this.enemyTypes = {
-            zombie:  { path: 'Zombie.gltf',                          scale: 0.9, hp: [50, 150],  speed: [1.2, 2.0], damage: 10, color: 0x6aa84f },
-            giant:   { path: 'assets/Blocks/enemies/Giant.gltf',     scale: 1.8, hp: [260, 360], speed: [0.7, 1.0], damage: 20, color: 0xd6b88a, meleeOnly: true },
+            zombie:  { path: 'Zombie.gltf',                          scale: 0.9, hp: [50, 150],  speed: [1.2, 2.0], damage: 10, color: 0x6aa84f,
+                       ai: 'chase',     sightRange: 14, alertMemory: 4.0, viewCone: 140,
+                       lunge: { cooldown: [4, 7], dur: 0.4, mult: 2.4 } },
+            giant:   { path: 'assets/Blocks/enemies/Giant.gltf',     scale: 1.8, hp: [260, 360], speed: [0.7, 1.0], damage: 20, color: 0xd6b88a, meleeOnly: true,
+                       ai: 'slam',      sightRange: 12, alertMemory: 5.0, viewCone: 160,
+                       slamRange: 3.6, windup: 0.7, strikeDur: 0.22, recover: 1.0, slamDamage: 28 },
             demon:   { path: 'assets/Blocks/enemies/Demon.gltf',     scale: 1.1, hp: [90, 140],  speed: [1.0, 1.4], damage: 12, color: 0xc73a2a,
+                       ai: 'kite',      sightRange: 22, alertMemory: 3.5, viewCone: 200,
+                       kite: { ideal: 9, retreat: 6, approach: 12, strafePeriod: [1.0, 2.2] },
                        ranged: { cooldown: 2.0, range: 14, projectileSpeed: 18, damage: 10, color: 0xff5522 } },
-            goblin:  { path: 'assets/Blocks/enemies/Goblin.gltf',    scale: 0.85, hp: [45, 90],  speed: [1.6, 2.4], damage: 8,  color: 0x4d8a3a },
-            chick:   { path: 'assets/Blocks/Animals/Chick.gltf',     scale: 0.7, hp: [10, 18],   speed: [1.8, 2.6], damage: 3,  color: 0xffd84d },
-            chicken: { path: 'assets/Blocks/Animals/Chicken.gltf',   scale: 0.8, hp: [18, 28],   speed: [1.4, 2.0], damage: 4,  color: 0xeeeeee },
+            goblin:  { path: 'assets/Blocks/enemies/Goblin.gltf',    scale: 0.85, hp: [45, 90],  speed: [1.6, 2.4], damage: 8,  color: 0x4d8a3a,
+                       ai: 'hitAndRun', sightRange: 18, alertMemory: 3.0, viewCone: 220,
+                       backoffDur: 0.9, backoffMult: 1.6, zigzagAmp: 0.55, zigzagPeriod: 0.55 },
+            chick:   { path: 'assets/Blocks/Animals/Chick.gltf',     scale: 0.7, hp: [10, 18],   speed: [1.8, 2.6], damage: 3,  color: 0xffd84d,
+                       ai: 'skittish',  sightRange: 10, alertMemory: 2.0, viewCone: 320,
+                       fleeDist: 4.5 },
+            chicken: { path: 'assets/Blocks/Animals/Chicken.gltf',   scale: 0.8, hp: [18, 28],   speed: [1.4, 2.0], damage: 4,  color: 0xeeeeee,
+                       ai: 'skittish',  sightRange: 10, alertMemory: 2.0, viewCone: 320,
+                       fleeDist: 5.0 },
         };
         this.enemyTemplates = {};
 
@@ -4464,6 +4604,17 @@ class Game3D {
                 if (child.isMesh) {
                     child.castShadow = true;
                     child.receiveShadow = true;
+                    // SkeletonUtils.clone shares Material instances across
+                    // every enemy of this type — so flashEnemy/_tintEnemy
+                    // mutating .color would whiten every other giant on the
+                    // map. Clone the material(s) per-instance so each enemy
+                    // owns its own. Handles both single-material meshes and
+                    // multi-material arrays.
+                    if (Array.isArray(child.material)) {
+                        child.material = child.material.map(m => m.clone());
+                    } else if (child.material) {
+                        child.material = child.material.clone();
+                    }
                 }
             });
             m.add(clone);
@@ -4499,6 +4650,7 @@ class Game3D {
         const [hpMin, hpMax] = cfg.hp;
         const [spdMin, spdMax] = cfg.speed;
         const maxHp = Math.round(THREE.MathUtils.lerp(hpMin, hpMax, Math.random()));
+        const aiKind = cfg.ai || 'chase';
         m.userData = Object.assign(m.userData || {}, {
             type: 'enemy',
             enemyKind: typeKey,
@@ -4514,6 +4666,28 @@ class Game3D {
             // Ranged config (demon). null on melee-only / meleeOnly types.
             ranged: cfg.ranged ? Object.assign({}, cfg.ranged) : null,
             rangedTimer: cfg.ranged ? Math.random() * (cfg.ranged.cooldown || 2) : 0,
+            // Per-AI behavior config + transient state. Keeps the dispatch in
+            // updateEnemies branchless beyond a single switch.
+            aiKind,
+            aiCfg: cfg,
+            aiState: this._initEnemyAIState(aiKind, cfg),
+            // Cosmetic hit-stop: when >0, movement is paused this frame (used
+            // by the hit-feedback pulse to make impacts read).
+            hitStopT: 0,
+            // Used by skittish/hitAndRun behaviors to time their state changes.
+            contactCdT: 0,
+            // Awareness state — refreshed each frame by _updateAwareness.
+            // awareT > 0 means "I know where the player is/was". aimPos is
+            // the position to head toward (current player when LOS, else
+            // last-seen). When awareT depletes, aimPos clears and the AI
+            // falls back to idle wander.
+            awareT: 0,
+            lastSeenPos: new THREE.Vector2(),
+            aimPos: null,
+            // Throttle the LOS raycast — it's the most expensive check, so
+            // we only run it every few frames per enemy with a small offset
+            // so they don't all spike on the same tick.
+            losCheckT: Math.random() * 0.15,
         });
         const barW = 1.4, barH = 0.15;
         const back = new THREE.Mesh(
@@ -4535,46 +4709,424 @@ class Game3D {
         return m;
     }
 
+    // 2D segment vs axis-aligned box (slab method). Returns true if the
+    // segment (x1,z1)→(x2,z2) intersects the AABB centered at (cx,cz)
+    // with half-extents (hx,hz). Cheap, allocation-free.
+    _segmentVsAABB(x1, z1, x2, z2, cx, cz, hx, hz) {
+        const dx = x2 - x1, dz = z2 - z1;
+        const minX = cx - hx, maxX = cx + hx;
+        const minZ = cz - hz, maxZ = cz + hz;
+        let tmin = 0, tmax = 1;
+        if (Math.abs(dx) < 1e-9) {
+            if (x1 < minX || x1 > maxX) return false;
+        } else {
+            const inv = 1 / dx;
+            let t1 = (minX - x1) * inv, t2 = (maxX - x1) * inv;
+            if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp; }
+            if (t1 > tmin) tmin = t1;
+            if (t2 < tmax) tmax = t2;
+            if (tmin > tmax) return false;
+        }
+        if (Math.abs(dz) < 1e-9) {
+            if (z1 < minZ || z1 > maxZ) return false;
+        } else {
+            const inv = 1 / dz;
+            let t1 = (minZ - z1) * inv, t2 = (maxZ - z1) * inv;
+            if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp; }
+            if (t1 > tmin) tmin = t1;
+            if (t2 < tmax) tmax = t2;
+            if (tmin > tmax) return false;
+        }
+        return true;
+    }
+
+    // True if any (solid) wall blocks the line from (x1,z1) to (x2,z2).
+    // Uses the existing wall spatial hash via _iterWallsNear for a cheap
+    // broad-phase, then segment-vs-AABB for the narrow-phase.
+    _segmentHitsWall(x1, z1, x2, z2) {
+        const mx = (x1 + x2) * 0.5, mz = (z1 + z2) * 0.5;
+        const half = Math.hypot(x2 - x1, z2 - z1) * 0.5;
+        let blocked = false;
+        this._iterWallsNear(mx, mz, half + 1, (w) => {
+            if (this._segmentVsAABB(x1, z1, x2, z2, w.position.x, w.position.z, w.size.x / 2, w.size.z / 2)) {
+                blocked = true; return false;
+            }
+        });
+        return blocked;
+    }
+
+    // Can `e` actually see the player right now? Cheap range gate first,
+    // then FOV cone, then a single segment-vs-walls test. Vertical (Y) is
+    // ignored — gameplay is XZ-planar so a 2D LOS check is the right model.
+    _canEnemySeePlayer(e, ud) {
+        const cfg = ud.aiCfg;
+        const sight = (cfg && cfg.sightRange) || 14;
+        const dx = this.player.position.x - e.position.x;
+        const dz = this.player.position.z - e.position.z;
+        const d2 = dx * dx + dz * dz;
+        if (d2 > sight * sight) return false;
+
+        // FOV cone — player must be within viewCone degrees of the enemy's
+        // facing direction (ud.dir). Default 360 means no cone gate. We use
+        // a small "intimate radius" override so brushing right up against an
+        // enemy still alerts them even from behind — otherwise a player can
+        // dance on their back forever.
+        const coneDeg = (cfg && cfg.viewCone) || 360;
+        const intimate = 1.5; // within this distance, the cone doesn't matter
+        if (coneDeg < 360 && d2 > intimate * intimate) {
+            const fx = ud.dir ? ud.dir.x : Math.sin(e.rotation.y);
+            const fz = ud.dir ? ud.dir.y : Math.cos(e.rotation.y);
+            const fLen = Math.hypot(fx, fz);
+            if (fLen > 0.01) {
+                const d = Math.sqrt(d2);
+                const dot = (dx * fx + dz * fz) / (d * fLen);
+                // cos(halfCone): if dot is smaller, the player is outside the arc
+                const cosHalf = Math.cos((coneDeg * Math.PI / 180) * 0.5);
+                if (dot < cosHalf) return false;
+            }
+        }
+
+        return !this._segmentHitsWall(e.position.x, e.position.z, this.player.position.x, this.player.position.z);
+    }
+
+    // Refresh awareness state for one enemy. LOS is the only "alert" trigger
+    // for now — getting hit also alerts via the killEnemy/applyEnemyKnockback
+    // paths (we set awareT there too).
+    _updateAwareness(e, ud, deltaTime) {
+        // Throttle LOS raycast to ~7Hz per enemy; cheap range test is fine
+        // every frame. losCheckT was seeded random so checks are staggered.
+        ud.losCheckT -= deltaTime;
+        let canSee;
+        if (ud.losCheckT <= 0) {
+            canSee = this._canEnemySeePlayer(e, ud);
+            ud.losCheckT = 0.14;
+            ud._lastSeenLOS = canSee;
+        } else {
+            // Between checks, fall back to last LOS result. Range gate is
+            // still applied so a player who left the radius is ignored.
+            const sight = (ud.aiCfg && ud.aiCfg.sightRange) || 14;
+            const dx = this.player.position.x - e.position.x;
+            const dz = this.player.position.z - e.position.z;
+            canSee = !!ud._lastSeenLOS && (dx * dx + dz * dz <= sight * sight);
+        }
+        if (canSee) {
+            ud.awareT = (ud.aiCfg && ud.aiCfg.alertMemory) || 4.0;
+            ud.lastSeenPos.set(this.player.position.x, this.player.position.z);
+            ud.aimPos = ud.lastSeenPos;
+        } else if (ud.awareT > 0) {
+            ud.awareT -= deltaTime;
+            if (ud.awareT <= 0) {
+                ud.aimPos = null;
+            }
+            // While searching, also drop aim if we've arrived at lastSeen —
+            // prevents enemies from oscillating around the player's old spot.
+            else if (ud.aimPos) {
+                const adx = ud.lastSeenPos.x - e.position.x;
+                const adz = ud.lastSeenPos.y - e.position.z;
+                if (adx * adx + adz * adz < 1.0) {
+                    // Reached last-seen point with no LOS — give up faster.
+                    ud.awareT = Math.min(ud.awareT, 0.6);
+                }
+            }
+        }
+    }
+
+    _initEnemyAIState(aiKind, cfg) {
+        switch (aiKind) {
+            case 'chase':
+                return {
+                    lungeCdT: THREE.MathUtils.lerp(cfg.lunge.cooldown[0], cfg.lunge.cooldown[1], Math.random()),
+                    lungeT: 0,
+                };
+            case 'slam':
+                // phase: 'approach' | 'windup' | 'strike' | 'recover'
+                return { phase: 'approach', phaseT: 0, struck: false };
+            case 'kite':
+                return {
+                    strafeDir: Math.random() < 0.5 ? 1 : -1,
+                    strafeT: THREE.MathUtils.lerp(cfg.kite.strafePeriod[0], cfg.kite.strafePeriod[1], Math.random()),
+                };
+            case 'hitAndRun':
+                return { backoffT: 0, zigzagPhase: Math.random() * Math.PI * 2 };
+            case 'skittish':
+                return { wanderT: 0.5 + Math.random() * 1.5 };
+            default:
+                return {};
+        }
+    }
+
+    // Try to move `e` by (vx, vz) over dt, respecting walls. Returns true if
+    // the move succeeded; on wall block, callers may want to bounce/reroute.
+    _moveEnemyBy(e, vx, vz, dt) {
+        const nextX = e.position.x + vx * dt;
+        const nextZ = e.position.z + vz * dt;
+        _scratchV3a.set(nextX, e.position.y, nextZ);
+        if (this.pointHitsWall(_scratchV3a)) {
+            // Try sliding along walls — partial axis moves so enemies don't
+            // get stuck on outside corners.
+            _scratchV3a.set(nextX, e.position.y, e.position.z);
+            if (!this.pointHitsWall(_scratchV3a)) { e.position.x = nextX; return true; }
+            _scratchV3a.set(e.position.x, e.position.y, nextZ);
+            if (!this.pointHitsWall(_scratchV3a)) { e.position.z = nextZ; return true; }
+            return false;
+        }
+        e.position.x = nextX;
+        e.position.z = nextZ;
+        return true;
+    }
+
+    // Unit vector from enemy to player, with distance. Reads/writes to ud.
+    _playerVec(e) {
+        const dx = this.player.position.x - e.position.x;
+        const dz = this.player.position.z - e.position.z;
+        const d = Math.hypot(dx, dz) || 1;
+        return { dx, dz, d, ux: dx / d, uz: dz / d };
+    }
+
+    // Unit vector from enemy toward its current aim (player when seen, else
+    // last-seen position). Returns null when the enemy has no aim — the AI
+    // should fall back to idle wander in that case.
+    _aimVec(e, ud) {
+        const aim = ud.aimPos;
+        if (!aim) return null;
+        const dx = aim.x - e.position.x;
+        const dz = aim.y - e.position.z;
+        const d = Math.hypot(dx, dz) || 1;
+        return { dx, dz, d, ux: dx / d, uz: dz / d };
+    }
+
+    // Idle wander: pick a fresh random heading every so often, drift slowly.
+    // Used by every AI kind when ud.aimPos is null (no awareness).
+    _idleWander(e, ud, deltaTime) {
+        ud.changeT -= deltaTime;
+        if (ud.changeT <= 0) {
+            const ang = Math.random() * Math.PI * 2;
+            ud.dir.set(Math.cos(ang), Math.sin(ang));
+            ud.changeT = 1.5 + Math.random() * 2.5;
+        }
+        const ok = this._moveEnemyBy(e, ud.dir.x * ud.speed * 0.45, ud.dir.y * ud.speed * 0.45, deltaTime);
+        if (!ok) { ud.dir.x *= -1; ud.dir.y *= -1; ud.changeT = 0.3; }
+    }
+
+    _aiChase(e, ud, deltaTime) {
+        const v = this._aimVec(e, ud);
+        if (!v) { this._idleWander(e, ud, deltaTime); return; }
+        const s = ud.aiState;
+        const cfg = ud.aiCfg;
+        // Trigger a lunge: short burst toward aim at multiplied speed.
+        if (s.lungeT > 0) {
+            s.lungeT -= deltaTime;
+        } else {
+            s.lungeCdT -= deltaTime;
+            if (s.lungeCdT <= 0) {
+                if (v.d < 12) {
+                    s.lungeT = cfg.lunge.dur;
+                    ud.dir.set(v.ux, v.uz);
+                    // Squash forward to telegraph
+                    e.scale.x = 1.15; e.scale.y = 0.92;
+                }
+                s.lungeCdT = THREE.MathUtils.lerp(cfg.lunge.cooldown[0], cfg.lunge.cooldown[1], Math.random());
+            }
+        }
+        // Re-pick wander every 1-3s when not lunging
+        ud.changeT -= deltaTime;
+        if (s.lungeT <= 0 && ud.changeT <= 0) {
+            const ang = Math.random() * Math.PI * 2;
+            const sx = v.ux * 0.6 + Math.cos(ang) * 0.4;
+            const sz = v.uz * 0.6 + Math.sin(ang) * 0.4;
+            const slen = Math.hypot(sx, sz) || 1;
+            ud.dir.set(sx / slen, sz / slen);
+            ud.changeT = 1 + Math.random() * 1.5;
+        }
+        const speedMult = s.lungeT > 0 ? cfg.lunge.mult : 1;
+        const ok = this._moveEnemyBy(e, ud.dir.x * ud.speed * speedMult, ud.dir.y * ud.speed * speedMult, deltaTime);
+        if (!ok) { ud.dir.x *= -1; ud.dir.y *= -1; ud.changeT = 0.2; }
+    }
+
+    _aiSlam(e, ud, deltaTime) {
+        const s = ud.aiState;
+        const cfg = ud.aiCfg;
+        s.phaseT += deltaTime;
+        if (s.phase === 'approach') {
+            // No awareness → wander; abort approach.
+            const av = this._aimVec(e, ud);
+            if (!av) { this._idleWander(e, ud, deltaTime); return; }
+            ud.dir.set(av.ux, av.uz);
+            this._moveEnemyBy(e, ud.dir.x * ud.speed, ud.dir.y * ud.speed, deltaTime);
+            // Only commit to windup if we have *real* LOS — don't slam empty air.
+            const seesNow = this._canEnemySeePlayer(e, ud);
+            const playerD = this._playerVec(e).d;
+            if (seesNow && playerD <= cfg.slamRange) {
+                s.phase = 'windup'; s.phaseT = 0; s.struck = false;
+                // Visual telegraph: tint red on the giant via flash
+                this._tintEnemy(e, 0xff5544, cfg.windup * 1000);
+                this.audio && this.audio.play && this.audio.play('enemyGrowl');
+            }
+            return;
+        }
+        // Windup/strike/recover use the live player position (committed).
+        const v = this._playerVec(e);
+        if (s.phase === 'windup') {
+            // Stop, rear back: rotate body backward + scale up slightly
+            const p = Math.min(1, s.phaseT / cfg.windup);
+            e.rotation.x = -0.35 * p;
+            e.scale.set(1 + 0.1 * p, 1 + 0.15 * p, 1 + 0.1 * p);
+            if (s.phaseT >= cfg.windup) { s.phase = 'strike'; s.phaseT = 0; }
+        } else if (s.phase === 'strike') {
+            // Fast lunge forward. Damage if we hit during strike.
+            this._moveEnemyBy(e, v.ux * ud.speed * 5, v.uz * ud.speed * 5, deltaTime);
+            if (!s.struck && v.d < (ud.hitRadius || 0.8) + 1.5) {
+                this.damagePlayer(cfg.slamDamage);
+                s.struck = true;
+                // Camera shake if available
+                this._cameraShake && this._cameraShake(0.5, 0.25);
+            }
+            if (s.phaseT >= cfg.strikeDur) { s.phase = 'recover'; s.phaseT = 0; }
+        } else if (s.phase === 'recover') {
+            e.rotation.x = THREE.MathUtils.lerp(e.rotation.x, 0, 0.2);
+            e.scale.lerp(_scratchV3c.set(1, 1, 1), 0.2);
+            if (s.phaseT >= cfg.recover) { s.phase = 'approach'; s.phaseT = 0; e.rotation.x = 0; e.scale.set(1,1,1); }
+        }
+    }
+
+    _aiKite(e, ud, deltaTime) {
+        // No awareness → wander; demons don't kite an empty room.
+        const v = this._aimVec(e, ud);
+        if (!v) { this._idleWander(e, ud, deltaTime); return; }
+        const s = ud.aiState;
+        const cfg = ud.aiCfg.kite;
+        s.strafeT -= deltaTime;
+        if (s.strafeT <= 0) {
+            s.strafeDir = -s.strafeDir;
+            s.strafeT = THREE.MathUtils.lerp(cfg.strafePeriod[0], cfg.strafePeriod[1], Math.random());
+        }
+        // Radial component: retreat if too close, approach if too far, hold if in sweet spot
+        let radial = 0;
+        if (v.d < cfg.retreat) radial = -1;
+        else if (v.d > cfg.approach) radial = 1;
+        else radial = (cfg.ideal - v.d) * 0.2; // gentle drift to ideal
+        // Perpendicular (strafe) component
+        const px = -v.uz * s.strafeDir;
+        const pz = v.ux * s.strafeDir;
+        const vx = v.ux * radial + px;
+        const vz = v.uz * radial + pz;
+        const len = Math.hypot(vx, vz) || 1;
+        ud.dir.set(vx / len, vz / len);
+        const ok = this._moveEnemyBy(e, (vx / len) * ud.speed, (vz / len) * ud.speed, deltaTime);
+        if (!ok) { s.strafeDir = -s.strafeDir; s.strafeT = 0.2; }
+    }
+
+    _aiHitAndRun(e, ud, deltaTime) {
+        const s = ud.aiState;
+        const cfg = ud.aiCfg;
+        // Backoff phase: always uses live player position even if LOS is
+        // broken (we just hit them; we know where they were).
+        if (s.backoffT > 0) {
+            const pv = this._playerVec(e);
+            s.backoffT -= deltaTime;
+            ud.dir.set(-pv.ux, -pv.uz);
+            this._moveEnemyBy(e, -pv.ux * ud.speed * cfg.backoffMult, -pv.uz * ud.speed * cfg.backoffMult, deltaTime);
+            return;
+        }
+        const v = this._aimVec(e, ud);
+        if (!v) { this._idleWander(e, ud, deltaTime); return; }
+        // Zigzag chase: oscillate perpendicular component
+        s.zigzagPhase += deltaTime / cfg.zigzagPeriod * Math.PI;
+        const zig = Math.sin(s.zigzagPhase) * cfg.zigzagAmp;
+        const vx = v.ux + (-v.uz) * zig;
+        const vz = v.uz + (v.ux) * zig;
+        const len = Math.hypot(vx, vz) || 1;
+        ud.dir.set(vx / len, vz / len);
+        const ok = this._moveEnemyBy(e, (vx / len) * ud.speed, (vz / len) * ud.speed, deltaTime);
+        if (!ok) { s.zigzagPhase += Math.PI; }
+    }
+
+    _aiSkittish(e, ud, deltaTime) {
+        const cfg = ud.aiCfg;
+        // Only flee if we actually see (or recently saw) the player AND
+        // they're within fleeDist — being aware *of an empty corridor*
+        // doesn't trigger panic.
+        const v = ud.awareT > 0 ? this._playerVec(e) : null;
+        if (v && v.d < cfg.fleeDist) {
+            // Run away from player (with a touch of randomness)
+            const jitter = (Math.random() - 0.5) * 0.4;
+            const fx = -v.ux + (-v.uz) * jitter;
+            const fz = -v.uz + (v.ux) * jitter;
+            const len = Math.hypot(fx, fz) || 1;
+            ud.dir.set(fx / len, fz / len);
+            const ok = this._moveEnemyBy(e, (fx / len) * ud.speed * 1.2, (fz / len) * ud.speed * 1.2, deltaTime);
+            if (!ok) { ud.dir.x *= -1; ud.dir.y *= -1; }
+            return;
+        }
+        // Calm idle wander
+        const s = ud.aiState;
+        s.wanderT -= deltaTime;
+        if (s.wanderT <= 0) {
+            const ang = Math.random() * Math.PI * 2;
+            ud.dir.set(Math.cos(ang), Math.sin(ang));
+            s.wanderT = 1.0 + Math.random() * 2.0;
+        }
+        const ok = this._moveEnemyBy(e, ud.dir.x * ud.speed * 0.5, ud.dir.y * ud.speed * 0.5, deltaTime);
+        if (!ok) { ud.dir.x *= -1; ud.dir.y *= -1; s.wanderT = 0.4; }
+    }
+
+    // Brief solid-color tint that auto-reverts. Used for slam wind-up etc.
+    // Same overlap protection as flashEnemy — stash the true base color on
+    // the material, gate revert behind a counter so the latest tint wins.
+    _tintEnemy(e, color, durMs) {
+        const mats = [];
+        e.traverse((c) => {
+            if (c.isMesh && c.material && c.material.color) {
+                const mat = c.material;
+                if (mat.userData._baseColor == null) mat.userData._baseColor = mat.color.getHex();
+                mat.color.setHex(color);
+                mats.push(mat);
+            }
+        });
+        if (e.userData._tintId == null) e.userData._tintId = 0;
+        const myId = ++e.userData._tintId;
+        setTimeout(() => {
+            if (e.userData._tintId !== myId) return;
+            for (const mat of mats) {
+                if (mat.userData._baseColor != null) mat.color.setHex(mat.userData._baseColor);
+            }
+        }, durMs);
+    }
+
     updateEnemies(deltaTime) {
         if (this.playMode.enemies.length === 0) return;
         for (let i = this.playMode.enemies.length - 1; i >= 0; i--) {
             const e = this.playMode.enemies[i];
             const ud = e.userData;
-            // Stun pauses wander/movement while knockback is still being applied below.
-            if (ud.stunT > 0) {
+            // Tick contact damage cooldown so goblins can read "i hit them" once per encounter.
+            if (ud.contactCdT > 0) ud.contactCdT -= deltaTime;
+            // Refresh awareness (LOS → awareT, lastSeenPos, aimPos) BEFORE
+            // dispatch so each AI sees a consistent view of the world.
+            this._updateAwareness(e, ud, deltaTime);
+            // Hit-stop pauses movement briefly for impact readability.
+            if (ud.hitStopT > 0) {
+                ud.hitStopT -= deltaTime;
+            } else if (ud.stunT > 0) {
+                // Stun pauses wander/movement while knockback is still being applied below.
                 ud.stunT -= deltaTime;
             } else {
-                ud.changeT -= deltaTime;
-                if (ud.changeT <= 0) {
-                    // New wander direction biased toward player
-                    const toPlayer = new THREE.Vector2(
-                        this.player.position.x - e.position.x,
-                        this.player.position.z - e.position.z
-                    ).normalize();
-                    const rand = new THREE.Vector2(Math.cos(Math.random()*Math.PI*2), Math.sin(Math.random()*Math.PI*2)).multiplyScalar(0.5);
-                    ud.dir = toPlayer.multiplyScalar(0.5).add(rand).normalize();
-                    ud.changeT = 1 + Math.random() * 2;
-                }
-                const nextX = e.position.x + ud.dir.x * ud.speed * deltaTime;
-                const nextZ = e.position.z + ud.dir.y * ud.speed * deltaTime;
-                const test = new THREE.Vector3(nextX, e.position.y, nextZ);
-                if (this.pointHitsWall(test)) {
-                    // Bounce off wall; retry direction shortly
-                    ud.dir.x *= -1; ud.dir.y *= -1;
-                    ud.changeT = 0.2;
-                } else {
-                    e.position.x = nextX;
-                    e.position.z = nextZ;
+                switch (ud.aiKind) {
+                    case 'slam':      this._aiSlam(e, ud, deltaTime); break;
+                    case 'kite':      this._aiKite(e, ud, deltaTime); break;
+                    case 'hitAndRun': this._aiHitAndRun(e, ud, deltaTime); break;
+                    case 'skittish':  this._aiSkittish(e, ud, deltaTime); break;
+                    case 'chase':
+                    default:          this._aiChase(e, ud, deltaTime); break;
                 }
             }
             // Knockback decays even while stun is active (so the body slides to rest)
             if (ud.knockback) {
                 const kbX = ud.knockback.x * deltaTime;
                 const kbZ = ud.knockback.y * deltaTime;
-                const kbTest = new THREE.Vector3(e.position.x + kbX, e.position.y, e.position.z + kbZ);
-                if (!this.pointHitsWall(kbTest)) {
-                    e.position.x = kbTest.x;
-                    e.position.z = kbTest.z;
+                _scratchV3b.set(e.position.x + kbX, e.position.y, e.position.z + kbZ);
+                if (!this.pointHitsWall(_scratchV3b)) {
+                    e.position.x = _scratchV3b.x;
+                    e.position.z = _scratchV3b.z;
                 }
                 ud.knockback.multiplyScalar(Math.pow(0.001, deltaTime));
                 if (ud.knockback.lengthSq() < 0.05) ud.knockback = null;
@@ -4582,27 +5134,35 @@ class Game3D {
             if (ud.dir && (ud.dir.x !== 0 || ud.dir.y !== 0)) {
                 e.rotation.y = Math.atan2(ud.dir.x, ud.dir.y);
             }
-            // Hit flinch: lean back + squish, decays to neutral
+            // Hit flinch: lean back + squish, decays to neutral. Stronger
+            // numbers than before so hits read clearly — combined with the
+            // 130ms white/emissive flash and the new floating dmg number.
             if (ud.flinchT > 0) {
                 ud.flinchT -= deltaTime;
                 const p = Math.max(0, ud.flinchT) / ud.flinchMax;
-                e.rotation.x = -0.45 * p;
-                e.scale.y = 1 - 0.12 * p;
-                e.scale.x = 1 + 0.08 * p;
+                e.rotation.x = -0.7 * p;
+                e.scale.y = 1 - 0.22 * p;
+                e.scale.x = 1 + 0.16 * p;
+                e.scale.z = 1 + 0.05 * p;
                 if (ud.flinchT <= 0) {
                     e.rotation.x = 0;
                     e.scale.set(1, 1, 1);
                 }
             }
             // Ranged enemies (demon): fire a projectile at the player when in
-            // range, on a per-enemy cooldown. Skipped while stunned/knocked back.
-            if (ud.ranged && ud.stunT <= 0) {
+            // range AND visible, on a per-enemy cooldown. Skipped while
+            // stunned/knocked back, hiding behind a wall, or just plain
+            // unaware of the player.
+            if (ud.ranged && ud.stunT <= 0 && ud.awareT > 0) {
                 ud.rangedTimer -= deltaTime;
                 if (ud.rangedTimer <= 0) {
                     const dx = this.player.position.x - e.position.x;
                     const dz = this.player.position.z - e.position.z;
                     const distXZ = Math.hypot(dx, dz);
-                    if (distXZ <= ud.ranged.range && distXZ > 0.1) {
+                    // Need clear LOS to actually shoot — don't lob fireballs
+                    // through stone walls based on a half-second-old memory.
+                    if (distXZ <= ud.ranged.range && distXZ > 0.1 &&
+                        !this._segmentHitsWall(e.position.x, e.position.z, this.player.position.x, this.player.position.z)) {
                         this.spawnEnemyProjectile(e, this.player.position);
                         ud.rangedTimer = ud.ranged.cooldown;
                     } else {
@@ -4631,6 +5191,71 @@ class Game3D {
                 }
             }
         }
+        // Soft separation pass: push apart any overlapping enemies, and push
+        // enemies that are inside the player out of the player. Cheap O(n²)
+        // for ~20-30 enemies; no allocations. This is what lets the player
+        // muscle through a crowd instead of being trapped.
+        this._resolveEnemyOverlaps(deltaTime);
+    }
+
+    _resolveEnemyOverlaps(deltaTime) {
+        const list = this.playMode.enemies;
+        const n = list.length;
+        if (n === 0) return;
+        const playerR = 0.8;
+        const px = this.player.position.x;
+        const pz = this.player.position.z;
+        // Player ↔ enemy: push enemy away from the player. Strength scales
+        // with how deep the overlap is. Giants in their strike phase resist
+        // being shoved (they're committed to the slam).
+        for (let i = 0; i < n; i++) {
+            const e = list[i];
+            const ud = e.userData;
+            const r = (ud.hitRadius || 0.6) + playerR;
+            const dx = e.position.x - px;
+            const dz = e.position.z - pz;
+            const d2 = dx * dx + dz * dz;
+            if (d2 < r * r && d2 > 0.0001) {
+                const d = Math.sqrt(d2);
+                const overlap = r - d;
+                const ux = dx / d, uz = dz / d;
+                // Resist push if mid-slam strike (committed lunge)
+                const resist = (ud.aiKind === 'slam' && ud.aiState && ud.aiState.phase === 'strike') ? 0.15 : 1.0;
+                // Smaller enemies are pushed faster than big ones (mass proxy: hp)
+                const mass = Math.max(0.5, (ud.hpMax || 50) / 80);
+                const push = (overlap / mass) * resist;
+                e.position.x += ux * push;
+                e.position.z += uz * push;
+            }
+        }
+        // Enemy ↔ enemy: split overlap 50/50, weighted by mass.
+        for (let i = 0; i < n; i++) {
+            const a = list[i];
+            const ar = (a.userData.hitRadius || 0.6);
+            const am = Math.max(0.5, (a.userData.hpMax || 50) / 80);
+            for (let j = i + 1; j < n; j++) {
+                const b = list[j];
+                const br = (b.userData.hitRadius || 0.6);
+                const r = ar + br;
+                const dx = b.position.x - a.position.x;
+                const dz = b.position.z - a.position.z;
+                const d2 = dx * dx + dz * dz;
+                if (d2 < r * r && d2 > 0.0001) {
+                    const d = Math.sqrt(d2);
+                    const overlap = r - d;
+                    const bm = Math.max(0.5, (b.userData.hpMax || 50) / 80);
+                    const total = am + bm;
+                    const ux = dx / d, uz = dz / d;
+                    // Heavier mass moves less
+                    const aPush = overlap * (bm / total);
+                    const bPush = overlap * (am / total);
+                    a.position.x -= ux * aPush; a.position.z -= uz * aPush;
+                    b.position.x += ux * bPush; b.position.z += uz * bPush;
+                }
+            }
+        }
+        // Suppress the unused-var warning so the file doesn't trip strict mode.
+        void deltaTime;
     }
 
     showEnemyHPBar(enemy, duration = 3.0) {
@@ -5110,15 +5735,16 @@ class Game3D {
         }
 
         // FPV: ray from screen center.
-        const raycaster = new THREE.Raycaster();
-        raycaster.setFromCamera(new THREE.Vector2(0, 0), this.camera);
-        const hits = raycaster.intersectObjects(this.playMode.enemies, true);
+        _scratchV2a.set(0, 0);
+        _sharedRaycaster.setFromCamera(_scratchV2a, this.camera);
+        const hits = _sharedRaycaster.intersectObjects(this.playMode.enemies, true);
         for (const hit of hits) {
             if (hit.distance > range) break;
             const e = this.findEnemyRoot(hit.object);
             if (!e) continue;
             e.userData.hp -= damage;
             this.spawnImpact(hit.point.clone(), 0xffaa55);
+            this.spawnDamageNumber(hit.point, damage);
             this.audio && this.audio.play('swordHit');
             if (e.userData.hp <= 0) {
                 this.killEnemy(e);
@@ -5129,7 +5755,7 @@ class Game3D {
             }
             return;
         }
-        const endPoint = this.camera.position.clone().add(raycaster.ray.direction.clone().multiplyScalar(range));
+        const endPoint = this.camera.position.clone().add(_sharedRaycaster.ray.direction.clone().multiplyScalar(range));
         this.spawnImpact(endPoint, 0xcccccc);
     }
 
@@ -5306,6 +5932,7 @@ class Game3D {
                     const dmg = (p.userData.damage != null) ? p.userData.damage : 1;
                     e.userData.hp -= dmg;
                     this.spawnImpact(p.position.clone(), 0xff5533);
+                    this.spawnDamageNumber(p.position, dmg);
                     this.audio && this.audio.play('bulletHit');
                     this.scene.remove(p);
                     this.playMode.projectiles.splice(i, 1);
@@ -6032,8 +6659,10 @@ class Game3D {
         const directionalLight = new THREE.DirectionalLight(t.sun, 2.4);
         directionalLight.position.set(50, 50, 50);
         directionalLight.castShadow = true;
-        directionalLight.shadow.mapSize.width = 1024;
-        directionalLight.shadow.mapSize.height = 1024;
+        // 512² is plenty for a stylized 128-bit look — 1024² was 4× the
+        // rasterization cost for no visible improvement.
+        directionalLight.shadow.mapSize.width = 512;
+        directionalLight.shadow.mapSize.height = 512;
         directionalLight.shadow.camera.near = 0.5;
         directionalLight.shadow.camera.far = 200;
         directionalLight.shadow.camera.left = -50;
@@ -6854,12 +7483,22 @@ class Game3D {
         }
 
         // Enemy contact damage scales by type (giants smash for 20, chicks peck for 3).
+        // Per-enemy cooldown so a single goblin can't tap-damage every frame.
         if (this.gameMode === 'play' && this.playMode.enemies) {
             for (const enemy of this.playMode.enemies) {
+                const ud = enemy.userData;
+                if (ud.contactCdT > 0) continue;
+                // Giants damage via their slam strike, not passive contact.
+                if (ud.aiKind === 'slam') continue;
                 const distance = this.player.position.distanceTo(enemy.position);
-                const hitR = (enemy.userData.hitRadius || 0.6) + 0.6;
+                const hitR = (ud.hitRadius || 0.6) + 0.6;
                 if (distance < hitR) {
-                    this.damagePlayer(enemy.userData.contactDamage || 10);
+                    this.damagePlayer(ud.contactDamage || 10);
+                    ud.contactCdT = 0.6;
+                    // hitAndRun (goblin): trigger sprint-away after striking
+                    if (ud.aiKind === 'hitAndRun' && ud.aiState) {
+                        ud.aiState.backoffT = ud.aiCfg.backoffDur;
+                    }
                     break; // Only damage once per frame
                 }
             }
@@ -6920,6 +7559,13 @@ class Game3D {
     }
     
     checkEnemyCollision(position) {
+        // Enemies no longer hard-block the player — they push apart in
+        // resolveEnemyPushApart() each frame. This keeps the player from
+        // getting trapped when surrounded; contact damage still discourages
+        // walking through a mob.
+        return false;
+        // Dead code below (kept for reference; the soft-push pass replaced it).
+        // eslint-disable-next-line no-unreachable
         if (!this.playMode || !this.playMode.enemies) return false;
         const playerRadius = 0.8;
         const cur = this.player.position;
@@ -6929,8 +7575,6 @@ class Game3D {
             const dz = position.z - e.position.z;
             const d2 = dx * dx + dz * dz;
             if (d2 < r * r) {
-                // Allow movement that increases distance — prevents permastuck if a zombie
-                // wandered into the player.
                 const curDx = cur.x - e.position.x;
                 const curDz = cur.z - e.position.z;
                 if (d2 < curDx * curDx + curDz * curDz) return true;
@@ -7299,13 +7943,29 @@ class Game3D {
     // ===== HUD: simple top-right health bar (HP number + thin fill bar) =====
     _ensureHealthBarEl() {
         let el = document.getElementById('health-bar');
-        if (el) return el;
-        el = document.createElement('div');
-        el.id = 'health-bar';
-        el.innerHTML = `
-            <div class="hb-text">100</div>
-            <div class="hb-track"><div class="hb-fill"></div></div>
-        `;
+        // index.html ships a static #health-bar with the older pip schema
+        // (.hb-pips / .hb-label). updateHealthBarUI writes to the new
+        // .hb-fill / .hb-track schema, so re-stamp the innerHTML if the
+        // JS-owned children aren't there — and apply the inline styles
+        // since the static CSS only knows about the pip schema. Without
+        // this, the first render throws on `fillEl.style.width = ...`
+        // and the 3D scene goes black.
+        if (el) {
+            if (el.querySelector('.hb-fill')) return el;
+            // Stale schema from static HTML — re-stamp and fall through to
+            // apply the inline styles below.
+            el.innerHTML = `
+                <div class="hb-text">100</div>
+                <div class="hb-track"><div class="hb-fill"></div></div>
+            `;
+        } else {
+            el = document.createElement('div');
+            el.id = 'health-bar';
+            el.innerHTML = `
+                <div class="hb-text">100</div>
+                <div class="hb-track"><div class="hb-fill"></div></div>
+            `;
+        }
         Object.assign(el.style, {
             position: 'fixed',
             top: '14px',
@@ -7344,7 +8004,7 @@ class Game3D {
             boxShadow: '0 0 6px rgba(109,255,122,0.6)',
             transition: 'width 0.15s ease-out, background 0.2s'
         });
-        document.body.appendChild(el);
+        if (!el.parentNode) document.body.appendChild(el);
         return el;
     }
 
@@ -7561,65 +8221,17 @@ class Game3D {
     
     
     clearAllUI() {
-        // Remove ALL possible UI elements (except modals, inventory, and crosshair)
-        // NOTE: do not list 'weapon-hud' here — it's the live ammo readout.
-        const allUIElements = [
-            // Old HUD elements
-            'player-hp-hud', 'top-center-ui',
-            'jetpack-hud', 'enemy-count-hud', 'compass-hud',
-            'player-pos', 'player-facing', 'camera-info',
-            // Any other possible UI elements
-            'objective-msg', 'facing-indicator',
-            'control-ui', 'maze-ui'
-        ];
-        
-        allUIElements.forEach(id => {
-            const el = document.getElementById(id);
-            if (el && id !== 'crosshair' && id !== 'controls-ui' && id !== 'inventory-grid-ui' && id !== 'inventory-drawer') { // Explicitly protect crosshair, controls, inventory grid, and drawer
-                el.remove();
-            }
-        });
-        
-        // Also remove any elements with common UI classes
-        const uiClasses = ['hud-element', 'game-ui', 'ui-panel', 'control-panel'];
-        uiClasses.forEach(className => {
-            const elements = document.querySelectorAll(`.${className}`);
-            elements.forEach(el => el.remove());
-        });
-        
-        // Remove any elements positioned in top-right area that might be interfering
-        const allDivs = document.querySelectorAll('div');
-        allDivs.forEach(div => {
-            // Never touch the drawer or anything inside it — the inv-panel uses
-            // left:50% and would otherwise be nuked every frame.
-            if (div.closest && div.closest('#inventory-drawer')) return;
-            // Also leave anything inside protected wrappers alone.
-            if (div.closest && div.closest('#settings-modal, #toolbox-modal, #inventory-grid-ui')) return;
-
-            const style = window.getComputedStyle(div);
-            if ((style.position === 'absolute' || style.position === 'fixed') &&
-                (style.top === '20px' || style.top === '10px' || style.top === '0px' || style.top === '50%') &&
-                (style.right === '20px' || style.right === '10px' || style.right === '0px' || style.left === '50%')) {
-                if (!div.id || (!div.id.includes('health-ui') &&
-                    !div.id.includes('health-bar') &&
-                    !div.id.includes('compass-ui') &&
-                    !div.id.includes('settings-modal') &&
-                    !div.id.includes('toolbox-modal') &&
-                    !div.id.includes('inventory-drawer') &&
-                    !div.id.includes('inventory-grid-ui') &&
-                    !div.id.includes('minimap') &&
-                    !div.id.includes('objective-banner') &&
-                    !div.id.includes('damage-vignette') &&
-                    !div.id.includes('muzzle-flash') &&
-                    !div.id.includes('arena-hud') &&
-                    !div.id.includes('arena-countdown') &&
-                    !div.id.includes('lava-vignette') &&
-                    !div.id.includes('crosshair') &&
-                    !div.id.includes('drawer-cursor'))) {
-                    div.remove();
-                }
-            }
-        });
+        // Cheap sweep: only IDs that legacy code might leave behind. The
+        // previous version did a full-document querySelectorAll('div') +
+        // getComputedStyle per frame, which dominated CPU on lower-end
+        // machines. The targeted-ID removal below is O(1) per id and the
+        // div scan is no longer needed — every live HUD element is owned
+        // by the new cached-ref system in mountHUD/updateXxxUI.
+        const stale = STALE_UI_IDS;
+        for (let i = 0; i < stale.length; i++) {
+            const el = document.getElementById(stale[i]);
+            if (el) el.remove();
+        }
     }
 
     updateHealthUI() {
@@ -9549,25 +10161,34 @@ class Game3D {
     updateFacingIndicator() {
         const fi = this.facingIndicator;
         if (!fi.light || !fi.lightTarget || !this.player) return;
-        const forward = new THREE.Vector3(Math.sin(this.characterRotation), 0, Math.cos(this.characterRotation));
+        // Bail early when disabled — no point computing positions for hidden
+        // objects (saves the ray/plane intersect in particular).
+        if (!fi.enabled) {
+            fi.light.visible = false;
+            if (fi.groundDot) fi.groundDot.visible = false;
+            return;
+        }
+        const px = this.player.position.x;
+        const py = this.player.position.y;
+        const pz = this.player.position.z;
+        const fx = Math.sin(this.characterRotation);
+        const fz = Math.cos(this.characterRotation);
         // Light at head, slightly forward
-        const headY = this.player.position.y + 1.6;
-        const lightPos = this.player.position.clone().add(new THREE.Vector3(0, headY - this.player.position.y, 0)).add(forward.clone().multiplyScalar(0.25));
-        fi.light.position.copy(lightPos);
+        fi.light.position.set(px + fx * 0.25, py + 1.6, pz + fz * 0.25);
         // Target a few meters forward
-        const tgt = this.player.position.clone().add(forward.clone().multiplyScalar(3));
-        tgt.y = this.groundY + 0.5;
-        fi.lightTarget.position.copy(tgt);
-        fi.light.visible = fi.enabled;
-        
+        fi.lightTarget.position.set(px + fx * 3, this.groundY + 0.5, pz + fz * 3);
+        fi.light.visible = true;
+
         // Ground dot at forward ground intersection from player
         if (fi.groundDot) {
-            const ray = new THREE.Ray(this.player.position.clone().add(new THREE.Vector3(0, 1.0, 0)), forward);
-            const plane = new THREE.Plane(new THREE.Vector3(0,1,0), -this.groundY);
-            const p = new THREE.Vector3();
-            if (ray.intersectPlane(plane, p)) {
-                fi.groundDot.position.set(p.x, this.groundY + 0.02, p.z);
-                fi.groundDot.visible = fi.enabled;
+            _scratchV3a.set(px, py + 1.0, pz);
+            _scratchV3b.set(fx, 0, fz);
+            _scratchRay.origin.copy(_scratchV3a);
+            _scratchRay.direction.copy(_scratchV3b);
+            _scratchPlaneGround.constant = -this.groundY;
+            if (_scratchRay.intersectPlane(_scratchPlaneGround, _scratchV3c)) {
+                fi.groundDot.position.set(_scratchV3c.x, this.groundY + 0.02, _scratchV3c.z);
+                fi.groundDot.visible = true;
             } else {
                 fi.groundDot.visible = false;
             }
