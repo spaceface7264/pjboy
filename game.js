@@ -614,6 +614,12 @@ class Game3D {
             enemyProjectiles: [],
             enemies: [],
             enemiesGroup: new THREE.Group(),
+            // Crates + keys live in their own groups so clearMaze can drop them
+            // together without touching unrelated scene content.
+            crates: [],
+            cratesGroup: new THREE.Group(),
+            keys: [],
+            keysGroup: new THREE.Group(),
             cameraOffset: new THREE.Vector3(-8, 10, -8), // isometric offset (closer 2nd-person)
             mouseNDC: new THREE.Vector2(0, 0),
             orbitEnabled: false,
@@ -627,6 +633,7 @@ class Game3D {
             selectedIndex: 0,
             ammo: 0,
             flags: 9999,
+            keys: 0,              // crate keys collected from the maze
             health: 100,
             maxHealth: 100,
             speedBoostTimer: 0,
@@ -684,8 +691,10 @@ class Game3D {
         // Pickups must initialize before weapons: loadQuickbarLayout (called from
         // initializeWeapons) builds the default layout from both registries.
         this.initializePickups();
+        this.initializeBlocks();
         this.initializeWeapons();
         this.initMultiplayer();
+        if (this._initMetaState) this._initMetaState();
         this.animate();
     }
 
@@ -724,8 +733,8 @@ class Game3D {
                 apply() { g.inventory.ammo = Math.min(g.inventory.ammo + 10, g.AMMO_MAX); } },
             jetpack:     { emoji: '🚀', color: 0xffaa66, weight: 16, labelKey: 'jetpackFuel', labelSuffix: ' +50', autoApply: true,
                 apply() { g.powerUps.jetpackFuel += 50; } },
-            speed:       { emoji: '⚡', color: 0x66ccff, weight: 12, labelKey: 'speedBoost',  labelSuffix: ' +1',
-                apply() { g.powerUps.speedBoost += 1; } },
+            speed:       { emoji: '⚡', color: 0x66ccff, weight: 12, labelKey: 'speedBoost',  labelSuffix: ' +10s sprint',
+                apply() { g.applySpeedBoost(10); } },
             weaponBuff:  { emoji: '⚔️', color: 0xff8866, weight: 10, labelKey: 'weaponBuff',  labelSuffix: ' +1',
                 apply() { g.powerUps.weaponBuff += 1; } },
             healthRegen: { emoji: '💚', color: 0xaaff88, weight: 10, labelKey: 'healthRegen', labelSuffix: ' +1',
@@ -733,6 +742,216 @@ class Game3D {
             flag:        { emoji: '🏁', color: 0xff66aa, weight: 6,  labelKey: 'flag',        labelSuffix: ' +1', autoApply: true,
                 apply() { g.inventory.flags += 1; if (g.updateControlsUI) g.updateControlsUI(); } }
         };
+    }
+
+    // Placeable blocks — Minecraft-style. v1 ships a single block (stone)
+    // so the registry, thumbnail render, quickbar wiring and placement path
+    // are all proven before adding more block types.
+    initializeBlocks() {
+        this.BLOCK_DEFS = {
+            stone: { path: 'assets/Blocks/Block_Stone.gltf', name: 'Stone Block', color: 0x8a8d92 }
+        };
+        // Inventory counts per block id. Starts with a generous stack so the
+        // player can experiment without grinding for materials in v1.
+        this.inventory.blocks = this.inventory.blocks || {};
+        for (const id of Object.keys(this.BLOCK_DEFS)) {
+            if (this.inventory.blocks[id] == null) this.inventory.blocks[id] = 99;
+        }
+        this.blockTemplates = {};
+        this.blockThumbs = {};      // dataURL thumbnails keyed by block id
+        this.activeBlockId = null;  // when set, left-click places this block
+
+        const loader = new THREE.GLTFLoader();
+        for (const [id, cfg] of Object.entries(this.BLOCK_DEFS)) {
+            // Emoji fallback so the drawer has *something* before the GLTF
+            // finishes loading (drawer re-renders on open, so this only shows
+            // for the brief first-paint window).
+            this.blockThumbs[id] = '🧱';
+            loader.load(cfg.path, (gltf) => {
+                this.blockTemplates[id] = gltf.scene;
+                this.blockThumbs[id] = this._renderBlockThumbnail(gltf.scene, cfg.color) || '🧱';
+                if (this.isDrawerOpen) this.updateDrawerUI();
+                this._qbSig = null;
+                this.updateInventoryGridUI && this.updateInventoryGridUI();
+            }, undefined, (err) => {
+                console.error(`Error loading block "${id}" from ${cfg.path}:`, err);
+            });
+        }
+    }
+
+    // One-off offscreen render of a block GLTF into a small dataURL. We
+    // dispose the renderer so we don't keep a second WebGL context around.
+    _renderBlockThumbnail(sceneRoot, fallbackColor) {
+        try {
+            const size = 64;
+            const canvas = document.createElement('canvas');
+            canvas.width = size; canvas.height = size;
+            const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+            renderer.setPixelRatio(1);
+            renderer.setSize(size, size, false);
+            renderer.setClearColor(0x000000, 0);
+
+            const scene = new THREE.Scene();
+            const clone = sceneRoot.clone(true);
+            // Normalize size to 1 unit so every block thumbnail has the same
+            // framing regardless of native GLTF scale.
+            const bbox = new THREE.Box3().setFromObject(clone);
+            const sz = bbox.getSize(new THREE.Vector3());
+            const maxDim = Math.max(sz.x, sz.y, sz.z) || 1;
+            clone.scale.setScalar(1 / maxDim);
+            bbox.setFromObject(clone);
+            const center = bbox.getCenter(new THREE.Vector3());
+            clone.position.sub(center);
+            scene.add(clone);
+
+            scene.add(new THREE.AmbientLight(0xffffff, 0.85));
+            const dir = new THREE.DirectionalLight(0xffffff, 0.9);
+            dir.position.set(2, 3, 2);
+            scene.add(dir);
+
+            const cam = new THREE.OrthographicCamera(-0.8, 0.8, 0.8, -0.8, 0.1, 10);
+            cam.position.set(1.5, 1.5, 1.5);
+            cam.lookAt(0, 0, 0);
+
+            renderer.render(scene, cam);
+            const dataURL = canvas.toDataURL('image/png');
+            renderer.dispose();
+            return `<img src="${dataURL}" class="block-thumb" alt="" draggable="false">`;
+        } catch (e) {
+            console.warn('block thumbnail render failed', e);
+            return null;
+        }
+    }
+
+    // One-off offscreen render of a weapon GLTF (sword etc.) into a small
+    // dataURL. The sword is much longer than wide, so we tilt it diagonally
+    // for nicer framing instead of leaving a thin vertical line.
+    _renderWeaponThumbnail(template) {
+        try {
+            const size = 64;
+            const canvas = document.createElement('canvas');
+            canvas.width = size; canvas.height = size;
+            const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+            renderer.setPixelRatio(1);
+            renderer.setSize(size, size, false);
+            renderer.setClearColor(0x000000, 0);
+
+            const scene = new THREE.Scene();
+            const clone = template.clone(true);
+            const o = template.userData && template.userData.orient;
+            if (o) clone.rotation.set(o.rot.x, o.rot.y, o.rot.z);
+
+            // Wrap and tilt so the blade sits diagonally in the frame.
+            const root = new THREE.Group();
+            root.add(clone);
+            root.rotation.z = -Math.PI / 5;
+            root.updateMatrixWorld(true);
+
+            const bbox = new THREE.Box3().setFromObject(root);
+            const sz = bbox.getSize(new THREE.Vector3());
+            const maxDim = Math.max(sz.x, sz.y, sz.z) || 1;
+            root.scale.setScalar(1 / maxDim);
+            const bbox2 = new THREE.Box3().setFromObject(root);
+            const center = bbox2.getCenter(new THREE.Vector3());
+            root.position.sub(center);
+            scene.add(root);
+
+            scene.add(new THREE.AmbientLight(0xffffff, 0.95));
+            const dir = new THREE.DirectionalLight(0xffffff, 0.9);
+            dir.position.set(2, 3, 2);
+            scene.add(dir);
+
+            // Camera tilted slightly so the sword has a bit of perspective volume.
+            const cam = new THREE.OrthographicCamera(-0.6, 0.6, 0.6, -0.6, 0.1, 10);
+            cam.position.set(0.6, 0.4, 2.5);
+            cam.lookAt(0, 0, 0);
+
+            renderer.render(scene, cam);
+            const dataURL = canvas.toDataURL('image/png');
+            renderer.dispose();
+            return `<img src="${dataURL}" class="weapon-thumb" alt="" draggable="false">`;
+        } catch (e) {
+            console.warn('weapon thumbnail render failed', e);
+            return null;
+        }
+    }
+
+    // Clone a unit-sized block mesh from the loaded GLTF template.
+    _createBlockMesh(blockId) {
+        const tpl = this.blockTemplates && this.blockTemplates[blockId];
+        if (tpl && THREE.SkeletonUtils) {
+            const clone = THREE.SkeletonUtils.clone(tpl);
+            const bbox = new THREE.Box3().setFromObject(clone);
+            const sz = bbox.getSize(new THREE.Vector3());
+            const maxDim = Math.max(sz.x, sz.y, sz.z) || 1;
+            clone.scale.setScalar(1 / maxDim);
+            // Re-center so the mesh origin sits at the block center.
+            const bbox2 = new THREE.Box3().setFromObject(clone);
+            const center = bbox2.getCenter(new THREE.Vector3());
+            clone.position.sub(center);
+            clone.traverse((child) => {
+                if (child.isMesh) {
+                    child.castShadow = true;
+                    child.receiveShadow = true;
+                }
+            });
+            const wrap = new THREE.Group();
+            wrap.add(clone);
+            return wrap;
+        }
+        const cfg = (this.BLOCK_DEFS && this.BLOCK_DEFS[blockId]) || {};
+        const mat = new THREE.MeshLambertMaterial({ color: cfg.color || 0x8a8d92 });
+        return new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), mat);
+    }
+
+    // Place a block on the cell directly in front of the player, snapped to
+    // a 1-unit integer grid. Costs one from the player's stock; if the cell
+    // is occupied or out of stock, no-op (with a tiny toast hint).
+    placeActiveBlock() {
+        const id = this.activeBlockId;
+        if (!id) return false;
+        const stock = (this.inventory.blocks && this.inventory.blocks[id]) || 0;
+        if (stock <= 0) {
+            this.showMessage && this.showMessage(`Out of ${this.BLOCK_DEFS[id]?.name || id}`);
+            return false;
+        }
+        const forward = new THREE.Vector3(
+            Math.sin(this.characterRotation), 0,
+            Math.cos(this.characterRotation)
+        ).normalize();
+        const target = this.player.position.clone().add(forward.multiplyScalar(1.6));
+        const gx = Math.floor(target.x) + 0.5;
+        const gz = Math.floor(target.z) + 0.5;
+        const gy = 0.5; // ground-level block, top at y=1
+        // Reject if a wall already occupies this cell, or if the placement
+        // would land on top of the player (small safety margin).
+        if (!this.isPositionFree(gx, gz, 0.45)) {
+            this.showMessage && this.showMessage('Blocked');
+            return false;
+        }
+        const distToPlayer = Math.hypot(this.player.position.x - gx, this.player.position.z - gz);
+        if (distToPlayer < 0.9) return false;
+
+        const mesh = this._createBlockMesh(id);
+        mesh.position.set(gx, gy, gz);
+        this.scene.add(mesh);
+        const entry = {
+            mesh,
+            position: mesh.position,
+            size: { x: 1, y: 1, z: 1 },
+            destructible: true,
+            hp: 3, maxHp: 3,
+            placed: true, blockId: id,
+        };
+        this.walls.push(entry);
+        this._addWallToHash(entry);
+
+        this.inventory.blocks[id] = stock - 1;
+        this.audio && this.audio.play && this.audio.play('uiClick');
+        this._qbSig = null;
+        this.updateInventoryGridUI && this.updateInventoryGridUI();
+        if (this.isDrawerOpen) this.updateDrawerUI();
+        return true;
     }
 
     // Display label that respects current language
@@ -755,22 +974,32 @@ class Game3D {
     // through the entire UI.
     getItemRegistry() {
         const weapons = Object.entries(this.WEAPON_STATS).map(([id, w]) => ({
-            id, category: 'weapon', icon: w.icon, name: this.t(id)
+            id, category: 'weapon', icon: (this.weaponThumbs && this.weaponThumbs[id]) || w.icon, name: this.t(id)
         }));
         const consumables = Object.entries(this.ITEM_DEFS).map(([id, d]) => ({
             id, category: 'consumable', icon: d.emoji, name: this.t(d.labelKey)
         }));
-        return { weapons, consumables, all: [...weapons, ...consumables] };
+        const blocks = Object.entries(this.BLOCK_DEFS || {}).map(([id, b]) => ({
+            id, category: 'block', icon: (this.blockThumbs && this.blockThumbs[id]) || '🧱', name: b.name
+        }));
+        return { weapons, consumables, blocks, all: [...weapons, ...consumables, ...blocks] };
+    }
+
+    getSpeedBoostStock() {
+        return this.inventory.items.filter((i) => i.type === 'speed').length;
     }
 
     // How many of `id` does the player currently own/have stocked?
     getItemCount(id) {
         if (this.WEAPON_STATS[id]) return this.player.weapons.includes(id) ? 1 : 0;
+        if (this.BLOCK_DEFS && this.BLOCK_DEFS[id]) {
+            return (this.inventory.blocks && this.inventory.blocks[id]) || 0;
+        }
         switch (id) {
             case 'health':      return this.inventory.items.filter(i => i.type === 'health').length;
             case 'ammo':        return this.inventory.ammo;
             case 'jetpack':     return Math.floor(this.powerUps.jetpackFuel);
-            case 'speed':       return this.powerUps.speedBoost;
+            case 'speed':       return this.getSpeedBoostStock();
             case 'healthRegen': return this.powerUps.healthRegen;
             case 'weaponBuff':  return this.powerUps.weaponBuff;
             case 'flag':        return this.inventory.flags;
@@ -779,6 +1008,9 @@ class Game3D {
     }
 
     isItemOwned(id) {
+        if (id === 'speed') {
+            return this.getSpeedBoostStock() > 0 || (this.powerUps.speedBoostTimer || 0) > 0;
+        }
         return this.getItemCount(id) > 0;
     }
 
@@ -804,13 +1036,31 @@ class Game3D {
         this.player.currentWeaponIndex = 0;
         this.inventory.ammo = 12;      // starting clip
 
-        // Power-up stacks
+        // dataURL <img> thumbnails rendered from weapon GLTFs (keyed by weapon id).
+        // Populated asynchronously as templates finish loading; the drawer and
+        // quickbar UIs fall back to WEAPON_STATS[id].icon (emoji) until then.
+        this.weaponThumbs = {};
+
+        // Power-up stacks / timers
         this.powerUps = {
             jetpackFuel: 0,
-            speedBoost: 0,
+            speedBoostTimer: 0,
             healthRegen: 0,
             weaponBuff: 0
         };
+        this.SPEED_BOOST_PER_PICKUP = 10;
+        this.SPEED_BOOST_MAX_TIMER = 25;
+        this.SPEED_BOOST_MOVE_MULT = 1.45;
+
+        // Global multiplier applied to every enemy's authored scale at spawn.
+        // 0.9 = 10% smaller across the board. Hitboxes are derived from the
+        // scaled mesh bbox so they shrink along with the visual.
+        this.ENEMY_SIZE_MULT = 0.8;
+
+        // When true, every campaign level start also drops a free key + locked
+        // crate within arm's reach of the player spawn so the crate system can
+        // be smoke-tested without hunting through the maze. Set false to ship.
+        this.DEBUG_SPAWN_LOOT_NEAR_PLAYER = false;
 
         // Weapon runtime state
         this.weaponCooldowns = {};
@@ -884,7 +1134,7 @@ class Game3D {
             
             // Power-ups
             powerUps: {
-                speedBoost: this.powerUps.speedBoost,
+                speedBoost: Math.ceil(this.powerUps.speedBoostTimer || 0),
                 healthRegen: this.powerUps.healthRegen,
                 weaponBuff: this.powerUps.weaponBuff,
                 jetpackFuel: Math.floor(this.powerUps.jetpackFuel)
@@ -1054,6 +1304,17 @@ class Game3D {
             this.swordTemplate = template;
             this._swordTemplateLoading = false;
             if (this._swordWrappers) this._swordWrappers.forEach((w) => this.populateSwordWrapper(w));
+
+            // Render a thumbnail from the GLTF so the inventory drawer / quickbar
+            // can show the real sword art instead of the ⚔️ emoji fallback.
+            this.weaponThumbs = this.weaponThumbs || {};
+            const thumb = this._renderWeaponThumbnail(template);
+            if (thumb) {
+                this.weaponThumbs.diamondSword = thumb;
+                this._qbSig = null;
+                if (this.isDrawerOpen) this.updateDrawerUI();
+                this.updateInventoryGridUI && this.updateInventoryGridUI();
+            }
         }, undefined, (error) => {
             console.error('Error loading Sword_Diamond.gltf:', error);
             this._swordTemplateLoading = false;
@@ -1116,10 +1377,14 @@ class Game3D {
             rot: { x: 0, y: 0, z: 0 } // pivot's own rotation is rest; sword tilt lives on the inner mesh
         };
 
-        // Swing animation state — kept slightly shorter than the weapon
-        // cooldown so there's a brief rest frame between consecutive swings.
+        // Swing animation state. Total swing duration covers three phases:
+        // anticipation (wind-back) → strike (fast committed swing past rest)
+        // → recovery (ease back). `swingDir` alternates ±1 between swings so
+        // back-to-back attacks read as a combo instead of a single repeated
+        // gesture.
         this.swingTimer = 0;
-        this.swingDuration = 0.18;
+        this.swingDuration = 0.28;
+        this.swingDir = 1;
 
         this.fpvGun = this._buildFpvGun();
         this.camera.add(this.fpvGun);
@@ -1402,6 +1667,8 @@ class Game3D {
 
     triggerSwordSwing() {
         this.swingTimer = this.swingDuration;
+        // Alternate diagonal direction every swing for a left/right combo feel.
+        this.swingDir = -(this.swingDir || 1);
     }
 
     updateSwordViewmodel(deltaTime) {
@@ -1416,16 +1683,45 @@ class Game3D {
             const rest = this._fpvSwordRest;
             if (this.swingTimer > 0) {
                 this.swingTimer = Math.max(0, this.swingTimer - deltaTime);
-                const t = 1 - (this.swingTimer / this.swingDuration);
-                const arc = Math.sin(t * Math.PI);
-                // Pivot swings diagonally down-left from the rest grip.
-                this.fpvSword.rotation.z = -arc * 1.1;
-                this.fpvSword.rotation.x = arc * 0.5;
-                this.fpvSword.position.z = rest.pos.z - arc * 0.2;
+                const t = 1 - (this.swingTimer / this.swingDuration); // 0 → 1
+                const dir = this.swingDir || 1;
+                // Phase splits: 20% anticipation, 35% strike, 45% recovery.
+                // The strike phase carries the visual punch; recovery is the
+                // longest so the blade settles smoothly instead of snapping back.
+                const A = 0.20, S = 0.55; // anticipation ends, strike ends
+                let antic = 0, strike = 0, recover = 0;
+                if (t < A) {
+                    // ease-out wind-back
+                    const u = t / A;
+                    antic = Math.sin(u * Math.PI / 2);
+                } else if (t < S) {
+                    // ease-in strike past rest (overshoot factor 1.15)
+                    const u = (t - A) / (S - A);
+                    strike = (u * u) * 1.15;
+                    antic = 1 - u; // bleed wind-back out as strike ramps in
+                } else {
+                    // smooth ease-out recovery back to rest
+                    const u = (t - S) / (1 - S);
+                    recover = 1 - (1 - u) * (1 - u);
+                    strike = (1 - recover) * 1.15;
+                }
+                // Compose: anticipation pulls blade up-and-back, strike drives
+                // it diagonally across the view, recovery interpolates to rest.
+                const swingZ = strike * 1.35;   // diagonal cut
+                const swingX = strike * 0.55;   // forward chop
+                const anticZ = antic * 0.30;    // raise blade before swing
+                const anticX = -antic * 0.25;
+                this.fpvSword.rotation.z = (-swingZ - anticZ) * dir;
+                this.fpvSword.rotation.x = swingX + anticX;
+                // Subtle yaw kick at the strike apex sells the follow-through.
+                this.fpvSword.rotation.y = strike * 0.25 * dir;
+                // Thrust forward on strike, slight pull-back on anticipation.
+                this.fpvSword.position.z = rest.pos.z - strike * 0.28 + antic * 0.08;
+                this.fpvSword.position.y = rest.pos.y + antic * 0.12 - strike * 0.08;
+                this.fpvSword.position.x = rest.pos.x + (strike * 0.18 - antic * 0.06) * dir;
             } else {
-                this.fpvSword.rotation.z = 0;
-                this.fpvSword.rotation.x = 0;
-                this.fpvSword.position.z = rest.pos.z;
+                this.fpvSword.rotation.set(0, 0, 0);
+                this.fpvSword.position.copy(rest.pos);
             }
         }
 
@@ -1895,6 +2191,16 @@ class Game3D {
         // Flinch: stronger recoil away from the shot, decays in updateEnemies
         e.userData.flinchT = 0.32;
         e.userData.flinchMax = 0.32;
+        // Hitting an enemy mid-wind-up cancels the attack — gives the player
+        // a real reward for the dodge-and-strike rhythm.
+        if (e.userData.attackWindupT > 0) {
+            e.userData.attackWindupT = 0;
+            e.userData.attackPending = false;
+        }
+        if (e.userData.rangedWindupT > 0) {
+            e.userData.rangedWindupT = 0;
+            e.userData.rangedPending = false;
+        }
         // Getting hit alerts the enemy to the player's position even through
         // walls — otherwise you could shoot a demon from cover and they'd
         // just stand there.
@@ -2197,8 +2503,9 @@ class Game3D {
         this.renderer.setSize(window.innerWidth, window.innerHeight);
         this.renderer.setPixelRatio(1);
         this.renderer.setClearColor(0x000000);
-        this.renderer.shadowMap.enabled = true;
-        this.renderer.shadowMap.type = THREE.PCFShadowMap;
+        // Dynamic shadow mapping disabled — the cheap drop-shadow disc under
+        // the avatar carries the grounding cue and saves the PCF pass cost.
+        this.renderer.shadowMap.enabled = false;
         
         // Create player (invisible in second-person view)
         this.createPlayer();
@@ -2211,14 +2518,13 @@ class Game3D {
 
         // Add enemies group to scene
         this.scene.add(this.playMode.enemiesGroup);
+        this.scene.add(this.playMode.cratesGroup);
+        this.scene.add(this.playMode.keysGroup);
         // Add pickups group to scene
         this.pickupsGroup = new THREE.Group();
         this.scene.add(this.pickupsGroup);
 
-        // If starting in play mode, ensure enemies are spawned
-        if (this.gameMode === 'play') {
-            this.setupPlayMode();
-        }
+        // Play mode (enemies, etc.) is initialized when a mode is chosen via ModeRegistry.
 
         // Apply initial theme
         this.applyTheme(this.themeName);
@@ -2665,9 +2971,6 @@ class Game3D {
             zombie:  { path: 'Zombie.gltf',                          scale: 0.9, hp: [50, 150],  speed: [1.2, 2.0], damage: 10, color: 0x6aa84f,
                        ai: 'chase',     sightRange: 14, alertMemory: 4.0, viewCone: 140,
                        lunge: { cooldown: [4, 7], dur: 0.4, mult: 2.4 } },
-            giant:   { path: 'assets/Blocks/enemies/Giant.gltf',     scale: 1.8, hp: [260, 360], speed: [0.7, 1.0], damage: 20, color: 0xd6b88a, meleeOnly: true,
-                       ai: 'slam',      sightRange: 12, alertMemory: 5.0, viewCone: 160,
-                       slamRange: 3.6, windup: 0.7, strikeDur: 0.22, recover: 1.0, slamDamage: 28 },
             demon:   { path: 'assets/Blocks/enemies/Demon.gltf',     scale: 1.1, hp: [90, 140],  speed: [1.0, 1.4], damage: 12, color: 0xc73a2a,
                        ai: 'kite',      sightRange: 22, alertMemory: 3.5, viewCone: 200,
                        kite: { ideal: 9, retreat: 6, approach: 12, strafePeriod: [1.0, 2.2] },
@@ -2740,8 +3043,7 @@ class Game3D {
         // Preload zombie model used for all enemies
         this.preloadZombieTemplate();
 
-        // Create labyrinth
-        this.createLabyrinth();
+        // Maze / play space is built when a mode starts (see ModeRegistry), not at boot.
 
         // Create skybox
         this.createSkybox();
@@ -2834,6 +3136,8 @@ class Game3D {
             ['grassBig',   'assets/Blocks/environment/Grass_Big.gltf'],
             ['mushroom',   'assets/Blocks/environment/Mushroom.gltf'],
             ['chest',      'assets/Blocks/environment/Chest_Closed.gltf'],
+            ['chestOpen',  'assets/Blocks/environment/Chest_Open.gltf'],
+            ['key',        'assets/Blocks/environment/Key.gltf'],
             ['crate',      'assets/Blocks/Block_Crate.gltf'],
             ['sheep',      'assets/Blocks/Animals/Sheep.gltf'],
             ['pig',        'assets/Blocks/Animals/Pig.gltf'],
@@ -3353,6 +3657,9 @@ class Game3D {
             this.pickups.forEach(p => this.pickupsGroup.remove(p));
             this.pickups = [];
         }
+
+        // Crates + keys live alongside the maze — wipe them together.
+        if (this.clearCratesAndKeys) this.clearCratesAndKeys();
     }
 
 
@@ -4034,12 +4341,15 @@ class Game3D {
         // If this is the labyrinth map and start is known, spawn player there
         const cur = this.savedMazes[this.currentMazeIndex];
         if (cur && (cur.type === 'labyrinth' || cur.type === 'ascii') && this.levelStartWorld) {
-            this.player.position.set(this.levelStartWorld.x, 0, this.levelStartWorld.z);
-            // Face toward the maze interior (toward end)
-            if (this.levelEndWorld) {
-                const dx = this.levelEndWorld.x - this.levelStartWorld.x;
-                const dz = this.levelEndWorld.z - this.levelStartWorld.z;
-                this.characterRotation = Math.atan2(dx, dz);
+            if (this.activeModeId === 'campaign' && this._campaignSpawnAtStart) {
+                this._campaignSpawnAtStart();
+            } else {
+                this.player.position.set(this.levelStartWorld.x, 0, this.levelStartWorld.z);
+                if (this.levelEndWorld) {
+                    const dx = this.levelEndWorld.x - this.levelStartWorld.x;
+                    const dz = this.levelEndWorld.z - this.levelStartWorld.z;
+                    this.characterRotation = Math.atan2(dx, dz);
+                }
             }
         }
     }
@@ -4486,21 +4796,16 @@ class Game3D {
         const { startX, startZ, cellSize } = info;
         const rows = maze.length;
         const cols = maze[0].length;
-        // Find entrance near left side and exit near right side (handling solid borders)
-        let entRow = Math.floor(rows / 2), entCol = 1;
-        let exitRow = Math.floor(rows / 2), exitCol = cols - 2;
-        // Scan a band from the edge inward to locate the closest open cell
+        // Match generateAsciiPerfectMaze: entrance on west edge col 0, exit on east col cols-1
+        let entRow = Math.floor(rows / 2);
+        let entCol = 0;
+        let exitRow = Math.floor(rows / 2);
+        let exitCol = cols - 1;
         for (let r = 1; r < rows - 1; r++) {
-            for (let c = 0; c < Math.min(10, cols); c++) {
-                if (maze[r][c] === '.') { entRow = r; entCol = Math.max(1, c); break; }
-            }
-            if (entCol !== 1 || maze[entRow][1] === '.') break;
+            if (maze[r][0] === '.') { entRow = r; entCol = 0; break; }
         }
-        for (let r = rows - 2; r >= 1; r--) {
-            for (let c = cols - 1; c >= Math.max(cols - 10, 0); c--) {
-                if (maze[r][c] === '.') { exitRow = r; exitCol = Math.min(cols - 2, c); break; }
-            }
-            if (exitCol !== cols - 2 || maze[exitRow][cols - 2] === '.') break;
+        for (let r = 1; r < rows - 1; r++) {
+            if (maze[r][cols - 1] === '.') { exitRow = r; exitCol = cols - 1; break; }
         }
         // Create markers slightly above ground at cell centers
         const entranceGeometry = new THREE.ConeGeometry(0.5, 2, 8);
@@ -4640,6 +4945,33 @@ class Game3D {
         this.enemySpawnTimer = 0;
     }
 
+    // Attempt to place an enemy at (x, z), then verify with the enemy's
+    // ACTUAL post-scale hitRadius (not the fixed broad-phase 0.9 used by
+    // isPositionFree). If the spawn position clips a wall, snap back to the
+    // owning cell's center and re-check. Returns the enemy or null on fail.
+    _tryPlaceEnemy(x, z, cellCenter = null) {
+        const m = this.createEnemyAt(x, z);
+        const ud = m.userData;
+        const r = ud.hitRadius || 0.6;
+        const h = ud.collisionHeight || ud.hitHeight || 1.8;
+        _scratchV3a.set(x, 0, z);
+        if (this.pointHitsWall(_scratchV3a, r, h)) {
+            // Step 1: try snapping to the owning cell's center.
+            if (cellCenter) {
+                _scratchV3a.set(cellCenter.x, 0, cellCenter.z);
+                if (!this.pointHitsWall(_scratchV3a, r, h)) {
+                    m.position.x = cellCenter.x;
+                    m.position.z = cellCenter.z;
+                    return m;
+                }
+            }
+            // Step 2: cell center is also blocked (large enemy in narrow
+            // corridor). Reject — caller will try another cell.
+            return null;
+        }
+        return m;
+    }
+
     spawnTestEnemies(count = this.enemyCount) {
         if (this.playMode.enemies.length >= this.maxEnemies) {
             return;
@@ -4662,20 +4994,25 @@ class Game3D {
             }
             let idx = 0;
             const maxToPlace = Math.min(count, this.maxEnemies - this.playMode.enemies.length);
+            // Tighter jitter (±25% of cell instead of ±30%) keeps enemies
+            // well clear of adjacent wall blocks even for the largest hit
+            // radii (~0.9 for demons after global ENEMY_SIZE_MULT).
+            const jitterRange = cellSize * 0.5;
             while (placed < maxToPlace && idx < openCells.length) {
                 const { r, c } = openCells[idx++];
                 const baseX = startX + c * cellSize;
                 const baseZ = startZ + r * cellSize;
-                const jitterX = (Math.random() - 0.5) * (cellSize * 0.6);
-                const jitterZ = (Math.random() - 0.5) * (cellSize * 0.6);
+                const jitterX = (Math.random() - 0.5) * jitterRange;
+                const jitterZ = (Math.random() - 0.5) * jitterRange;
                 const x = baseX + jitterX;
                 const z = baseZ + jitterZ;
-                if (this.isPositionFree(x, z, 0.9) && this.player.position.distanceTo(new THREE.Vector3(x,0,z)) > 5) {
-                    const m = this.createEnemyAt(x, z);
-                    this.playMode.enemiesGroup.add(m);
-                    this.playMode.enemies.push(m);
-                    placed++;
-                }
+                if (!this.isPositionFree(x, z, 0.9)) continue;
+                if (this.player.position.distanceTo(new THREE.Vector3(x, 0, z)) <= 5) continue;
+                const m = this._tryPlaceEnemy(x, z, { x: baseX, z: baseZ });
+                if (!m) continue;
+                this.playMode.enemiesGroup.add(m);
+                this.playMode.enemies.push(m);
+                placed++;
             }
         }
         if (placed < count) {
@@ -4686,11 +5023,12 @@ class Game3D {
                 attempts++;
                 const x = THREE.MathUtils.lerp(bounds.minX + 2, bounds.maxX - 2, Math.random());
                 const z = THREE.MathUtils.lerp(bounds.minZ + 2, bounds.maxZ - 2, Math.random());
-                if (this.isPositionFree(x, z, 0.9) && this.player.position.distanceTo(new THREE.Vector3(x,0,z)) > 5) {
-                    const m = this.createEnemyAt(x, z);
-                    this.playMode.enemiesGroup.add(m);
-                    this.playMode.enemies.push(m);
-                }
+                if (!this.isPositionFree(x, z, 0.9)) continue;
+                if (this.player.position.distanceTo(new THREE.Vector3(x, 0, z)) <= 5) continue;
+                const m = this._tryPlaceEnemy(x, z, null);
+                if (!m) continue;
+                this.playMode.enemiesGroup.add(m);
+                this.playMode.enemies.push(m);
             }
         }
     }
@@ -4711,7 +5049,11 @@ class Game3D {
         const template = this.enemyTemplates && this.enemyTemplates[typeKey];
         if (template && THREE.SkeletonUtils) {
             const clone = THREE.SkeletonUtils.clone(template.scene);
-            clone.scale.set(cfg.scale, cfg.scale, cfg.scale);
+            // Global 10% downscale on top of each type's authored scale —
+            // keeps relative proportions (chick still tiny vs giant demon)
+            // but pulls everyone in tighter for maze corridor readability.
+            const enemyScale = cfg.scale * (this.ENEMY_SIZE_MULT || 0.9);
+            clone.scale.set(enemyScale, enemyScale, enemyScale);
             clone.traverse((child) => {
                 if (child.isMesh) {
                     child.castShadow = true;
@@ -4736,15 +5078,36 @@ class Game3D {
             const size = bbox.getSize(new THREE.Vector3());
             m.userData.hitHeight = size.y;
             m.userData.hitRadius = Math.max(size.x, size.z) * 0.5 + 0.1;
+            m.userData.collisionHeight = size.y;
             m.userData.hpBarY = size.y + 0.4;
 
             if (template.animations && template.animations.length) {
                 const mixer = new THREE.AnimationMixer(clone);
                 const anims = template.animations;
-                const walk = anims.find(c => /walk|move|run/i.test(c.name)) || anims[0];
-                if (walk) mixer.clipAction(walk).play();
+                const pick = (re) => anims.find(c => re.test(c.name));
+                const walkClip = pick(/walk|run/i) || pick(/move/i) || anims[0];
+                const idleClip = pick(/^idle$/i) || pick(/idle/i);
+                let walkAction = null;
+                let idleAction = null;
+                if (walkClip) {
+                    walkAction = mixer.clipAction(walkClip);
+                    walkAction.setLoop(THREE.LoopRepeat, Infinity);
+                    if (cfg.animScale) walkAction.timeScale = cfg.animScale;
+                    walkAction.play();
+                }
+                if (idleClip && idleClip !== walkClip) {
+                    idleAction = mixer.clipAction(idleClip);
+                    idleAction.setLoop(THREE.LoopRepeat, Infinity);
+                    idleAction.setEffectiveWeight(0);
+                    idleAction.play();
+                }
                 m.userData.mixer = mixer;
+                m.userData.walkAction = walkAction;
+                m.userData.idleAction = idleAction;
+                m.userData.animBlend = 0;
+                m.userData.animScaleBase = cfg.animScale || 1;
             }
+            m.userData.boneLock = this._cacheEnemyRootBones(clone);
             m.userData.zombieClone = clone; // legacy name kept for back-compat with old callers
         } else {
             const fallback = new THREE.Mesh(
@@ -4786,6 +5149,16 @@ class Game3D {
             // Cosmetic hit-stop: when >0, movement is paused this frame (used
             // by the hit-feedback pulse to make impacts read).
             hitStopT: 0,
+            // Attack telegraph (melee/contact): when >0, the enemy is leaning
+            // in for a hit. Damage is committed when it ticks to 0 IF the
+            // player is still in range — gives a real dodge window.
+            attackWindupT: 0,
+            attackWindupMax: 0,
+            attackPending: false,
+            // Ranged charge-up (demon): mirror of attackWindup for fireballs.
+            rangedWindupT: 0,
+            rangedWindupMax: 0,
+            rangedPending: false,
             // Used by skittish/hitAndRun behaviors to time their state changes.
             contactCdT: 0,
             // Awareness state — refreshed each frame by _updateAwareness.
@@ -4883,7 +5256,11 @@ class Game3D {
         // a small "intimate radius" override so brushing right up against an
         // enemy still alerts them even from behind — otherwise a player can
         // dance on their back forever.
-        const coneDeg = (cfg && cfg.viewCone) || 360;
+        // In maze gameplay (campaign/arena and any non-openworld play), give
+        // enemies full 360° vision — the corridors are tight enough that a
+        // blind-spot cone made stealth trivial and unfun.
+        const inMaze = !(this.openWorld && this.openWorld.active);
+        const coneDeg = inMaze ? 360 : ((cfg && cfg.viewCone) || 360);
         const intimate = 1.5; // within this distance, the cone doesn't matter
         if (coneDeg < 360 && d2 > intimate * intimate) {
             const fx = ud.dir ? ud.dir.x : Math.sin(e.rotation.y);
@@ -4967,24 +5344,133 @@ class Game3D {
         }
     }
 
-    // Try to move `e` by (vx, vz) over dt, respecting walls. Returns true if
-    // the move succeeded; on wall block, callers may want to bounce/reroute.
-    _moveEnemyBy(e, vx, vz, dt) {
-        const nextX = e.position.x + vx * dt;
-        const nextZ = e.position.z + vz * dt;
-        _scratchV3a.set(nextX, e.position.y, nextZ);
-        if (this.pointHitsWall(_scratchV3a)) {
-            // Try sliding along walls — partial axis moves so enemies don't
-            // get stuck on outside corners.
-            _scratchV3a.set(nextX, e.position.y, e.position.z);
-            if (!this.pointHitsWall(_scratchV3a)) { e.position.x = nextX; return true; }
-            _scratchV3a.set(e.position.x, e.position.y, nextZ);
-            if (!this.pointHitsWall(_scratchV3a)) { e.position.z = nextZ; return true; }
-            return false;
+    // Some Kenney enemy walk clips include horizontal root motion on the
+    // hip/body bone — the bone translates forward over the cycle, then
+    // snaps back at loop wrap. Combined with our parent-group movement this
+    // reads as "two positions at once" or a per-frame teleport. We cache the
+    // authored rest XZ of those bones at spawn time and re-clamp after every
+    // mixer.update so the mesh stays anchored to the hitbox while preserving
+    // bob (Y) and sway/twist (rotation).
+    _cacheEnemyRootBones(clone) {
+        const lock = [];
+        clone.traverse((o) => {
+            const n = o.name || '';
+            // Match common root/hip bone names across Kenney + Mixamo rigs.
+            if (/^(Root|Body|Hips|Pelvis|Spine|Armature|EnemyArmature)$/i.test(n)
+                || /mixamorig:?Hips/i.test(n)) {
+                lock.push({ node: o, x: o.position.x, z: o.position.z });
+            }
+        });
+        return lock.length ? lock : null;
+    }
+
+    _lockEnemyRootMotion(ud) {
+        if (!ud.boneLock) return;
+        for (let i = 0; i < ud.boneLock.length; i++) {
+            const b = ud.boneLock[i];
+            b.node.position.x = b.x;
+            b.node.position.z = b.z;
+            // Y is intentionally left free → preserves walk-cycle bob.
         }
-        e.position.x = nextX;
-        e.position.z = nextZ;
-        return true;
+    }
+
+    _updateEnemyAnimation(e, ud, deltaTime, moved) {
+        if (!ud.mixer) return;
+        ud.mixer.update(deltaTime);
+        this._lockEnemyRootMotion(ud);
+
+        // Smooth a 0..1 "is walking" signal so brief wall-blocks don't cause
+        // per-frame snap between idle and walk poses.
+        const target = moved ? 1 : 0;
+        ud.animBlend = THREE.MathUtils.lerp(ud.animBlend || 0, target, Math.min(1, deltaTime * 6));
+
+        if (ud.walkAction && ud.idleAction) {
+            ud.walkAction.setEffectiveWeight(ud.animBlend);
+            ud.idleAction.setEffectiveWeight(1 - ud.animBlend);
+            // Both actions tick at their natural speed — weight does the work.
+            ud.walkAction.timeScale = (ud.animScaleBase || 1)
+                * THREE.MathUtils.clamp((ud.speed || 1.5) / 1.5, 0.55, 1.75);
+        } else if (ud.walkAction) {
+            // No idle clip available — keep the walk cycle running at all
+            // times. Walking in place looks fine for these chunky enemies
+            // and is much less jarring than snapping timeScale to ~0 between
+            // frames whenever movement briefly stalls (wall scrape, overlap
+            // resolve, etc.).
+            ud.walkAction.timeScale = (ud.animScaleBase || 1)
+                * THREE.MathUtils.lerp(0.35, THREE.MathUtils.clamp((ud.speed || 1.5) / 1.5, 0.55, 1.75), ud.animBlend);
+        }
+    }
+
+    _bounceEnemyDir(ud) {
+        if (ud.wallBounceT > 0) return;
+        ud.dir.x *= -1;
+        ud.dir.y *= -1;
+        ud.wallBounceT = 0.2;
+        ud.changeT = Math.min(ud.changeT || 0.3, 0.25);
+    }
+
+    // Render interpolation was previously here. It was meant to smooth 60 Hz
+    // physics to high-refresh displays, but any other code path that wrote
+    // enemy positions between snap-to and restore (knockback decay applied in
+    // multiple ticks, spawn-during-step, etc.) caused two-frame teleports —
+    // which presented as a per-frame flicker in maze gameplay. Restoring the
+    // simpler "render whatever the 60 Hz step produced" path. If high-refresh
+    // smoothing matters later, re-add as a single render hook that ALWAYS
+    // restores even on error, and gate it behind a flag.
+    _enemyInterpSnapFrom() { /* no-op */ }
+    _enemyInterpSnapTo() { /* no-op */ }
+    _applyEnemyRenderInterp() { /* no-op */ }
+    _restoreEnemyRenderInterp() { /* no-op */ }
+
+    // Try to move `e` by (vx, vz) over dt, respecting walls. Returns true if
+    // any part of the move succeeded; on wall block, callers may bounce/reroute.
+    _moveEnemyBy(e, vx, vz, dt) {
+        const ud = e.userData;
+        const r = ud.hitRadius || 0.6;
+        const h = ud.collisionHeight || 1.8;
+        const stepDist = Math.hypot(vx, vz) * dt;
+        const steps = Math.min(4, Math.max(1, Math.ceil(stepDist / Math.max(0.12, r * 0.4))));
+        const subDt = dt / steps;
+        let moved = false;
+        for (let s = 0; s < steps; s++) {
+            const nextX = e.position.x + vx * subDt;
+            const nextZ = e.position.z + vz * subDt;
+            _scratchV3a.set(nextX, e.position.y, nextZ);
+            if (!this.pointHitsWall(_scratchV3a, r, h)) {
+                e.position.x = nextX;
+                e.position.z = nextZ;
+                moved = true;
+                continue;
+            }
+            // Slide along one axis so enemies don't tunnel on corners.
+            _scratchV3a.set(nextX, e.position.y, e.position.z);
+            if (!this.pointHitsWall(_scratchV3a, r, h)) {
+                e.position.x = nextX;
+                moved = true;
+                continue;
+            }
+            _scratchV3a.set(e.position.x, e.position.y, nextZ);
+            if (!this.pointHitsWall(_scratchV3a, r, h)) {
+                e.position.z = nextZ;
+                moved = true;
+            }
+        }
+        return moved;
+    }
+
+    _tryNudgeEnemy(e, dx, dz) {
+        const ud = e.userData;
+        const r = ud.hitRadius || 0.6;
+        const h = ud.collisionHeight || 1.8;
+        const nx = e.position.x + dx;
+        const nz = e.position.z + dz;
+        _scratchV3a.set(nx, e.position.y, nz);
+        if (!this.pointHitsWall(_scratchV3a, r, h)) {
+            e.position.x = nx;
+            e.position.z = nz;
+            return true;
+        }
+        return false;
     }
 
     // Unit vector from enemy to player, with distance. Reads/writes to ud.
@@ -5017,7 +5503,7 @@ class Game3D {
             ud.changeT = 1.5 + Math.random() * 2.5;
         }
         const ok = this._moveEnemyBy(e, ud.dir.x * ud.speed * 0.45, ud.dir.y * ud.speed * 0.45, deltaTime);
-        if (!ok) { ud.dir.x *= -1; ud.dir.y *= -1; ud.changeT = 0.3; }
+        if (!ok) this._bounceEnemyDir(ud);
     }
 
     _aiChase(e, ud, deltaTime) {
@@ -5028,6 +5514,11 @@ class Game3D {
         // Trigger a lunge: short burst toward aim at multiplied speed.
         if (s.lungeT > 0) {
             s.lungeT -= deltaTime;
+            if (s.lungeT <= 0) {
+                // Squash ease-out — without this the scale stays at (1.15,0.92,1)
+                // forever after the first lunge.
+                e.scale.set(1, 1, 1);
+            }
         } else {
             s.lungeCdT -= deltaTime;
             if (s.lungeCdT <= 0) {
@@ -5035,7 +5526,7 @@ class Game3D {
                     s.lungeT = cfg.lunge.dur;
                     ud.dir.set(v.ux, v.uz);
                     // Squash forward to telegraph
-                    e.scale.x = 1.15; e.scale.y = 0.92;
+                    e.scale.set(1.15, 0.92, 1);
                 }
                 s.lungeCdT = THREE.MathUtils.lerp(cfg.lunge.cooldown[0], cfg.lunge.cooldown[1], Math.random());
             }
@@ -5052,7 +5543,7 @@ class Game3D {
         }
         const speedMult = s.lungeT > 0 ? cfg.lunge.mult : 1;
         const ok = this._moveEnemyBy(e, ud.dir.x * ud.speed * speedMult, ud.dir.y * ud.speed * speedMult, deltaTime);
-        if (!ok) { ud.dir.x *= -1; ud.dir.y *= -1; ud.changeT = 0.2; }
+        if (!ok) this._bounceEnemyDir(ud);
     }
 
     _aiSlam(e, ud, deltaTime) {
@@ -5167,7 +5658,7 @@ class Game3D {
             const len = Math.hypot(fx, fz) || 1;
             ud.dir.set(fx / len, fz / len);
             const ok = this._moveEnemyBy(e, (fx / len) * ud.speed * 1.2, (fz / len) * ud.speed * 1.2, deltaTime);
-            if (!ok) { ud.dir.x *= -1; ud.dir.y *= -1; }
+            if (!ok) this._bounceEnemyDir(ud);
             return;
         }
         // Calm idle wander
@@ -5179,7 +5670,7 @@ class Game3D {
             s.wanderT = 1.0 + Math.random() * 2.0;
         }
         const ok = this._moveEnemyBy(e, ud.dir.x * ud.speed * 0.5, ud.dir.y * ud.speed * 0.5, deltaTime);
-        if (!ok) { ud.dir.x *= -1; ud.dir.y *= -1; s.wanderT = 0.4; }
+        if (!ok) { this._bounceEnemyDir(ud); s.wanderT = 0.4; }
     }
 
     // Brief solid-color tint that auto-reverts. Used for slam wind-up etc.
@@ -5210,17 +5701,70 @@ class Game3D {
         for (let i = this.playMode.enemies.length - 1; i >= 0; i--) {
             const e = this.playMode.enemies[i];
             const ud = e.userData;
+            const posX0 = e.position.x;
+            const posZ0 = e.position.z;
             // Tick contact damage cooldown so goblins can read "i hit them" once per encounter.
             if (ud.contactCdT > 0) ud.contactCdT -= deltaTime;
+            if (ud.wallBounceT > 0) ud.wallBounceT -= deltaTime;
+            // Attack telegraph. Has three phases driven by a single timer:
+            //   phase 0..0.75 of windup → REAR BACK (rotate up + grow). Enemy
+            //                              is locked in place so it reads as
+            //                              "stopped to wind up".
+            //   phase 0.75..1.0        → STRIKE (rotate forward + pop forward)
+            //   timer hits 0           → COMMIT damage if still in hit range.
+            // Damage NOT dealt if the player stepped out during the wind-up.
+            if (ud.attackWindupT > 0) {
+                ud.attackWindupT -= deltaTime;
+                const p = 1 - Math.max(0, ud.attackWindupT) / (ud.attackWindupMax || 0.001);
+                if (p < 0.75) {
+                    // REAR BACK
+                    const t = p / 0.75; // 0..1
+                    const ease = t * t * (3 - 2 * t); // smoothstep
+                    e.rotation.x = -0.55 * ease;
+                    const grow = 1 + 0.25 * ease;
+                    e.scale.set(grow, grow, grow);
+                } else {
+                    // STRIKE — fast snap forward
+                    const t = (p - 0.75) / 0.25;
+                    e.rotation.x = THREE.MathUtils.lerp(-0.55, 0.45, t);
+                    const grow = THREE.MathUtils.lerp(1.25, 1.05, t);
+                    e.scale.set(grow, grow * 0.9, grow);
+                    // Lunge forward a little so the strike has visible impact.
+                    if (ud.attackPending && ud.dir) {
+                        const lunge = ud.speed * 0.5 * deltaTime;
+                        this._tryNudgeEnemy(e, ud.dir.x * lunge, ud.dir.y * lunge);
+                    }
+                }
+                if (ud.attackWindupT <= 0 && ud.attackPending) {
+                    ud.attackPending = false;
+                    e.rotation.x = 0;
+                    e.scale.set(1, 1, 1);
+                    const dx = this.player.position.x - e.position.x;
+                    const dz = this.player.position.z - e.position.z;
+                    const dist = Math.hypot(dx, dz);
+                    const hitR = (ud.hitRadius || 0.6) + 0.9;
+                    if (dist < hitR) {
+                        this.damagePlayer(ud.contactDamage || 10);
+                        if (ud.aiKind === 'hitAndRun' && ud.aiState) {
+                            ud.aiState.backoffT = ud.aiCfg.backoffDur;
+                        }
+                    }
+                    ud.contactCdT = 0.6;
+                }
+            }
             // Refresh awareness (LOS → awareT, lastSeenPos, aimPos) BEFORE
             // dispatch so each AI sees a consistent view of the world.
             this._updateAwareness(e, ud, deltaTime);
             // Hit-stop pauses movement briefly for impact readability.
+            // Attack wind-up also locks the enemy in place so the rear-back
+            // pose is visible — without this, they walk straight through the
+            // pose and the player can't react.
             if (ud.hitStopT > 0) {
                 ud.hitStopT -= deltaTime;
             } else if (ud.stunT > 0) {
-                // Stun pauses wander/movement while knockback is still being applied below.
                 ud.stunT -= deltaTime;
+            } else if (ud.attackWindupT > 0) {
+                // intentionally no AI tick — enemy is committed to the strike
             } else {
                 switch (ud.aiKind) {
                     case 'slam':      this._aiSlam(e, ud, deltaTime); break;
@@ -5233,13 +5777,7 @@ class Game3D {
             }
             // Knockback decays even while stun is active (so the body slides to rest)
             if (ud.knockback) {
-                const kbX = ud.knockback.x * deltaTime;
-                const kbZ = ud.knockback.y * deltaTime;
-                _scratchV3b.set(e.position.x + kbX, e.position.y, e.position.z + kbZ);
-                if (!this.pointHitsWall(_scratchV3b)) {
-                    e.position.x = _scratchV3b.x;
-                    e.position.z = _scratchV3b.z;
-                }
+                this._moveEnemyBy(e, ud.knockback.x, ud.knockback.y, deltaTime);
                 ud.knockback.multiplyScalar(Math.pow(0.001, deltaTime));
                 if (ud.knockback.lengthSq() < 0.05) ud.knockback = null;
             }
@@ -5261,30 +5799,57 @@ class Game3D {
                     e.scale.set(1, 1, 1);
                 }
             }
-            // Ranged enemies (demon): fire a projectile at the player when in
-            // range AND visible, on a per-enemy cooldown. Skipped while
-            // stunned/knocked back, hiding behind a wall, or just plain
-            // unaware of the player.
+            // Ranged enemies (demon): cast on a per-enemy cooldown, but with
+            // a visible charge-up so the fireball doesn't materialize out of
+            // nowhere. The tint pulses brighter as the cast progresses, then
+            // the projectile fires when rangedWindupT hits 0.
             if (ud.ranged && ud.stunT <= 0 && ud.awareT > 0) {
-                ud.rangedTimer -= deltaTime;
-                if (ud.rangedTimer <= 0) {
-                    const dx = this.player.position.x - e.position.x;
-                    const dz = this.player.position.z - e.position.z;
-                    const distXZ = Math.hypot(dx, dz);
-                    // Need clear LOS to actually shoot — don't lob fireballs
-                    // through stone walls based on a half-second-old memory.
-                    if (distXZ <= ud.ranged.range && distXZ > 0.1 &&
-                        !this._segmentHitsWall(e.position.x, e.position.z, this.player.position.x, this.player.position.z)) {
-                        this.spawnEnemyProjectile(e, this.player.position);
+                if (ud.rangedWindupT > 0) {
+                    ud.rangedWindupT -= deltaTime;
+                    // Pulse intensity ramps up over the cast.
+                    const p = 1 - Math.max(0, ud.rangedWindupT) / (ud.rangedWindupMax || 0.001);
+                    if (Math.random() < deltaTime * 12) {
+                        // Re-tint occasionally so the glow flickers like a charging spell.
+                        this._tintEnemy(e, 0xff7733, 120);
+                    }
+                    if (ud.rangedWindupT <= 0 && ud.rangedPending) {
+                        ud.rangedPending = false;
+                        // Confirm aim is still valid before committing.
+                        const dx = this.player.position.x - e.position.x;
+                        const dz = this.player.position.z - e.position.z;
+                        const distXZ = Math.hypot(dx, dz);
+                        if (distXZ <= ud.ranged.range && distXZ > 0.1 &&
+                            !this._segmentHitsWall(e.position.x, e.position.z, this.player.position.x, this.player.position.z)) {
+                            this.spawnEnemyProjectile(e, this.player.position);
+                        }
                         ud.rangedTimer = ud.ranged.cooldown;
-                    } else {
-                        // Try again soon instead of waiting the full cooldown.
-                        ud.rangedTimer = 0.4;
+                    }
+                } else {
+                    ud.rangedTimer -= deltaTime;
+                    if (ud.rangedTimer <= 0) {
+                        const dx = this.player.position.x - e.position.x;
+                        const dz = this.player.position.z - e.position.z;
+                        const distXZ = Math.hypot(dx, dz);
+                        // Need clear LOS to actually shoot — don't lob fireballs
+                        // through stone walls based on a half-second-old memory.
+                        if (distXZ <= ud.ranged.range && distXZ > 0.1 &&
+                            !this._segmentHitsWall(e.position.x, e.position.z, this.player.position.x, this.player.position.z)) {
+                            // Start charge-up instead of firing immediately.
+                            const castTime = 0.55;
+                            ud.rangedWindupT = castTime;
+                            ud.rangedWindupMax = castTime;
+                            ud.rangedPending = true;
+                            this._tintEnemy(e, 0xff6622, castTime * 1000);
+                            this.audio && this.audio.play && this.audio.play('enemyGrowl');
+                        } else {
+                            // Try again soon instead of waiting the full cooldown.
+                            ud.rangedTimer = 0.4;
+                        }
                     }
                 }
             }
-            // Tick zombie animation
-            if (ud.mixer) ud.mixer.update(deltaTime);
+            const moved = Math.hypot(e.position.x - posX0, e.position.z - posZ0) > 0.0005;
+            this._updateEnemyAnimation(e, ud, deltaTime, moved);
             // Update health bar visibility and display
             if (ud.hpBar) {
                 if (ud.hpBar.userData.showTimer > 0) {
@@ -5303,44 +5868,16 @@ class Game3D {
                 }
             }
         }
-        // Soft separation pass: push apart any overlapping enemies, and push
-        // enemies that are inside the player out of the player. Cheap O(n²)
-        // for ~20-30 enemies; no allocations. This is what lets the player
-        // muscle through a crowd instead of being trapped.
-        this._resolveEnemyOverlaps(deltaTime);
+        // Enemy ↔ enemy soft separation only — player collision is handled in
+        // checkEnemyCollision so enemies are not shoved by the player.
+        this._resolveEnemyOverlaps();
     }
 
-    _resolveEnemyOverlaps(deltaTime) {
+    _resolveEnemyOverlaps() {
         const list = this.playMode.enemies;
         const n = list.length;
-        if (n === 0) return;
-        const playerR = 0.8;
-        const px = this.player.position.x;
-        const pz = this.player.position.z;
-        // Player ↔ enemy: push enemy away from the player. Strength scales
-        // with how deep the overlap is. Giants in their strike phase resist
-        // being shoved (they're committed to the slam).
-        for (let i = 0; i < n; i++) {
-            const e = list[i];
-            const ud = e.userData;
-            const r = (ud.hitRadius || 0.6) + playerR;
-            const dx = e.position.x - px;
-            const dz = e.position.z - pz;
-            const d2 = dx * dx + dz * dz;
-            if (d2 < r * r && d2 > 0.0001) {
-                const d = Math.sqrt(d2);
-                const overlap = r - d;
-                const ux = dx / d, uz = dz / d;
-                // Resist push if mid-slam strike (committed lunge)
-                const resist = (ud.aiKind === 'slam' && ud.aiState && ud.aiState.phase === 'strike') ? 0.15 : 1.0;
-                // Smaller enemies are pushed faster than big ones (mass proxy: hp)
-                const mass = Math.max(0.5, (ud.hpMax || 50) / 80);
-                const push = (overlap / mass) * resist;
-                e.position.x += ux * push;
-                e.position.z += uz * push;
-            }
-        }
-        // Enemy ↔ enemy: split overlap 50/50, weighted by mass.
+        if (n < 2) return;
+        // Enemy ↔ enemy: split overlap, weighted by mass; never nudge into walls.
         for (let i = 0; i < n; i++) {
             const a = list[i];
             const ar = (a.userData.hitRadius || 0.6);
@@ -5358,16 +5895,14 @@ class Game3D {
                     const bm = Math.max(0.5, (b.userData.hpMax || 50) / 80);
                     const total = am + bm;
                     const ux = dx / d, uz = dz / d;
-                    // Heavier mass moves less
-                    const aPush = overlap * (bm / total);
-                    const bPush = overlap * (am / total);
-                    a.position.x -= ux * aPush; a.position.z -= uz * aPush;
-                    b.position.x += ux * bPush; b.position.z += uz * bPush;
+                    const sep = 0.55;
+                    const aPush = overlap * (bm / total) * sep;
+                    const bPush = overlap * (am / total) * sep;
+                    this._tryNudgeEnemy(a, -ux * aPush, -uz * aPush);
+                    this._tryNudgeEnemy(b, ux * bPush, uz * bPush);
                 }
             }
         }
-        // Suppress the unused-var warning so the file doesn't trip strict mode.
-        void deltaTime;
     }
 
     showEnemyHPBar(enemy, duration = 3.0) {
@@ -5619,13 +6154,19 @@ class Game3D {
         }
     }
 
-    pointHitsWall(pos, radius = 0.6) {
+    pointHitsWall(pos, radius = 0.6, height = 2) {
         let hit = false;
+        const entityBottom = pos.y;
+        const entityTop = pos.y + height;
         this._iterWallsNear(pos.x, pos.z, radius + 1, (w) => {
             const p = w.position; const s = w.size;
             if (pos.x + radius > p.x - s.x/2 && pos.x - radius < p.x + s.x/2 &&
                 pos.z + radius > p.z - s.z/2 && pos.z - radius < p.z + s.z/2) {
-                hit = true; return false;
+                const wallTop = p.y + s.y/2;
+                const wallBottom = p.y - s.y/2;
+                if (entityTop > wallBottom && entityBottom < wallTop) {
+                    hit = true; return false;
+                }
             }
         });
         return hit;
@@ -5703,6 +6244,11 @@ class Game3D {
     }
 
     handlePlayClick(event) {
+        // Block placement takes precedence over weapon use when armed.
+        if (this.activeBlockId) {
+            this.placeActiveBlock();
+            return;
+        }
         // Route by selected weapon: sword swings, gun fires a projectile.
         const weapon = this.getCurrentWeapon();
         if (weapon && weapon.type === 'melee') {
@@ -6208,8 +6754,8 @@ class Game3D {
         // drop almost nothing.
         if (!isBoss) {
             const kind = (e.userData && e.userData.enemyKind) || 'zombie';
-            const dropCounts = { giant: 4, demon: 2, goblin: 1, zombie: 1, chick: 0, chicken: 0 };
-            const dropProb   = { giant: 1.0, demon: 0.9, goblin: this.dropChance, zombie: this.dropChance, chick: 0.25, chicken: 0.3 };
+            const dropCounts = { demon: 2, goblin: 1, zombie: 1, chick: 0, chicken: 0 };
+            const dropProb   = { demon: 0.9, goblin: this.dropChance, zombie: this.dropChance, chick: 0.25, chicken: 0.3 };
             const count = dropCounts[kind] != null ? dropCounts[kind] : 1;
             const prob  = dropProb[kind]   != null ? dropProb[kind]   : this.dropChance;
             for (let i = 0; i < count; i++) {
@@ -6377,6 +6923,27 @@ class Game3D {
                 grp.geometry = flag.geometry;
                 return grp;
             }
+            case 'speed': {
+                const grp = new THREE.Group();
+                const boltMat = new THREE.MeshLambertMaterial({
+                    color: 0x66ddff, emissive: 0x224466, emissiveIntensity: 1.2
+                });
+                const bolt = new THREE.Mesh(new THREE.OctahedronGeometry(0.38, 0), boltMat);
+                bolt.rotation.z = Math.PI / 4;
+                const ring = new THREE.Mesh(
+                    new THREE.TorusGeometry(0.42, 0.06, 8, 16),
+                    new THREE.MeshBasicMaterial({
+                        color: 0xaae8ff, transparent: true, opacity: 0.7,
+                        blending: THREE.AdditiveBlending, depthWrite: false
+                    })
+                );
+                ring.rotation.x = Math.PI / 2;
+                grp.add(ring);
+                grp.add(bolt);
+                grp.material = boltMat;
+                grp.geometry = bolt.geometry;
+                return grp;
+            }
             default: {
                 const geo = new THREE.IcosahedronGeometry(0.35, 0);
                 const mat = new THREE.MeshLambertMaterial({
@@ -6406,6 +6973,13 @@ class Game3D {
                 this.spawnPickupCollectFx && this.spawnPickupCollectFx(p);
                 this.pickupsGroup.remove(p);
                 this.pickups.splice(i, 1);
+                if (p.userData.weaponId) {
+                    if (this.grantWeapon && this.grantWeapon(p.userData.weaponId)) {
+                        this.spawnImpact(p.position.clone(), 0x66ffcc);
+                        this.audio && this.audio.play('pickupPowerup');
+                    }
+                    continue;
+                }
                 if (p.userData.item) {
                     const item = p.userData.item;
                     const def = this.ITEM_DEFS[item.type];
@@ -6434,6 +7008,563 @@ class Game3D {
                 }
             }
         }
+    }
+
+    // ===== Crates & Keys (campaign maze loot) =====
+    //
+    // Crates sit at maze dead-ends, locked. Each maze has N matching keys
+    // scattered in regular corridors. Picking up a key bumps inventory.keys;
+    // walking up to a crate consumes one and pops the lid (swap closed→open),
+    // then drops the crate's loot table as normal pickups around the crate.
+    // Crates also have a small ring of guardian enemies that the spawner
+    // places adjacent to them.
+
+    _findMazeDeadEnds(maze) {
+        const rows = maze.length;
+        const cols = maze[0].length;
+        const ends = [];
+        for (let r = 1; r < rows - 1; r++) {
+            for (let c = 1; c < cols - 1; c++) {
+                if (maze[r][c] !== '.') continue;
+                let open = 0;
+                if (maze[r - 1][c] === '.') open++;
+                if (maze[r + 1][c] === '.') open++;
+                if (maze[r][c - 1] === '.') open++;
+                if (maze[r][c + 1] === '.') open++;
+                if (open === 1) ends.push({ r, c });
+            }
+        }
+        return ends;
+    }
+
+    // Pick a loot bundle for one crate. Always includes a weapon (gun / mg /
+    // jetpack) so cracking a crate feels like an upgrade moment, plus a mix
+    // of consumables. Returns array of item type strings.
+    _rollCrateLoot() {
+        const weapons = ['gun', 'machineGun', 'jetpack'];
+        const weapon = weapons[Math.floor(Math.random() * weapons.length)];
+        const bundle = [weapon];
+        // Always include at least one health + ammo so it's never a flop.
+        bundle.push('health', 'ammo', 'ammo');
+        // Mix-ins
+        const mixinPool = ['speed', 'flag', 'flag', 'health', 'ammo'];
+        const mixinCount = 2 + Math.floor(Math.random() * 2);
+        for (let i = 0; i < mixinCount; i++) {
+            bundle.push(mixinPool[Math.floor(Math.random() * mixinPool.length)]);
+        }
+        return bundle;
+    }
+
+    _createCrateMesh(x, z) {
+        const template = (this._decorTemplates && this._decorTemplates.chest) || null;
+        const group = new THREE.Group();
+        group.position.set(x, 0, z);
+        if (template && THREE.SkeletonUtils) {
+            const clone = THREE.SkeletonUtils.clone(template);
+            // 75% of the original 1.4 baseline.
+            clone.scale.setScalar(1.05);
+            clone.traverse((c) => { if (c.isMesh) { c.castShadow = true; c.receiveShadow = true; } });
+            group.add(clone);
+            group.userData._chestClone = clone;
+        } else {
+            // Fallback box so the system still works pre-template-load.
+            const fb = new THREE.Mesh(
+                new THREE.BoxGeometry(0.9, 0.75, 0.6),
+                new THREE.MeshLambertMaterial({ color: 0x7a4a1c })
+            );
+            fb.position.y = 0.38;
+            fb.castShadow = true;
+            group.add(fb);
+        }
+        // Padlock glow — pulsing ring sits just above the chest so it stays
+        // the visible "this is interactive AND locked" cue.
+        const lock = new THREE.Mesh(
+            new THREE.TorusGeometry(0.22, 0.05, 8, 18),
+            new THREE.MeshBasicMaterial({ color: 0xffd060, transparent: true, opacity: 0.9 })
+        );
+        lock.rotation.x = Math.PI / 2;
+        lock.position.y = 0.95;
+        group.add(lock);
+        const lockLight = new THREE.PointLight(0xffd060, 0.7, 4, 2);
+        lockLight.position.y = 0.95;
+        group.add(lockLight);
+        group.userData.lockBadge = lock;
+        group.userData.lockLight = lockLight;
+        return group;
+    }
+
+    _swapCrateToOpenMesh(crate) {
+        const tplOpen = (this._decorTemplates && this._decorTemplates.chestOpen) || null;
+        const closed = crate.userData._chestClone;
+        if (closed) {
+            crate.remove(closed);
+            crate.userData._chestClone = null;
+        }
+        if (tplOpen && THREE.SkeletonUtils) {
+            const clone = THREE.SkeletonUtils.clone(tplOpen);
+            clone.scale.setScalar(1.05);
+            clone.traverse((c) => { if (c.isMesh) { c.castShadow = true; c.receiveShadow = true; } });
+            crate.add(clone);
+            crate.userData._chestClone = clone;
+        }
+        // Drop the padlock visual since it's no longer locked.
+        if (crate.userData.lockBadge) {
+            crate.remove(crate.userData.lockBadge);
+            crate.userData.lockBadge = null;
+        }
+        if (crate.userData.lockLight) {
+            crate.remove(crate.userData.lockLight);
+            crate.userData.lockLight = null;
+        }
+    }
+
+    _createKeyMesh(x, z) {
+        const template = (this._decorTemplates && this._decorTemplates.key) || null;
+        const group = new THREE.Group();
+        group.position.set(x, 1.0, z);
+        if (template && THREE.SkeletonUtils) {
+            const clone = THREE.SkeletonUtils.clone(template);
+            // 90% smaller than the original 2.0 baseline; the halo + light
+            // do the heavy lifting for spotability.
+            clone.scale.setScalar(0.2);
+            clone.traverse((c) => { if (c.isMesh) { c.castShadow = true; c.receiveShadow = true; } });
+            group.add(clone);
+        } else {
+            const fb = new THREE.Mesh(
+                new THREE.SphereGeometry(0.06, 10, 10),
+                new THREE.MeshBasicMaterial({ color: 0xffd060 })
+            );
+            group.add(fb);
+        }
+        // Glow halo + point light so the tiny key still pops at distance.
+        const halo = new THREE.Mesh(
+            new THREE.SphereGeometry(0.35, 12, 12),
+            new THREE.MeshBasicMaterial({ color: 0xffe080, transparent: true, opacity: 0.22, blending: THREE.AdditiveBlending, depthWrite: false })
+        );
+        group.add(halo);
+        group.add(new THREE.PointLight(0xffd060, 0.7, 5, 2));
+        group.userData.t = Math.random() * Math.PI * 2;
+        return group;
+    }
+
+    placeCampaignMazeContent() {
+        if (this.activeModeId !== 'campaign') return;
+        const info = this.lastMazeInfo;
+        if (!info || !info.maze) return;
+
+        this.clearCratesAndKeys();
+
+        const startCell = this.levelStartCell ? { r: this.levelStartCell.y, c: this.levelStartCell.x } : null;
+        const endCell = this.levelEndCell ? { r: this.levelEndCell.y, c: this.levelEndCell.x } : null;
+        const isReserved = (r, c) =>
+            (startCell && startCell.r === r && startCell.c === c) ||
+            (endCell && endCell.r === r && endCell.c === c);
+
+        const deadEnds = this._findMazeDeadEnds(info.maze).filter(p => !isReserved(p.r, p.c));
+        if (deadEnds.length === 0) return;
+
+        for (let i = deadEnds.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [deadEnds[i], deadEnds[j]] = [deadEnds[j], deadEnds[i]];
+        }
+
+        // 2-4 crates per level, scaled by maze size.
+        const target = Math.min(deadEnds.length, 2 + Math.floor(Math.random() * 3));
+        const crateCells = deadEnds.slice(0, target);
+
+        for (const cell of crateCells) {
+            const x = info.startX + cell.c * info.cellSize;
+            const z = info.startZ + cell.r * info.cellSize;
+            const group = this._createCrateMesh(x, z);
+            group.userData = Object.assign(group.userData || {}, {
+                type: 'crate',
+                locked: true,
+                opened: false,
+                loot: this._rollCrateLoot(),
+                cell,
+                t: Math.random() * Math.PI * 2,
+                spawnPos: { x, z }
+            });
+            this.playMode.cratesGroup.add(group);
+            this.playMode.crates.push(group);
+            // Spawn 1-2 guardian enemies in the corridor leading to the crate.
+            this._spawnCrateGuardians(cell, info);
+        }
+
+        // Place keys equal to crate count, away from the dead-ends so the
+        // player has to actually hunt for them.
+        this._placeCampaignKeys(crateCells.length, info, crateCells);
+
+        // DEBUG: drop a free key + crate next to the player spawn so the loop
+        // can be exercised in seconds. Toggled by DEBUG_SPAWN_LOOT_NEAR_PLAYER.
+        if (this.DEBUG_SPAWN_LOOT_NEAR_PLAYER) {
+            this._spawnDebugLootNearPlayer();
+        }
+    }
+
+    _spawnDebugLootNearPlayer() {
+        if (!this.player) return;
+        const px = this.player.position.x;
+        const pz = this.player.position.z;
+        // Forward = direction the player faces (toward the maze entry).
+        const dir = this.levelEntryDir || { x: 1, z: 0 };
+        const flen = Math.hypot(dir.x, dir.z) || 1;
+        const fx = dir.x / flen;
+        const fz = dir.z / flen;
+        // Right-hand perpendicular (so key goes left, crate goes right).
+        const rx = -fz;
+        const rz = fx;
+
+        // Key on the player's left, ~2.5u away.
+        const kx = px - rx * 2.5 + fx * 1.0;
+        const kz = pz - rz * 2.5 + fz * 1.0;
+        const key = this._createKeyMesh(kx, kz);
+        key.userData = Object.assign(key.userData || {}, {
+            type: 'key',
+            spawnPos: { x: kx, z: kz },
+            _debugSpawn: true
+        });
+        this.playMode.keysGroup.add(key);
+        this.playMode.keys.push(key);
+
+        // Crate on the player's right, ~2.5u away.
+        const cx = px + rx * 2.5 + fx * 1.0;
+        const cz = pz + rz * 2.5 + fz * 1.0;
+        const crate = this._createCrateMesh(cx, cz);
+        crate.userData = Object.assign(crate.userData || {}, {
+            type: 'crate',
+            locked: true,
+            opened: false,
+            loot: this._rollCrateLoot(),
+            cell: null,
+            t: Math.random() * Math.PI * 2,
+            spawnPos: { x: cx, z: cz },
+            _debugSpawn: true
+        });
+        this.playMode.cratesGroup.add(crate);
+        this.playMode.crates.push(crate);
+
+        this.showMessage && this.showMessage('Debug: free key (left) + crate (right) placed at spawn');
+    }
+
+    _spawnCrateGuardians(cell, info) {
+        const maze = info.maze;
+        const candidates = [];
+        const tryCell = (r, c) => {
+            if (r < 0 || r >= maze.length || c < 0 || c >= maze[0].length) return;
+            if (maze[r][c] === '.') candidates.push({ r, c });
+        };
+        // Walk outward up to 3 steps from the dead-end to find spawnable cells.
+        for (let dr = -3; dr <= 3; dr++) {
+            for (let dc = -3; dc <= 3; dc++) {
+                if (dr === 0 && dc === 0) continue;
+                if (Math.abs(dr) + Math.abs(dc) > 3) continue;
+                tryCell(cell.r + dr, cell.c + dc);
+            }
+        }
+        const count = 1 + Math.floor(Math.random() * 2);
+        for (let i = 0; i < count && candidates.length; i++) {
+            const idx = Math.floor(Math.random() * candidates.length);
+            const { r, c } = candidates.splice(idx, 1)[0];
+            const x = info.startX + c * info.cellSize;
+            const z = info.startZ + r * info.cellSize;
+            if (this.player.position.distanceTo(new THREE.Vector3(x, 0, z)) < 6) continue;
+            const m = this._tryPlaceEnemy(x, z, { x, z });
+            if (!m) continue;
+            m.userData._isGuardian = true;
+            this.playMode.enemiesGroup.add(m);
+            this.playMode.enemies.push(m);
+        }
+    }
+
+    _placeCampaignKeys(count, info, crateCells) {
+        const maze = info.maze;
+        const startCell = this.levelStartCell ? { r: this.levelStartCell.y, c: this.levelStartCell.x } : null;
+        const endCell = this.levelEndCell ? { r: this.levelEndCell.y, c: this.levelEndCell.x } : null;
+        const open = [];
+        for (let r = 0; r < maze.length; r++) {
+            for (let c = 0; c < maze[0].length; c++) {
+                if (maze[r][c] !== '.') continue;
+                // Avoid crate cells themselves.
+                let onCrate = false;
+                for (const cc of crateCells) {
+                    if (cc.r === r && cc.c === c) { onCrate = true; break; }
+                }
+                if (onCrate) continue;
+                if (startCell && startCell.r === r && startCell.c === c) continue;
+                if (endCell && endCell.r === r && endCell.c === c) continue;
+                open.push({ r, c });
+            }
+        }
+        for (let i = open.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [open[i], open[j]] = [open[j], open[i]];
+        }
+        let placed = 0;
+        for (const cell of open) {
+            if (placed >= count) break;
+            const x = info.startX + cell.c * info.cellSize;
+            const z = info.startZ + cell.r * info.cellSize;
+            // Don't drop keys right under the player's spawn either.
+            if (this.player.position.distanceTo(new THREE.Vector3(x, 0, z)) < 6) continue;
+            const key = this._createKeyMesh(x, z);
+            key.userData = Object.assign(key.userData || {}, {
+                type: 'key',
+                spawnPos: { x, z }
+            });
+            this.playMode.keysGroup.add(key);
+            this.playMode.keys.push(key);
+            placed++;
+        }
+    }
+
+    clearCratesAndKeys() {
+        if (this.playMode.crates) {
+            for (const c of this.playMode.crates) this.playMode.cratesGroup.remove(c);
+            this.playMode.crates = [];
+        }
+        if (this.playMode.keys) {
+            for (const k of this.playMode.keys) this.playMode.keysGroup.remove(k);
+            this.playMode.keys = [];
+        }
+        this.inventory.keys = 0;
+        this._focusedCrate = null;
+        const badge = document.getElementById('key-badge');
+        if (badge) badge.style.display = 'none';
+        const prompt = document.getElementById('crate-prompt');
+        if (prompt) prompt.style.display = 'none';
+    }
+
+    _updateKeyBadgeUI() {
+        let badge = document.getElementById('key-badge');
+        const count = this.inventory.keys || 0;
+        const crateCount = (this.playMode.crates || []).filter(c => !c.userData.opened).length;
+        const shouldShow = this.gameMode === 'play' && (count > 0 || crateCount > 0);
+        if (!shouldShow) {
+            if (badge) badge.style.display = 'none';
+            return;
+        }
+        if (!badge) {
+            badge = document.createElement('div');
+            badge.id = 'key-badge';
+            badge.style.position = 'absolute';
+            badge.style.top = '76px';
+            badge.style.right = '16px';
+            badge.style.display = 'flex';
+            badge.style.alignItems = 'center';
+            badge.style.gap = '6px';
+            badge.style.padding = '6px 12px';
+            badge.style.background = 'linear-gradient(135deg, rgba(60,40,10,0.85), rgba(20,12,2,0.85))';
+            badge.style.border = '2px solid #ffd060';
+            badge.style.borderRadius = '999px';
+            badge.style.color = '#ffe8a0';
+            badge.style.fontFamily = 'Courier New, monospace';
+            badge.style.fontSize = '14px';
+            badge.style.fontWeight = '700';
+            badge.style.letterSpacing = '0.5px';
+            badge.style.boxShadow = '0 4px 14px rgba(255,208,96,0.35)';
+            badge.style.zIndex = '950';
+            badge.style.userSelect = 'none';
+            badge.style.pointerEvents = 'none';
+            document.body.appendChild(badge);
+        }
+        badge.style.display = 'flex';
+        badge.innerHTML = `<span style="font-size:18px;">🗝️</span><span>${count} / ${crateCount} crate${crateCount === 1 ? '' : 's'}</span>`;
+    }
+
+    updateCratesAndKeys(deltaTime) {
+        if (this.gameMode !== 'play') return;
+
+        // Keys: bob/rotate + auto-pickup on proximity. Radius is generous so
+        // you don't have to walk directly over the (tiny) key mesh.
+        if (this.playMode.keys && this.playMode.keys.length) {
+            const pickupR2 = 2.5 * 2.5;
+            for (let i = this.playMode.keys.length - 1; i >= 0; i--) {
+                const k = this.playMode.keys[i];
+                k.userData.t += deltaTime;
+                k.rotation.y += deltaTime * 1.5;
+                k.position.y = 1.0 + Math.sin(k.userData.t * 3) * 0.12;
+                const d2 = k.position.distanceToSquared(this.player.position);
+                if (d2 < pickupR2) {
+                    this.inventory.keys = (this.inventory.keys || 0) + 1;
+                    this.playMode.keysGroup.remove(k);
+                    this.playMode.keys.splice(i, 1);
+                    this.audio && this.audio.play && this.audio.play('pickupPowerup');
+                    this.spawnImpact && this.spawnImpact(k.position.clone(), 0xffe080);
+                    this.showToast && this.showToast(`Picked up a key (${this.inventory.keys})`, 'success');
+                    this.showMessage && this.showMessage('Key collected — find a crate!');
+                    this._qbSig = null;
+                    this.updateInventoryGridUI && this.updateInventoryGridUI();
+                }
+            }
+        }
+
+        this._updateKeyBadgeUI();
+
+        // Crates: lock badge pulse + focus the nearest crate within reach so
+        // the player can press Enter to use a key. Auto-open is intentionally
+        // gone — the prompt replaces it.
+        let focused = null;
+        let focusedD2 = Infinity;
+        if (this.playMode.crates && this.playMode.crates.length) {
+            const focusR2 = 3.6 * 3.6; // generous "you're standing in front of it" radius
+            for (const crate of this.playMode.crates) {
+                crate.userData.t += deltaTime;
+                if (crate.userData.lockBadge) {
+                    const s = 1 + Math.sin(crate.userData.t * 3) * 0.12;
+                    crate.userData.lockBadge.scale.set(s, s, s);
+                    crate.rotation.y = Math.sin(crate.userData.t * 0.8) * 0.12;
+                }
+                if (crate.userData.opened) continue;
+                const d2 = crate.position.distanceToSquared(this.player.position);
+                if (d2 > focusR2) continue;
+                if (d2 < focusedD2) {
+                    focused = crate;
+                    focusedD2 = d2;
+                }
+            }
+        }
+        this._focusedCrate = focused;
+        this._updateCratePromptUI(focused);
+    }
+
+    // Center-screen prompt for crate interaction. Builds the element lazily
+    // so we don't have to touch index.html, and reflects three states:
+    //   1. focused + key in hand → "Press [Enter] to open (N keys)"
+    //   2. focused + no key      → "Locked — find a key"
+    //   3. nothing focused       → hidden
+    _updateCratePromptUI(crate) {
+        let prompt = document.getElementById('crate-prompt');
+        if (!crate) {
+            if (prompt) prompt.style.display = 'none';
+            return;
+        }
+        if (!prompt) {
+            prompt = document.createElement('div');
+            prompt.id = 'crate-prompt';
+            prompt.style.position = 'absolute';
+            prompt.style.top = '50%';
+            prompt.style.left = '50%';
+            prompt.style.transform = 'translate(-50%, calc(-50% + 90px))';
+            prompt.style.padding = '12px 22px';
+            prompt.style.background = 'linear-gradient(135deg, rgba(20,12,2,0.92), rgba(60,40,10,0.92))';
+            prompt.style.border = '2px solid #ffd060';
+            prompt.style.borderRadius = '14px';
+            prompt.style.color = '#ffe8a0';
+            prompt.style.fontFamily = 'Courier New, monospace';
+            prompt.style.fontSize = '16px';
+            prompt.style.fontWeight = '700';
+            prompt.style.letterSpacing = '0.5px';
+            prompt.style.textAlign = 'center';
+            prompt.style.lineHeight = '1.35';
+            prompt.style.boxShadow = '0 6px 22px rgba(255,208,96,0.4)';
+            prompt.style.zIndex = '960';
+            prompt.style.userSelect = 'none';
+            prompt.style.pointerEvents = 'none';
+            document.body.appendChild(prompt);
+        }
+        const keys = this.inventory.keys || 0;
+        const canOpen = keys > 0;
+        prompt.style.display = 'block';
+        // Pulse via opacity tied to the crate's own bob — keeps every prompt
+        // feeling alive without needing a separate animation loop.
+        const pulse = 0.92 + Math.sin((crate.userData.t || 0) * 4) * 0.08;
+        prompt.style.opacity = String(pulse);
+        if (canOpen) {
+            prompt.style.borderColor = '#ffd060';
+            prompt.innerHTML = `
+                <div style="font-size:22px;">🗝️ <span style="color:#fff;">Press <span style="color:#ffd060;">[Enter]</span> to unlock crate</span></div>
+                <div style="font-size:12px;opacity:0.85;margin-top:4px;">${keys} key${keys === 1 ? '' : 's'} in inventory</div>
+            `;
+        } else {
+            prompt.style.borderColor = '#ff6677';
+            prompt.innerHTML = `
+                <div style="font-size:22px;color:#ffb0b8;">🔒 Locked</div>
+                <div style="font-size:12px;opacity:0.85;margin-top:4px;color:#ffd0d4;">Find a key to open this crate</div>
+            `;
+        }
+    }
+
+    // Triggered by the Enter key. Opens the focused crate if the player has
+    // a key; otherwise plays a soft "denied" feedback so the press feels
+    // acknowledged.
+    tryUseFocusedCrate() {
+        const crate = this._focusedCrate;
+        if (!crate || crate.userData.opened) return false;
+        if ((this.inventory.keys || 0) <= 0) {
+            this.audio && this.audio.play && this.audio.play('uiClick');
+            this.showMessage && this.showMessage('No keys — find one in the maze');
+            return false;
+        }
+        this._openCrate(crate);
+        this._focusedCrate = null;
+        this._updateCratePromptUI(null);
+        return true;
+    }
+
+    _openCrate(crate) {
+        if (crate.userData.opened) return;
+        crate.userData.locked = false;
+        crate.userData.opened = true;
+        this.inventory.keys = Math.max(0, (this.inventory.keys || 0) - 1);
+        this._swapCrateToOpenMesh(crate);
+        this.audio && this.audio.play && this.audio.play('pickupPowerup');
+        this.showToast && this.showToast('Crate unlocked!', 'success');
+        this.spawnImpact && this.spawnImpact(crate.position.clone(), 0xffe080);
+
+        // Drop loot in a small ring around the crate so the player can see
+        // each item discretely instead of one stacked mess.
+        const loot = crate.userData.loot || [];
+        const count = loot.length;
+        for (let i = 0; i < count; i++) {
+            const ang = (i / count) * Math.PI * 2 + Math.random() * 0.3;
+            const r = 1.2 + Math.random() * 0.4;
+            const x = crate.position.x + Math.cos(ang) * r;
+            const z = crate.position.z + Math.sin(ang) * r;
+            // Hand-place a single pickup of the loot type without rolling
+            // through the random spawnPickup table.
+            this._spawnPickupOfType(loot[i], x, z);
+        }
+        this._qbSig = null;
+        this.updateInventoryGridUI && this.updateInventoryGridUI();
+    }
+
+    // Force-spawn a pickup of a specific type at (x, z). Used by crates so we
+    // can deliver an explicit loot table instead of weighted-random.
+    _spawnPickupOfType(type, x, z) {
+        const isWeapon = type === 'gun' || type === 'machineGun' || type === 'jetpack';
+        const group = new THREE.Group();
+        group.position.set(x, 0.6, z);
+        let mesh;
+        if (isWeapon) {
+            // Simple shimmer cube for weapon pickups; grantWeapon handles real logic.
+            const color = type === 'gun' ? 0x88ccff
+                        : type === 'machineGun' ? 0xff8866
+                        : 0xa8e8ff;
+            mesh = new THREE.Mesh(
+                new THREE.BoxGeometry(0.7, 0.4, 0.4),
+                new THREE.MeshLambertMaterial({ color, emissive: color, emissiveIntensity: 0.35 })
+            );
+            group.userData.weaponId = type;
+        } else {
+            const def = (this.ITEM_DEFS || {})[type];
+            const color = (def && def.color) || 0xffffff;
+            mesh = new THREE.Mesh(
+                new THREE.SphereGeometry(0.32, 12, 12),
+                new THREE.MeshLambertMaterial({ color, emissive: color, emissiveIntensity: 0.3 })
+            );
+            group.userData.item = { type };
+        }
+        mesh.castShadow = true;
+        group.add(mesh);
+        const halo = new THREE.Mesh(
+            new THREE.SphereGeometry(0.6, 12, 12),
+            new THREE.MeshBasicMaterial({ color: 0xffffaa, transparent: true, opacity: 0.18, blending: THREE.AdditiveBlending, depthWrite: false })
+        );
+        group.add(halo);
+        group.userData.t = 0;
+        this.pickupsGroup.add(group);
+        this.pickups.push(group);
     }
 
     // ===== Jetpack System =====
@@ -6512,8 +7643,10 @@ class Game3D {
         }
 
         def.apply();
-        this.showMessage(this.itemLabel(itemId));
-        this.showToast(this.pickupToast(itemId), 'success');
+        if (itemId !== 'speed') {
+            this.showMessage(this.itemLabel(itemId));
+            this.showToast(this.pickupToast(itemId), 'success');
+        }
 
         items.splice(idx, 1);
         this._qbSig = null;
@@ -6770,17 +7903,7 @@ class Game3D {
         // Directional light (desert sun) — warm and bright
         const directionalLight = new THREE.DirectionalLight(t.sun, 2.4);
         directionalLight.position.set(50, 50, 50);
-        directionalLight.castShadow = true;
-        // 512² is plenty for a stylized 128-bit look — 1024² was 4× the
-        // rasterization cost for no visible improvement.
-        directionalLight.shadow.mapSize.width = 512;
-        directionalLight.shadow.mapSize.height = 512;
-        directionalLight.shadow.camera.near = 0.5;
-        directionalLight.shadow.camera.far = 200;
-        directionalLight.shadow.camera.left = -50;
-        directionalLight.shadow.camera.right = 50;
-        directionalLight.shadow.camera.top = 50;
-        directionalLight.shadow.camera.bottom = -50;
+        directionalLight.castShadow = false;
         this.scene.add(directionalLight);
         this.directionalLight = directionalLight;
     }
@@ -6899,6 +8022,15 @@ class Game3D {
                 this.setViewMode(this.viewMode === 'fpv' ? 'iso' : 'fpv');
             }
 
+            // Enter: use a key on the crate currently in focus (center-screen
+            // prompt indicates when this is valid).
+            if (event.code === 'Enter' && !event.repeat && this.gameMode === 'play') {
+                if (this._focusedCrate) {
+                    event.preventDefault();
+                    this.tryUseFocusedCrate();
+                }
+            }
+
             // Place flag in play mode or fall back to indicator toggle
             if (event.code === 'KeyF' && !event.repeat) {
                 const canPlaceFlag = this.gameMode === 'play' && !this.modalOpen && !this.isDrawerOpen;
@@ -6986,6 +8118,7 @@ class Game3D {
                 this.handleCreateModeHover();
                 return;
             } else if (this.gameMode === 'play' && !this.modalOpen) {
+                if (this.isGameplayActive && !this.isGameplayActive()) return;
                 // Pointer-lock deltas when locked, client coords otherwise.
                 const canvas = document.getElementById('gameCanvas');
                 const rect = canvas.getBoundingClientRect();
@@ -7003,7 +8136,7 @@ class Game3D {
                     if (this.viewMode === 'fpv' && !this.playMode.orbitEnabled) {
                         this.fpvPitch = (this.fpvPitch || 0) - event.movementY * 0.0025;
                         this.characterRotation -= event.movementX * this.fpvYawSensitivity;
-                        const limit = Math.PI / 3; // ~60° up/down
+                        const limit = Math.PI / 2 - 0.01; // full up/down, tiny epsilon to avoid lookAt flip
                         this.fpvPitch = Math.max(-limit, Math.min(limit, this.fpvPitch));
                     }
                     if (this.playMode.orbitEnabled && this.viewMode !== 'fpv') {
@@ -7061,6 +8194,7 @@ class Game3D {
                 this.createMode.isMouseDown = true;
                 this.handleCreateModeClick(event);
             } else if (this.gameMode === 'play' && !this.modalOpen) {
+                if (this.isGameplayActive && !this.isGameplayActive()) return;
                 this.handlePlayClick(event);
                 if (event.button === 0) {
                     const weapon = this.getCurrentWeapon();
@@ -7093,6 +8227,7 @@ class Game3D {
             if (this.gameMode === 'create' && !this.modalOpen) {
                 this.handleCreateModeClick(event);
             } else if (this.gameMode === 'play' && !this.modalOpen) {
+                if (this.isGameplayActive && !this.isGameplayActive()) return;
                 // On touch devices, the on-screen Fire button drives shooting — skip pointer lock entirely.
                 if (this.isTouchDevice) return;
                 // First click in play mode acquires pointer lock instead of firing.
@@ -7109,6 +8244,7 @@ class Game3D {
         document.addEventListener('mousedown', (event) => {
             if (this.isDrawerOpen) return;
             if (this.gameMode === 'play' && !this.modalOpen && event.button === 2) {
+                if (this.isGameplayActive && !this.isGameplayActive()) return;
                 if (this.isTouchDevice) return;
                 if (!this.isPointerLocked) {
                     document.body.requestPointerLock();
@@ -7154,6 +8290,7 @@ class Game3D {
             }
 
             if (this.gameMode === 'play' && !this.modalOpen) {
+                if (this.isGameplayActive && !this.isGameplayActive()) return;
                 const direction = event.deltaY > 0 ? 1 : -1;
                 this.switchWeapon(direction);
             }
@@ -7220,6 +8357,7 @@ class Game3D {
         const LOOK_FPV_PITCH = 0.005;
         const applyLookDelta = (dx, dy) => {
             if (this.modalOpen) return;
+            if (this.isGameplayActive && !this.isGameplayActive()) return;
             if (this.gameMode !== 'play') return;
             if (this.viewMode === 'fpv') {
                 this.fpvPitch = (this.fpvPitch || 0) - dy * LOOK_FPV_PITCH;
@@ -7319,6 +8457,7 @@ class Game3D {
         bindButton('touch-btn-fire', {
             onDown: () => {
                 if (this.modalOpen || this.gameMode !== 'play') return;
+                if (this.isGameplayActive && !this.isGameplayActive()) return;
                 this.handlePlayClick(center());
                 const w = this.getCurrentWeapon && this.getCurrentWeapon();
                 if (w && w.isContinuous) this.isFiring = true;
@@ -7332,6 +8471,7 @@ class Game3D {
         bindButton('touch-btn-melee', {
             onDown: () => {
                 if (this.modalOpen || this.gameMode !== 'play') return;
+                if (this.isGameplayActive && !this.isGameplayActive()) return;
                 this.handleMelee({ button: 2 });
             }
         });
@@ -7359,6 +8499,40 @@ class Game3D {
         document.addEventListener('dblclick',     (e) => e.preventDefault());
     }
 
+    applySpeedBoost(seconds) {
+        const add = seconds || this.SPEED_BOOST_PER_PICKUP || 10;
+        const cap = this.SPEED_BOOST_MAX_TIMER || 25;
+        this.powerUps.speedBoostTimer = Math.min(cap, (this.powerUps.speedBoostTimer || 0) + add);
+        this.powerUps._speedBoostBarPeak = this.powerUps.speedBoostTimer;
+        const left = Math.ceil(this.powerUps.speedBoostTimer);
+        this.showToast(`⚡ ${this.t('speedBoost')} — ${left}s`, 'success');
+        this.showMessage(`${this.t('speedBoost')} (${left}s)`);
+        this._qbSig = null;
+        if (this.updateInventoryGridUI) this.updateInventoryGridUI();
+        if (this.updateControlsUI) this.updateControlsUI();
+        if (this.isDrawerOpen && this.updateDrawerUI) this.updateDrawerUI();
+    }
+
+    getSpeedBoostMultiplier() {
+        return (this.powerUps.speedBoostTimer > 0) ? (this.SPEED_BOOST_MOVE_MULT || 1.45) : 1;
+    }
+
+    tickSpeedBoost(deltaTime) {
+        if (!this.powerUps.speedBoostTimer || this.powerUps.speedBoostTimer <= 0) return;
+        const prev = Math.ceil(this.powerUps.speedBoostTimer);
+        this.powerUps.speedBoostTimer = Math.max(0, this.powerUps.speedBoostTimer - deltaTime);
+        const now = Math.ceil(this.powerUps.speedBoostTimer);
+        if (now !== prev) {
+            this._qbSig = null;
+            if (this.updateInventoryGridUI) this.updateInventoryGridUI();
+            if (this.updateControlsUI) this.updateControlsUI();
+        }
+        if (this.powerUps.speedBoostTimer <= 0) {
+            this.powerUps._speedBoostBarPeak = 0;
+            this.showMessage('Speed boost ended');
+        }
+    }
+
     updatePlayer(deltaTime) {
         if (this.viewMode === 'ghost') {
             this.updateGhostCamera(deltaTime);
@@ -7370,7 +8544,7 @@ class Game3D {
             return;
         }
 
-        const speedMultiplier = 1 + (this.powerUps.speedBoost * 0.3); // 30% per stack
+        const speedMultiplier = this.getSpeedBoostMultiplier();
         const speed = 10 * speedMultiplier;
         const jumpForce = 15;
         const gravity = -30;
@@ -7417,12 +8591,13 @@ class Game3D {
                 }
             }
             if (direction.lengthSq() > 0) direction.normalize();
-            const moveSpeed = this.playMode.moveSpeed * (this.player.ducked ? 0.45 : 1);
+            const moveSpeed = this.playMode.moveSpeed * speedMultiplier * (this.player.ducked ? 0.45 : 1);
             const desiredVX = direction.x * moveSpeed;
             const desiredVZ = direction.z * moveSpeed;
             const curVX = this.player.velocity.x;
             const curVZ = this.player.velocity.z;
-            const accel = (direction.lengthSq() > 0) ? this.playMode.accel : this.playMode.decel;
+            const accelMult = speedMultiplier > 1 ? 1.25 : 1;
+            const accel = (direction.lengthSq() > 0) ? this.playMode.accel * accelMult : this.playMode.decel;
             const approach = (current, target, maxDelta) => {
                 if (current < target) return Math.min(current + maxDelta, target);
                 if (current > target) return Math.max(current - maxDelta, target);
@@ -7590,24 +8765,43 @@ class Game3D {
             }
         }
 
-        // Enemy contact damage scales by type (giants smash for 20, chicks peck for 3).
-        // Per-enemy cooldown so a single goblin can't tap-damage every frame.
+        // Enemy attack TELEGRAPH. When an enemy gets within "windup range"
+        // (further out than damage range so you see it coming), they stop
+        // moving, rear back, glow red, growl — then commit a strike step
+        // forward and only damage if you're still inside the smaller hit
+        // range. Giants/slam handle their own windup in _aiSlam.
         if (this.gameMode === 'play' && this.playMode.enemies) {
             for (const enemy of this.playMode.enemies) {
                 const ud = enemy.userData;
                 if (ud.contactCdT > 0) continue;
-                // Giants damage via their slam strike, not passive contact.
                 if (ud.aiKind === 'slam') continue;
+                if (ud.attackWindupT > 0) continue; // already winding up
+                if (ud.stunT > 0 || ud.flinchT > 0) continue; // mid-hit reaction
+
                 const distance = this.player.position.distanceTo(enemy.position);
-                const hitR = (ud.hitRadius || 0.6) + 0.6;
-                if (distance < hitR) {
-                    this.damagePlayer(ud.contactDamage || 10);
-                    ud.contactCdT = 0.6;
-                    // hitAndRun (goblin): trigger sprint-away after striking
-                    if (ud.aiKind === 'hitAndRun' && ud.aiState) {
-                        ud.aiState.backoffT = ud.aiCfg.backoffDur;
+                // Telegraph triggers at a generous range so the rear-back
+                // animation is visible BEFORE the enemy is on top of you.
+                const windupRange = (ud.hitRadius || 0.6) + 1.7;
+                if (distance < windupRange) {
+                    const baseWindup = (ud.aiKind === 'hitAndRun') ? 0.45
+                                     : (ud.aiKind === 'skittish') ? 0.55
+                                     : 0.60;
+                    ud.attackWindupT = baseWindup;
+                    ud.attackWindupMax = baseWindup;
+                    ud.attackPending = true;
+                    ud._struck = false;
+                    // Snap heading toward the player so the strike step lunges
+                    // at them, not into the wall behind.
+                    const dx = this.player.position.x - enemy.position.x;
+                    const dz = this.player.position.z - enemy.position.z;
+                    const dlen = Math.hypot(dx, dz) || 1;
+                    if (ud.dir) {
+                        ud.dir.set(dx / dlen, dz / dlen);
+                        enemy.rotation.y = Math.atan2(ud.dir.x, ud.dir.y);
                     }
-                    break; // Only damage once per frame
+                    this._tintEnemy(enemy, 0xff3322, baseWindup * 1000);
+                    this.audio && this.audio.play && this.audio.play('enemyGrowl');
+                    break;
                 }
             }
         }
@@ -7623,6 +8817,15 @@ class Game3D {
         if (this.player.model) {
             this.player.model.position.copy(this.player.position);
             this.player.model.rotation.y = this.characterRotation + (this.modelYawOffset || 0);
+            // Keep the drop-shadow disc glued to ground level instead of riding
+            // along with the character (otherwise it floats up during jumps).
+            if (this.player.bodyShadow) {
+                const altitude = Math.max(0, this.player.position.y);
+                this.player.bodyShadow.position.y = 0.02 - this.player.position.y;
+                const shrink = Math.max(0.35, 1 - altitude * 0.12);
+                this.player.bodyShadow.scale.setScalar(shrink);
+                this.player.bodyShadow.material.opacity = 0.45 * shrink;
+            }
         }
 
         // Iso wall fade: walls between camera and player become translucent
@@ -7671,13 +8874,6 @@ class Game3D {
     }
     
     checkEnemyCollision(position) {
-        // Enemies no longer hard-block the player — they push apart in
-        // resolveEnemyPushApart() each frame. This keeps the player from
-        // getting trapped when surrounded; contact damage still discourages
-        // walking through a mob.
-        return false;
-        // Dead code below (kept for reference; the soft-push pass replaced it).
-        // eslint-disable-next-line no-unreachable
         if (!this.playMode || !this.playMode.enemies) return false;
         const playerRadius = 0.8;
         const cur = this.player.position;
@@ -7695,8 +8891,27 @@ class Game3D {
         return false;
     }
 
+    // Locked crates block movement just like walls; opened ones don't. Uses
+    // a slightly tighter radius so the player can comfortably stand right
+    // next to a crate without overlap weirdness.
+    checkCrateCollision(position) {
+        const crates = this.playMode && this.playMode.crates;
+        if (!crates || !crates.length) return false;
+        const playerRadius = 0.8;
+        const crateRadius = 0.65; // tuned for the 1.05-scale chest footprint
+        const sumR = playerRadius + crateRadius;
+        for (const c of crates) {
+            if (c.userData.opened) continue;
+            const dx = position.x - c.position.x;
+            const dz = position.z - c.position.z;
+            if (dx * dx + dz * dz < sumR * sumR) return true;
+        }
+        return false;
+    }
+
     checkCollision(position) {
         if (this.checkEnemyCollision(position)) return true;
+        if (this.checkCrateCollision(position)) return true;
         const playerRadius = 0.8;
         const playerHeight = 2;
 
@@ -7724,6 +8939,7 @@ class Game3D {
     
     checkCollisionAxis(position, axis) {
         if (this.checkEnemyCollision(position)) return true;
+        if (this.checkCrateCollision(position)) return true;
         const playerRadius = 0.8;
         const playerHeight = 2;
 
@@ -7968,6 +9184,7 @@ class Game3D {
     
     fixedUpdate(deltaTime) {
         // All game logic goes here - runs at fixed 60 FPS
+        this.tickSpeedBoost(deltaTime);
         this.updatePlayer(deltaTime);
         this.updateFootsteps(deltaTime);
         this.updateDamageVignette(deltaTime);
@@ -8002,6 +9219,7 @@ class Game3D {
                 this.updateEnemies(deltaTime);
                 this.updateEnemySpawning(deltaTime);
                 this.updatePickups(deltaTime);
+                this.updateCratesAndKeys(deltaTime);
                 if (this.arena && this.arena.active) this.updateArena(deltaTime);
             }
             // Camera shake is used outside arena too (melee hits, etc.) — run it every frame.
@@ -8044,6 +9262,7 @@ class Game3D {
         this.updateDamageVignetteUI();
         this.updateMuzzleFlashUI();
         this.updateObjectiveBannerUI();
+        this.updateSprintBarUI();
         this.updateMinimapUI();
         this._updateArenaCountdownUI();
 
@@ -8152,6 +9371,30 @@ class Game3D {
         el.style.opacity = (t > 0 ? Math.min(1, t / 0.08) * 0.75 : 0).toFixed(3);
     }
 
+    updateSprintBarUI() {
+        const bar = document.getElementById('sprint-bar');
+        if (!bar) return;
+
+        const timer = this.powerUps && this.powerUps.speedBoostTimer ? this.powerUps.speedBoostTimer : 0;
+        const inPlay = this.gameMode === 'play' && !(this._isPreGameMeta && this._isPreGameMeta());
+
+        if (!inPlay || timer <= 0) {
+            bar.style.display = 'none';
+            bar.setAttribute('aria-hidden', 'true');
+            return;
+        }
+
+        const peak = Math.max(0.001, this.powerUps._speedBoostBarPeak || this.SPEED_BOOST_MAX_TIMER || 25);
+        const ratio = Math.max(0, Math.min(1, timer / peak));
+
+        bar.style.display = 'flex';
+        bar.setAttribute('aria-hidden', 'false');
+        bar.classList.toggle('sb-low', ratio < 0.25);
+
+        const fill = bar.querySelector('.sb-fill');
+        if (fill) fill.style.width = (ratio * 100).toFixed(2) + '%';
+    }
+
     updateObjectiveBannerUI() {
         const el = document.getElementById('objective-banner');
         const arenaEl = document.getElementById('arena-hud');
@@ -8223,8 +9466,10 @@ class Game3D {
         const wrap = document.getElementById('minimap-wrap');
         const canvas = document.getElementById('minimap');
         if (!wrap || !canvas) return;
-        if (this.gameMode !== 'play') { wrap.style.display = 'none'; return; }
-        wrap.style.display = 'block';
+        // Minimap is intentionally hidden in maze/play mode — the on-screen
+        // direction indicator + objective banner carry navigation by themselves.
+        wrap.style.display = 'none';
+        return;
 
         // Throttle to ~10 fps to save cycles
         this._mmFrame = ((this._mmFrame || 0) + 1) % 6;
@@ -8502,6 +9747,9 @@ class Game3D {
         if (isReloading) {
             specialStates.push('🔄 Reloading...');
         }
+        if (this.powerUps.speedBoostTimer > 0) {
+            specialStates.push(`⚡ Speed Boost ${Math.ceil(this.powerUps.speedBoostTimer)}s`);
+        }
         
         hud.innerHTML = `
             <div style="text-align: center; margin-bottom: 12px; font-size: 14px; opacity: 0.9; letter-spacing: 1px;">
@@ -8560,7 +9808,11 @@ class Game3D {
         // and rebuilding clobbers in-flight drag operations.
         const layout = this.quickbarLayout || this.defaultQuickbarLayout();
         const activeWeaponId = this.player.weapons[this.player.currentWeaponIndex];
-        const sigParts = [activeWeaponId || '', this.jetpackArmed ? 'J' : '-'];
+        const sigParts = [
+            activeWeaponId || '',
+            this.jetpackArmed ? 'J' : '-',
+            `spd:${this.getSpeedBoostStock()}:${Math.ceil(this.powerUps.speedBoostTimer || 0)}`
+        ];
         for (const id of layout) {
             if (!id) { sigParts.push('_'); continue; }
             sigParts.push(`${id}:${this.getItemCount(id)}:${this.isItemOwned(id) ? 1 : 0}`);
@@ -8609,9 +9861,13 @@ class Game3D {
             slot.draggable = item.type !== 'empty';
 
             const isOwned = item.type !== 'empty' && this.isItemOwned(item.id);
-            const isSelected = item.type === 'weapon' && item.id === activeWeaponId;
+            const isActiveBlock = !!(this.activeBlockId && this.BLOCK_DEFS && this.BLOCK_DEFS[item.id] && item.id === this.activeBlockId);
+            const isSelected = (item.type === 'weapon' && item.id === activeWeaponId) || isActiveBlock;
             const isArmed = item.id === 'jetpack' && this.jetpackArmed;
             if (isArmed) slot.classList.add('qb-armed');
+            if (item.id === 'speed' && this.powerUps.speedBoostTimer > 0) {
+                slot.classList.add('qb-speed-active');
+            }
 
             if (item.type === 'empty') {
                 slot.classList.add('qb-empty');
@@ -8621,15 +9877,30 @@ class Game3D {
             if (isSelected) slot.classList.add('qb-selected');
 
             const count = item.type === 'empty' ? 0 : this.getItemCount(item.id);
-            const showCount = item.type !== 'weapon' && item.type !== 'empty' && count > 0;
+            let countLabel = '';
+            if (item.id === 'speed') {
+                const stock = this.getSpeedBoostStock();
+                const active = Math.ceil(this.powerUps.speedBoostTimer || 0);
+                if (stock > 0 && active > 0) countLabel = `${stock}·${active}s`;
+                else if (stock > 0) countLabel = String(stock);
+                else if (active > 0) countLabel = `${active}s`;
+            } else if (item.type !== 'weapon' && item.type !== 'empty' && count > 0) {
+                countLabel = String(count);
+            }
 
             slot.innerHTML = `
                 <span class="qb-key">${item.shortcut}</span>
                 <span class="qb-icon">${item.icon || '·'}</span>
-                ${showCount ? `<span class="qb-count">${count}</span>` : ''}
+                ${countLabel ? `<span class="qb-count">${countLabel}</span>` : ''}
             `;
 
             slot.addEventListener('click', () => {
+                if (item.id === 'speed' && this.getSpeedBoostStock() <= 0) {
+                    if (this.powerUps.speedBoostTimer > 0) {
+                        this.showMessage(`Speed boost active — ${Math.ceil(this.powerUps.speedBoostTimer)}s left`);
+                    }
+                    return;
+                }
                 if (isOwned) {
                     this.audio && this.audio.play('uiClick');
                     this.selectGridItem(item);
@@ -8668,6 +9939,17 @@ class Game3D {
             this.toggleJetpackArmed();
             return;
         }
+
+        // Block tool: arm placement mode. Left-click then drops a block.
+        if (this.BLOCK_DEFS && this.BLOCK_DEFS[item.id]) {
+            this.activeBlockId = item.id;
+            this.showMessage(`${item.name} — left-click to place`);
+            this._qbSig = null;
+            this.updateInventoryGridUI && this.updateInventoryGridUI();
+            return;
+        }
+        // Any non-block selection clears placement mode.
+        this.activeBlockId = null;
 
         if (item.type === 'weapon') {
             const weaponIndex = this.player.weapons.indexOf(item.id);
@@ -8712,9 +9994,11 @@ class Game3D {
         const reg = this.getItemRegistry();
         const def = reg.all.find(d => d.id === itemId);
         if (!def) return;
+        const type = def.category === 'weapon' ? 'weapon'
+            : (def.category === 'block' ? 'block' : 'item');
         this.selectGridItem({
             id: def.id,
-            type: def.category === 'weapon' ? 'weapon' : 'item',
+            type,
             name: def.name,
             icon: def.icon
         });
@@ -8761,11 +10045,13 @@ class Game3D {
         const reg = this.getItemRegistry();
         const weaponItems = reg.weapons.map(d => ({ ...d, type: 'weapon' }));
         const consumableItems = reg.consumables.map(d => ({ ...d, type: 'item' }));
+        const blockItems = (reg.blocks || []).map(d => ({ ...d, type: 'block' }));
 
         const ownedOnly = this.drawerFilter === 'owned';
         const filt = (it) => !ownedOnly || this.isItemOwned(it.id);
         const visibleWeapons = weaponItems.filter(filt);
         const visibleConsumables = consumableItems.filter(filt);
+        const visibleBlocks = blockItems.filter(filt);
 
         // Stats header
         const hp = this.player.hp ?? 0;
@@ -8787,6 +10073,7 @@ class Game3D {
                         <span class="ds-chip ds-ammo" title="Ammo"><b>🔸</b> ${ammo}/${ammoMax}</span>
                         <span class="ds-chip ds-fuel" title="Jetpack fuel"><b>🚀</b> ${fuel}</span>
                         <span class="ds-chip ds-flags" title="Flags"><b>🏁</b> ${flags}</span>
+                        <span class="ds-chip ds-keys" title="Crate keys"><b>🗝️</b> ${this.inventory.keys || 0}</span>
                     </div>
                     <div class="drawer-actions">
                         <button class="df-pill ${ownedOnly ? '' : 'df-pill-on'}" data-filter="all">All</button>
@@ -8816,6 +10103,13 @@ class Game3D {
                         <h4>${this.t('consumables')} <span class="ds-count">${visibleConsumables.length}/${consumableItems.length}</span></h4>
                         <div id="consumable-grid" class="drawer-grid">
                             ${visibleConsumables.length ? '' : `<div class="drawer-empty">No consumables${ownedOnly ? ' picked up yet' : ''}.</div>`}
+                        </div>
+                    </div>
+
+                    <div class="drawer-section">
+                        <h4>Blocks <span class="ds-count">${visibleBlocks.length}/${blockItems.length}</span></h4>
+                        <div id="block-grid" class="drawer-grid">
+                            ${visibleBlocks.length ? '' : `<div class="drawer-empty">No blocks${ownedOnly ? ' yet' : ''}.</div>`}
                         </div>
                     </div>
                 </div>
@@ -8859,6 +10153,9 @@ class Game3D {
         const consumableGrid = drawer.querySelector('#consumable-grid');
         visibleConsumables.forEach(item => consumableGrid.appendChild(this.createDrawerItem(item)));
 
+        const blockGrid = drawer.querySelector('#block-grid');
+        if (blockGrid) visibleBlocks.forEach(item => blockGrid.appendChild(this.createDrawerItem(item)));
+
         this.setupDrawerKeyboardNavigation();
     }
 
@@ -8871,6 +10168,14 @@ class Game3D {
         }
         const def = this.ITEM_DEFS[item.id];
         if (!def) return '';
+        if (item.id === 'speed') {
+            const stock = this.getSpeedBoostStock();
+            const left = Math.ceil(this.powerUps.speedBoostTimer || 0);
+            if (left > 0 && stock > 0) return `${stock} in bag · ${left}s active (+45% move)`;
+            if (stock > 0) return `×${stock} in bag — click to use (+10s sprint)`;
+            if (left > 0) return `${left}s active (+45% move)`;
+            return '+10s sprint per pickup';
+        }
         const suffix = (def.labelSuffix || '').trim();
         return suffix || (def.autoApply ? 'auto' : '');
     }
@@ -9147,7 +10452,11 @@ class Game3D {
         if (saved) {
             try {
                 const parsed = JSON.parse(saved);
-                const valid = new Set([...Object.keys(this.WEAPON_STATS), ...Object.keys(this.ITEM_DEFS)]);
+                const valid = new Set([
+                    ...Object.keys(this.WEAPON_STATS),
+                    ...Object.keys(this.ITEM_DEFS),
+                    ...Object.keys(this.BLOCK_DEFS || {}),
+                ]);
                 this.quickbarLayout = parsed.map(id => (valid.has(id) ? id : null));
                 while (this.quickbarLayout.length < 9) this.quickbarLayout.push(null);
                 this.quickbarLayout = this.quickbarLayout.slice(0, 9);
@@ -9160,8 +10469,12 @@ class Game3D {
     // Curated default. Slot 3 is reserved for jetpack so the fuel stack is
     // always visible at a fixed key when the player is carrying any.
     defaultQuickbarLayout() {
-        const layout = ['diamondSword', 'gun', 'machineGun', 'jetpack', 'health', 'ammo', 'speed', 'weaponBuff', 'healthRegen'];
-        const valid = new Set([...Object.keys(this.WEAPON_STATS), ...Object.keys(this.ITEM_DEFS)]);
+        const layout = ['diamondSword', 'gun', 'machineGun', 'stone', 'jetpack', 'health', 'ammo', 'speed', 'weaponBuff'];
+        const valid = new Set([
+            ...Object.keys(this.WEAPON_STATS),
+            ...Object.keys(this.ITEM_DEFS),
+            ...Object.keys(this.BLOCK_DEFS || {}),
+        ]);
         return layout.map(id => (valid.has(id) ? id : null));
     }
 
@@ -10738,6 +12051,8 @@ window.addEventListener('load', () => {
 
     game.setupModalListeners();
     game.generateCharacterPreviews();
+    if (game.setupMetaUI) game.setupMetaUI();
+    if (game.setAppPhase) game.setAppPhase('title');
 
     // Inject crosshair element if index.html didn't ship one
     const crosshairCheck = document.getElementById('crosshair');

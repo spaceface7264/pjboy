@@ -55,6 +55,12 @@
             this.scene.add(this.rootGroup);
 
             this.labelEl = null;
+            this.zoneObjectives = {
+                bambooGrove: false,
+                dogFarm: false,
+                iceCaverns: false,
+                demonCrypt: false
+            };
         }
 
         // ---------- entry / exit ----------
@@ -887,6 +893,9 @@
                 this._registerAnimalsAsCombat(w);
                 this._refreshCombatHUD(w);
                 this._updateLabel(w);
+                if (this.game.activeModeId === 'explorer') {
+                    this._onExplorerWorldVisit(targetId, w);
+                }
             };
 
             if (instant) { doSwap(); return; }
@@ -955,7 +964,28 @@
 
         _updateLabel(world) {
             if (!this.labelEl) return;
-            this.labelEl.textContent = world.displayName + (world.combat ? '   ⚔  combat' : '   ✦  peaceful');
+            const done = this._explorerZonesDone();
+            const obj = done >= 4 ? '   ★ all zones visited' : `   ◆ zones ${done}/4`;
+            this.labelEl.textContent = world.displayName + (world.combat ? '   ⚔  combat' : '   ✦  peaceful') + obj;
+        }
+
+        _explorerZonesDone() {
+            const z = this.zoneObjectives;
+            return (z.bambooGrove ? 1 : 0) + (z.dogFarm ? 1 : 0) + (z.iceCaverns ? 1 : 0) + (z.demonCrypt ? 1 : 0);
+        }
+
+        _onExplorerWorldVisit(targetId, world) {
+            const subZones = ['bambooGrove', 'dogFarm', 'iceCaverns', 'demonCrypt'];
+            if (subZones.includes(targetId) && !this.zoneObjectives[targetId]) {
+                this.zoneObjectives[targetId] = true;
+                const g = this.game;
+                if (g.run) g.run.objectivesDone = this._explorerZonesDone();
+                if (g.showMessage) g.showMessage(`Discovered: ${world.displayName}`);
+                if (this._explorerZonesDone() >= 4 && g.showMessage) {
+                    g.showMessage('Explorer — all zones discovered! Return to the hub.');
+                }
+            }
+            this._updateLabel(world);
         }
     }
 
