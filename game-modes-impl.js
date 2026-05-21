@@ -950,6 +950,57 @@
             ], 'campaign');
         },
 
+        _spawnWideHallsPlayer() {
+            const start = this.levelStartWorld;
+            if (start) {
+                this.player.position.set(start.x, 1, start.z);
+                if (this.levelEndWorld) {
+                    const dx = this.levelEndWorld.x - start.x;
+                    const dz = this.levelEndWorld.z - start.z;
+                    this.characterRotation = Math.atan2(dx, dz);
+                }
+            } else {
+                this.player.position.set(0, 1, 0);
+            }
+            this.player.hp = this.player.maxHp;
+            this.player.invulnerable = true;
+            this.player.invulnerabilityTimer = 1.0;
+            if (this.applyViewModeToPlayerModel) this.applyViewModeToPlayerModel();
+            if (this.updateSwordViewmodel) this.updateSwordViewmodel(0);
+            if (this.updateCamera) this.updateCamera();
+        },
+
+        _onWideHallsDeath() {
+            const run = this.run;
+            if (!run) return;
+            run.lives = (run.lives || 1) - 1;
+            if (run.lives > 0) {
+                this.showMessage(`Lives left: ${run.lives}`);
+                this._spawnWideHallsPlayer();
+                return;
+            }
+            const elapsed = ((performance.now() - (run.startTime || performance.now())) / 1000).toFixed(1);
+            this.showResults('Wide Halls — Down', [
+                `Kills: ${this.kills || 0}`,
+                `Score: ${this.score || 0}`,
+                `Time: ${elapsed}s`
+            ], 'wide_halls');
+        },
+
+        _onWideHallsExitReached() {
+            if (this._wideHallsExitReached) return;
+            this._wideHallsExitReached = true;
+            const run = this.run || {};
+            const elapsed = ((performance.now() - (run.startTime || performance.now())) / 1000).toFixed(1);
+            this.audio && this.audio.play('levelComplete');
+            this.showResults('Halls Cleared', [
+                `Kills: ${this.kills || 0}`,
+                `Score: ${this.score || 0}`,
+                `Time: ${elapsed}s`,
+                `Lives left: ${run.lives || 0}`
+            ], 'wide_halls');
+        },
+
         _onArenaDeath() {
             const wave = (this.arena && this.arena.wave) || 0;
             const kills = this.kills || 0;
@@ -1265,7 +1316,7 @@
     // Wrap core loops
     const _updateEnemySpawning = Game3D.prototype.updateEnemySpawning;
     Game3D.prototype.updateEnemySpawning = function (deltaTime) {
-        if (this.activeModeId && this.activeModeId !== 'campaign' && !(this.arena && this.arena.active)) return;
+        if (this.activeModeId && this.activeModeId !== 'campaign' && this.activeModeId !== 'wide_halls' && !(this.arena && this.arena.active)) return;
         _updateEnemySpawning.call(this, deltaTime);
     };
 
@@ -1341,6 +1392,8 @@
                 this._onArenaDeath();
             } else if (this.activeModeId === 'campaign') {
                 this._onCampaignDeath();
+            } else if (this.activeModeId === 'wide_halls') {
+                this._onWideHallsDeath();
             } else if (this.arena && this.arena.active) {
                 this.startArenaMode();
             } else {
@@ -1352,8 +1405,18 @@
 
     Game3D.prototype.updateObjectives = function () {
         if (this.arena && this.arena.active) return;
-        if (this.activeModeId !== 'campaign') return;
         if (!this.levelStartWorld || !this.levelEndWorld) return;
+
+        if (this.activeModeId === 'wide_halls') {
+            if (this._wideHallsExitReached) return;
+            const p = this.player.position;
+            if (p.distanceToSquared(this.levelEndWorld) < CAMPAIGN_MARK_TOUCH_SQ) {
+                this._onWideHallsExitReached();
+            }
+            return;
+        }
+
+        if (this.activeModeId !== 'campaign') return;
         const run = this.run;
         if (!run || this._campaignEls?.complete && !this._campaignEls.complete.hidden) return;
 

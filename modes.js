@@ -31,6 +31,37 @@
                 return null;
             }
         },
+        wide_halls: {
+            id: 'wide_halls',
+            gameMode: 'play',
+            enter(g) {
+                g._teardownSpecialModes && g._teardownSpecialModes();
+                g.gameMode = 'play';
+                g.activeModeId = 'wide_halls';
+                const idx = g.savedMazes.findIndex((m) => m.type === 'generated');
+                if (idx >= 0) g.currentMazeIndex = idx;
+                g.run = { lives: 3, startTime: performance.now() };
+                g.score = 0;
+                g.kills = 0;
+                g._wideHallsExitReached = false;
+                g.clearMaze && g.clearMaze();
+                g.createLabyrinth && g.createLabyrinth();
+                g.setupPlayMode && g.setupPlayMode();
+                g._spawnWideHallsPlayer && g._spawnWideHallsPlayer();
+                g.setViewMode && g.setViewMode('fpv');
+            },
+            exit(g) {
+                g._wideHallsExitReached = false;
+                g.clearEnemies && g.clearEnemies();
+                g.clearMaze && g.clearMaze();
+            },
+            checkWin(g) {
+                return g._wideHallsExitReached ? 'halls_cleared' : null;
+            },
+            checkLose(g) {
+                return (g.run && g.run.lives <= 0) ? 'out_of_lives' : null;
+            }
+        },
         arena: {
             id: 'arena',
             gameMode: 'play',
