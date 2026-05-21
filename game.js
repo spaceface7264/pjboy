@@ -1,5 +1,26 @@
 // 3D Second-Person Game - 128-bit Style
 
+// Stale HUD element IDs swept every frame by clearAllUI. Listed once,
+// hoisted so we don't re-allocate the array every render tick.
+const STALE_UI_IDS = [
+    'player-hp-hud', 'top-center-ui',
+    'jetpack-hud', 'enemy-count-hud', 'compass-hud',
+    'player-pos', 'player-facing', 'camera-info',
+    'objective-msg', 'facing-indicator',
+    'control-ui', 'maze-ui'
+];
+
+// Scratch math objects reused across the frame loop. Allocating these
+// inside per-enemy / per-frame paths was a significant GC source.
+const _scratchV3a = (typeof THREE !== 'undefined') ? new THREE.Vector3() : null;
+const _scratchV3b = (typeof THREE !== 'undefined') ? new THREE.Vector3() : null;
+const _scratchV3c = (typeof THREE !== 'undefined') ? new THREE.Vector3() : null;
+const _scratchV2a = (typeof THREE !== 'undefined') ? new THREE.Vector2() : null;
+const _scratchV2b = (typeof THREE !== 'undefined') ? new THREE.Vector2() : null;
+const _scratchRay = (typeof THREE !== 'undefined') ? new THREE.Ray() : null;
+const _scratchPlaneGround = (typeof THREE !== 'undefined') ? new THREE.Plane(new THREE.Vector3(0,1,0), 0) : null;
+const _sharedRaycaster = (typeof THREE !== 'undefined') ? new THREE.Raycaster() : null;
+
 // =============================================================
 // AudioBus: lightweight procedural Web Audio synth.
 // All sounds are generated on the fly — no asset files needed.
@@ -62,10 +83,6 @@ class AudioBus {
                 enabled: this.enabled, volume: this.volume
             }));
         } catch (_) {}
-    }
-
-    _now() {
-        return this.ctx ? this.ctx.currentTime : 0;
     }
 
     // Core building block: an oscillator with an envelope.
@@ -151,6 +168,20 @@ class AudioBus {
                 this._tone({ type: 'sawtooth', freq: 380, freqEnd: 70, dur: 0.35, gain: 0.28 });
                 this._noise({ dur: 0.18, gain: 0.16, lowpass: 1600 });
                 break;
+            case 'wallChip':
+                this._noise({ dur: 0.05, gain: 0.16, lowpass: 1400, highpass: 500 });
+                this._tone({ type: 'square', freq: 210, freqEnd: 120, dur: 0.06, gain: 0.10 });
+                break;
+            case 'wallBreak':
+                this._noise({ dur: 0.32, gain: 0.32, lowpass: 1200 });
+                this._tone({ type: 'sawtooth', freq: 160, freqEnd: 60, dur: 0.28, gain: 0.22 });
+                this._tone({ type: 'square', freq: 80,  freqEnd: 40, dur: 0.32, gain: 0.18, delay: 0.04 });
+                break;
+            case 'crystalBreak':
+                this._tone({ type: 'triangle', freq: 1200, freqEnd: 400, dur: 0.22, gain: 0.22 });
+                this._tone({ type: 'sine', freq: 1800, freqEnd: 700, dur: 0.22, gain: 0.18, delay: 0.02 });
+                this._noise({ dur: 0.12, gain: 0.18, lowpass: 4000, highpass: 1200 });
+                break;
             case 'pickupHealth':
                 this._tone({ type: 'sine', freq: 660, dur: 0.09, gain: 0.22 });
                 this._tone({ type: 'sine', freq: 880, dur: 0.12, gain: 0.22, delay: 0.06 });
@@ -230,6 +261,11 @@ class Game3D {
         this.orbitDistance = 10;
         this.orbitHeight = 5;
         this.walls = []; // Store wall objects for collision detection
+        // Spatial hash bucketing walls by `_wallHashCell`-unit XZ cells. Hot
+        // collision paths query nearby cells instead of scanning all walls —
+        // critical now that walls are decomposed into thousands of 1×1 cubes.
+        this._wallHashCell = 4;
+        this.wallHash = new Map();
         this.currentMazeIndex = 0; // Current maze index
         this.savedMazes = []; // Store saved mazes
         this.modalOpen = false; // Track if settings modal is open
@@ -349,6 +385,8 @@ class Game3D {
                 diamondSwordDesc: 'Et kraftfuldt diamant sværd med høj skade',
                 gun: 'Pistol',
                 gunDesc: 'En præcis pistol med høj skade',
+                machineGun: 'Maskingevær',
+                machineGunDesc: 'Hurtig automatisk affyring, lavere skade per skud',
                 currentWeapon: 'Aktuelt Våben',
                 switchWeapon: 'Skift Våben',
                 damage: 'Skade',
@@ -390,18 +428,10 @@ class Game3D {
                 
                 // Maze types
                 wideHalls: 'Brede Gange',
-                classicSmall: 'Klassisk Lille',
-                openArena: 'Åben Arena',
-                spiral: 'Spiral',
-                labyrinth: 'Labyrint',
                 asciiMaze: 'ASCII Labyrint',
-                
+
                 // Descriptions
                 wideHallsDesc: 'Stor labyrint med brede 5-celle gange',
-                classicSmallDesc: 'Lille klassisk labyrint',
-                openArenaDesc: 'Åben arena med grænse vægge',
-                spiralDesc: 'Spiral labyrint mønster',
-                labyrinthDesc: 'Statisk 61x61 hegn labyrint med brede korridorer og blindgyder',
                 asciiMazeDesc: 'Genereret ASCII perfekt labyrint (sværhedsgrad-drevet)',
                 
                 // Instructions
@@ -488,6 +518,8 @@ class Game3D {
                 diamondSwordDesc: 'A powerful diamond sword with high damage',
                 gun: 'Pistol',
                 gunDesc: 'A precise pistol with high damage',
+                machineGun: 'Machine Gun',
+                machineGunDesc: 'Rapid automatic fire, lower damage per shot',
                 currentWeapon: 'Current Weapon',
                 switchWeapon: 'Switch Weapon',
                 damage: 'Damage',
@@ -529,18 +561,10 @@ class Game3D {
                 
                 // Maze types
                 wideHalls: 'Wide Halls',
-                classicSmall: 'Classic Small',
-                openArena: 'Open Arena',
-                spiral: 'Spiral',
-                labyrinth: 'Labyrinth',
                 asciiMaze: 'ASCII Maze',
-                
+
                 // Descriptions
                 wideHallsDesc: 'Large maze with wide 5-cell halls',
-                classicSmallDesc: 'Small classic maze',
-                openArenaDesc: 'Open arena with border walls',
-                spiralDesc: 'Spiral maze pattern',
-                labyrinthDesc: 'Static 61x61 hedge maze with wide corridors and dead ends',
                 asciiMazeDesc: 'Generated ASCII perfect maze (difficulty-driven)',
                 
                 // Instructions
@@ -587,8 +611,15 @@ class Game3D {
             rotateLerp: 12, // radians/s for turn smoothing toward aim
             projectiles: [],
             projectileSpeed: 30,
+            enemyProjectiles: [],
             enemies: [],
             enemiesGroup: new THREE.Group(),
+            // Crates + keys live in their own groups so clearMaze can drop them
+            // together without touching unrelated scene content.
+            crates: [],
+            cratesGroup: new THREE.Group(),
+            keys: [],
+            keysGroup: new THREE.Group(),
             cameraOffset: new THREE.Vector3(-8, 10, -8), // isometric offset (closer 2nd-person)
             mouseNDC: new THREE.Vector2(0, 0),
             orbitEnabled: false,
@@ -602,6 +633,7 @@ class Game3D {
             selectedIndex: 0,
             ammo: 0,
             flags: 9999,
+            keys: 0,              // crate keys collected from the maze
             health: 100,
             maxHealth: 100,
             speedBoostTimer: 0,
@@ -659,8 +691,10 @@ class Game3D {
         // Pickups must initialize before weapons: loadQuickbarLayout (called from
         // initializeWeapons) builds the default layout from both registries.
         this.initializePickups();
+        this.initializeBlocks();
         this.initializeWeapons();
         this.initMultiplayer();
+        if (this._initMetaState) this._initMetaState();
         this.animate();
     }
 
@@ -696,11 +730,11 @@ class Game3D {
                 apply() { g.inventory.health = Math.min(g.inventory.maxHealth, g.inventory.health + 25);
                           g.player.hp = Math.min(g.player.maxHp, g.player.hp + 25); } },
             ammo:        { emoji: '🔸', color: 0xffff66, weight: 22, labelKey: 'ammo',        labelSuffix: ' +10', autoApply: true,
-                apply() { g.inventory.ammo = Math.min(g.inventory.ammo + 10, g.AMMO_MAX); g.updateWeaponPowerUpUI(); } },
+                apply() { g.inventory.ammo = Math.min(g.inventory.ammo + 10, g.AMMO_MAX); } },
             jetpack:     { emoji: '🚀', color: 0xffaa66, weight: 16, labelKey: 'jetpackFuel', labelSuffix: ' +50', autoApply: true,
                 apply() { g.powerUps.jetpackFuel += 50; } },
-            speed:       { emoji: '⚡', color: 0x66ccff, weight: 12, labelKey: 'speedBoost',  labelSuffix: ' +1',
-                apply() { g.powerUps.speedBoost += 1; } },
+            speed:       { emoji: '⚡', color: 0x66ccff, weight: 12, labelKey: 'speedBoost',  labelSuffix: ' +10s sprint',
+                apply() { g.applySpeedBoost(10); } },
             weaponBuff:  { emoji: '⚔️', color: 0xff8866, weight: 10, labelKey: 'weaponBuff',  labelSuffix: ' +1',
                 apply() { g.powerUps.weaponBuff += 1; } },
             healthRegen: { emoji: '💚', color: 0xaaff88, weight: 10, labelKey: 'healthRegen', labelSuffix: ' +1',
@@ -708,6 +742,216 @@ class Game3D {
             flag:        { emoji: '🏁', color: 0xff66aa, weight: 6,  labelKey: 'flag',        labelSuffix: ' +1', autoApply: true,
                 apply() { g.inventory.flags += 1; if (g.updateControlsUI) g.updateControlsUI(); } }
         };
+    }
+
+    // Placeable blocks — Minecraft-style. v1 ships a single block (stone)
+    // so the registry, thumbnail render, quickbar wiring and placement path
+    // are all proven before adding more block types.
+    initializeBlocks() {
+        this.BLOCK_DEFS = {
+            stone: { path: 'assets/Blocks/Block_Stone.gltf', name: 'Stone Block', color: 0x8a8d92 }
+        };
+        // Inventory counts per block id. Starts with a generous stack so the
+        // player can experiment without grinding for materials in v1.
+        this.inventory.blocks = this.inventory.blocks || {};
+        for (const id of Object.keys(this.BLOCK_DEFS)) {
+            if (this.inventory.blocks[id] == null) this.inventory.blocks[id] = 99;
+        }
+        this.blockTemplates = {};
+        this.blockThumbs = {};      // dataURL thumbnails keyed by block id
+        this.activeBlockId = null;  // when set, left-click places this block
+
+        const loader = new THREE.GLTFLoader();
+        for (const [id, cfg] of Object.entries(this.BLOCK_DEFS)) {
+            // Emoji fallback so the drawer has *something* before the GLTF
+            // finishes loading (drawer re-renders on open, so this only shows
+            // for the brief first-paint window).
+            this.blockThumbs[id] = '🧱';
+            loader.load(cfg.path, (gltf) => {
+                this.blockTemplates[id] = gltf.scene;
+                this.blockThumbs[id] = this._renderBlockThumbnail(gltf.scene, cfg.color) || '🧱';
+                if (this.isDrawerOpen) this.updateDrawerUI();
+                this._qbSig = null;
+                this.updateInventoryGridUI && this.updateInventoryGridUI();
+            }, undefined, (err) => {
+                console.error(`Error loading block "${id}" from ${cfg.path}:`, err);
+            });
+        }
+    }
+
+    // One-off offscreen render of a block GLTF into a small dataURL. We
+    // dispose the renderer so we don't keep a second WebGL context around.
+    _renderBlockThumbnail(sceneRoot, fallbackColor) {
+        try {
+            const size = 64;
+            const canvas = document.createElement('canvas');
+            canvas.width = size; canvas.height = size;
+            const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+            renderer.setPixelRatio(1);
+            renderer.setSize(size, size, false);
+            renderer.setClearColor(0x000000, 0);
+
+            const scene = new THREE.Scene();
+            const clone = sceneRoot.clone(true);
+            // Normalize size to 1 unit so every block thumbnail has the same
+            // framing regardless of native GLTF scale.
+            const bbox = new THREE.Box3().setFromObject(clone);
+            const sz = bbox.getSize(new THREE.Vector3());
+            const maxDim = Math.max(sz.x, sz.y, sz.z) || 1;
+            clone.scale.setScalar(1 / maxDim);
+            bbox.setFromObject(clone);
+            const center = bbox.getCenter(new THREE.Vector3());
+            clone.position.sub(center);
+            scene.add(clone);
+
+            scene.add(new THREE.AmbientLight(0xffffff, 0.85));
+            const dir = new THREE.DirectionalLight(0xffffff, 0.9);
+            dir.position.set(2, 3, 2);
+            scene.add(dir);
+
+            const cam = new THREE.OrthographicCamera(-0.8, 0.8, 0.8, -0.8, 0.1, 10);
+            cam.position.set(1.5, 1.5, 1.5);
+            cam.lookAt(0, 0, 0);
+
+            renderer.render(scene, cam);
+            const dataURL = canvas.toDataURL('image/png');
+            renderer.dispose();
+            return `<img src="${dataURL}" class="block-thumb" alt="" draggable="false">`;
+        } catch (e) {
+            console.warn('block thumbnail render failed', e);
+            return null;
+        }
+    }
+
+    // One-off offscreen render of a weapon GLTF (sword etc.) into a small
+    // dataURL. The sword is much longer than wide, so we tilt it diagonally
+    // for nicer framing instead of leaving a thin vertical line.
+    _renderWeaponThumbnail(template) {
+        try {
+            const size = 64;
+            const canvas = document.createElement('canvas');
+            canvas.width = size; canvas.height = size;
+            const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+            renderer.setPixelRatio(1);
+            renderer.setSize(size, size, false);
+            renderer.setClearColor(0x000000, 0);
+
+            const scene = new THREE.Scene();
+            const clone = template.clone(true);
+            const o = template.userData && template.userData.orient;
+            if (o) clone.rotation.set(o.rot.x, o.rot.y, o.rot.z);
+
+            // Wrap and tilt so the blade sits diagonally in the frame.
+            const root = new THREE.Group();
+            root.add(clone);
+            root.rotation.z = -Math.PI / 5;
+            root.updateMatrixWorld(true);
+
+            const bbox = new THREE.Box3().setFromObject(root);
+            const sz = bbox.getSize(new THREE.Vector3());
+            const maxDim = Math.max(sz.x, sz.y, sz.z) || 1;
+            root.scale.setScalar(1 / maxDim);
+            const bbox2 = new THREE.Box3().setFromObject(root);
+            const center = bbox2.getCenter(new THREE.Vector3());
+            root.position.sub(center);
+            scene.add(root);
+
+            scene.add(new THREE.AmbientLight(0xffffff, 0.95));
+            const dir = new THREE.DirectionalLight(0xffffff, 0.9);
+            dir.position.set(2, 3, 2);
+            scene.add(dir);
+
+            // Camera tilted slightly so the sword has a bit of perspective volume.
+            const cam = new THREE.OrthographicCamera(-0.6, 0.6, 0.6, -0.6, 0.1, 10);
+            cam.position.set(0.6, 0.4, 2.5);
+            cam.lookAt(0, 0, 0);
+
+            renderer.render(scene, cam);
+            const dataURL = canvas.toDataURL('image/png');
+            renderer.dispose();
+            return `<img src="${dataURL}" class="weapon-thumb" alt="" draggable="false">`;
+        } catch (e) {
+            console.warn('weapon thumbnail render failed', e);
+            return null;
+        }
+    }
+
+    // Clone a unit-sized block mesh from the loaded GLTF template.
+    _createBlockMesh(blockId) {
+        const tpl = this.blockTemplates && this.blockTemplates[blockId];
+        if (tpl && THREE.SkeletonUtils) {
+            const clone = THREE.SkeletonUtils.clone(tpl);
+            const bbox = new THREE.Box3().setFromObject(clone);
+            const sz = bbox.getSize(new THREE.Vector3());
+            const maxDim = Math.max(sz.x, sz.y, sz.z) || 1;
+            clone.scale.setScalar(1 / maxDim);
+            // Re-center so the mesh origin sits at the block center.
+            const bbox2 = new THREE.Box3().setFromObject(clone);
+            const center = bbox2.getCenter(new THREE.Vector3());
+            clone.position.sub(center);
+            clone.traverse((child) => {
+                if (child.isMesh) {
+                    child.castShadow = true;
+                    child.receiveShadow = true;
+                }
+            });
+            const wrap = new THREE.Group();
+            wrap.add(clone);
+            return wrap;
+        }
+        const cfg = (this.BLOCK_DEFS && this.BLOCK_DEFS[blockId]) || {};
+        const mat = new THREE.MeshLambertMaterial({ color: cfg.color || 0x8a8d92 });
+        return new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), mat);
+    }
+
+    // Place a block on the cell directly in front of the player, snapped to
+    // a 1-unit integer grid. Costs one from the player's stock; if the cell
+    // is occupied or out of stock, no-op (with a tiny toast hint).
+    placeActiveBlock() {
+        const id = this.activeBlockId;
+        if (!id) return false;
+        const stock = (this.inventory.blocks && this.inventory.blocks[id]) || 0;
+        if (stock <= 0) {
+            this.showMessage && this.showMessage(`Out of ${this.BLOCK_DEFS[id]?.name || id}`);
+            return false;
+        }
+        const forward = new THREE.Vector3(
+            Math.sin(this.characterRotation), 0,
+            Math.cos(this.characterRotation)
+        ).normalize();
+        const target = this.player.position.clone().add(forward.multiplyScalar(1.6));
+        const gx = Math.floor(target.x) + 0.5;
+        const gz = Math.floor(target.z) + 0.5;
+        const gy = 0.5; // ground-level block, top at y=1
+        // Reject if a wall already occupies this cell, or if the placement
+        // would land on top of the player (small safety margin).
+        if (!this.isPositionFree(gx, gz, 0.45)) {
+            this.showMessage && this.showMessage('Blocked');
+            return false;
+        }
+        const distToPlayer = Math.hypot(this.player.position.x - gx, this.player.position.z - gz);
+        if (distToPlayer < 0.9) return false;
+
+        const mesh = this._createBlockMesh(id);
+        mesh.position.set(gx, gy, gz);
+        this.scene.add(mesh);
+        const entry = {
+            mesh,
+            position: mesh.position,
+            size: { x: 1, y: 1, z: 1 },
+            destructible: true,
+            hp: 3, maxHp: 3,
+            placed: true, blockId: id,
+        };
+        this.walls.push(entry);
+        this._addWallToHash(entry);
+
+        this.inventory.blocks[id] = stock - 1;
+        this.audio && this.audio.play && this.audio.play('uiClick');
+        this._qbSig = null;
+        this.updateInventoryGridUI && this.updateInventoryGridUI();
+        if (this.isDrawerOpen) this.updateDrawerUI();
+        return true;
     }
 
     // Display label that respects current language
@@ -730,22 +974,32 @@ class Game3D {
     // through the entire UI.
     getItemRegistry() {
         const weapons = Object.entries(this.WEAPON_STATS).map(([id, w]) => ({
-            id, category: 'weapon', icon: w.icon, name: this.t(id)
+            id, category: 'weapon', icon: (this.weaponThumbs && this.weaponThumbs[id]) || w.icon, name: this.t(id)
         }));
         const consumables = Object.entries(this.ITEM_DEFS).map(([id, d]) => ({
             id, category: 'consumable', icon: d.emoji, name: this.t(d.labelKey)
         }));
-        return { weapons, consumables, all: [...weapons, ...consumables] };
+        const blocks = Object.entries(this.BLOCK_DEFS || {}).map(([id, b]) => ({
+            id, category: 'block', icon: (this.blockThumbs && this.blockThumbs[id]) || '🧱', name: b.name
+        }));
+        return { weapons, consumables, blocks, all: [...weapons, ...consumables, ...blocks] };
+    }
+
+    getSpeedBoostStock() {
+        return this.inventory.items.filter((i) => i.type === 'speed').length;
     }
 
     // How many of `id` does the player currently own/have stocked?
     getItemCount(id) {
         if (this.WEAPON_STATS[id]) return this.player.weapons.includes(id) ? 1 : 0;
+        if (this.BLOCK_DEFS && this.BLOCK_DEFS[id]) {
+            return (this.inventory.blocks && this.inventory.blocks[id]) || 0;
+        }
         switch (id) {
             case 'health':      return this.inventory.items.filter(i => i.type === 'health').length;
             case 'ammo':        return this.inventory.ammo;
             case 'jetpack':     return Math.floor(this.powerUps.jetpackFuel);
-            case 'speed':       return this.powerUps.speedBoost;
+            case 'speed':       return this.getSpeedBoostStock();
             case 'healthRegen': return this.powerUps.healthRegen;
             case 'weaponBuff':  return this.powerUps.weaponBuff;
             case 'flag':        return this.inventory.flags;
@@ -754,6 +1008,9 @@ class Game3D {
     }
 
     isItemOwned(id) {
+        if (id === 'speed') {
+            return this.getSpeedBoostStock() > 0 || (this.powerUps.speedBoostTimer || 0) > 0;
+        }
         return this.getItemCount(id) > 0;
     }
 
@@ -761,9 +1018,11 @@ class Game3D {
         // Static weapon stats — single source of truth for tuning.
         // Names/descriptions are filled in by `weaponDefinitions` getter so language switches update them.
         this.WEAPON_STATS = {
-            diamondSword: { damage: 15, range: 2.5, cooldown: 0.8, type: 'melee',  icon: '⚔️', color: 0x00aaff, ammoCost: 0 },
+            diamondSword: { damage: 15, range: 3.5, cooldown: 0.25, type: 'melee',  icon: '⚔️', color: 0x00aaff, ammoCost: 0 },
             // ammoCost = 0 means free-fire (canFire/fireGun skip ammo checks).
-            gun:          { damage: 25, range: 15,  cooldown: 0.1, type: 'ranged', icon: '🔫', color: 0x8B4513, ammoCost: 0 }
+            gun:          { damage: 25, range: 15,  cooldown: 0.30, type: 'ranged', icon: '🔫', color: 0x8B4513, ammoCost: 0 },
+            // Machine gun: rapid fire, lower per-shot damage, slightly longer range. Auto-fire on mouse hold.
+            machineGun:   { damage: 12, range: 22,  cooldown: 0.08, type: 'ranged', icon: '🔫', color: 0x222a33, ammoCost: 0, isContinuous: true }
         };
 
         // Tuning constants
@@ -773,17 +1032,35 @@ class Game3D {
         this.WEAPON_BUFF_PER_STACK = 0.2;
 
         // Player loadout
-        this.player.weapons = ['diamondSword', 'gun'];
+        this.player.weapons = ['diamondSword', 'gun', 'machineGun'];
         this.player.currentWeaponIndex = 0;
         this.inventory.ammo = 12;      // starting clip
 
-        // Power-up stacks
+        // dataURL <img> thumbnails rendered from weapon GLTFs (keyed by weapon id).
+        // Populated asynchronously as templates finish loading; the drawer and
+        // quickbar UIs fall back to WEAPON_STATS[id].icon (emoji) until then.
+        this.weaponThumbs = {};
+
+        // Power-up stacks / timers
         this.powerUps = {
             jetpackFuel: 0,
-            speedBoost: 0,
+            speedBoostTimer: 0,
             healthRegen: 0,
             weaponBuff: 0
         };
+        this.SPEED_BOOST_PER_PICKUP = 10;
+        this.SPEED_BOOST_MAX_TIMER = 25;
+        this.SPEED_BOOST_MOVE_MULT = 1.45;
+
+        // Global multiplier applied to every enemy's authored scale at spawn.
+        // 0.9 = 10% smaller across the board. Hitboxes are derived from the
+        // scaled mesh bbox so they shrink along with the visual.
+        this.ENEMY_SIZE_MULT = 0.8;
+
+        // When true, every campaign level start also drops a free key + locked
+        // crate within arm's reach of the player spawn so the crate system can
+        // be smoke-tested without hunting through the maze. Set false to ship.
+        this.DEBUG_SPAWN_LOOT_NEAR_PLAYER = false;
 
         // Weapon runtime state
         this.weaponCooldowns = {};
@@ -857,7 +1134,7 @@ class Game3D {
             
             // Power-ups
             powerUps: {
-                speedBoost: this.powerUps.speedBoost,
+                speedBoost: Math.ceil(this.powerUps.speedBoostTimer || 0),
                 healthRegen: this.powerUps.healthRegen,
                 weaponBuff: this.powerUps.weaponBuff,
                 jetpackFuel: Math.floor(this.powerUps.jetpackFuel)
@@ -1027,6 +1304,17 @@ class Game3D {
             this.swordTemplate = template;
             this._swordTemplateLoading = false;
             if (this._swordWrappers) this._swordWrappers.forEach((w) => this.populateSwordWrapper(w));
+
+            // Render a thumbnail from the GLTF so the inventory drawer / quickbar
+            // can show the real sword art instead of the ⚔️ emoji fallback.
+            this.weaponThumbs = this.weaponThumbs || {};
+            const thumb = this._renderWeaponThumbnail(template);
+            if (thumb) {
+                this.weaponThumbs.diamondSword = thumb;
+                this._qbSig = null;
+                if (this.isDrawerOpen) this.updateDrawerUI();
+                this.updateInventoryGridUI && this.updateInventoryGridUI();
+            }
         }, undefined, (error) => {
             console.error('Error loading Sword_Diamond.gltf:', error);
             this._swordTemplateLoading = false;
@@ -1060,6 +1348,15 @@ class Game3D {
         this.player.gunPivot.add(heldGun);
         this.player.gunPivot.userData.muzzle = heldGun.userData.muzzle;
 
+        // Machine gun — built once, swapped in on selection.
+        this.player.machineGunPivot = new THREE.Group();
+        const heldMG = this._buildMachineGunMesh();
+        heldMG.scale.setScalar(0.95);
+        heldMG.rotation.set(0, Math.PI, 0);
+        heldMG.position.set(0, 0, 0.05);
+        this.player.machineGunPivot.add(heldMG);
+        this.player.machineGunPivot.userData.muzzle = heldMG.userData.muzzle;
+
         // Active 3rd-person weapon model — populated by attachActiveWeaponToHand
         this.player.weaponModel = null;
 
@@ -1080,13 +1377,22 @@ class Game3D {
             rot: { x: 0, y: 0, z: 0 } // pivot's own rotation is rest; sword tilt lives on the inner mesh
         };
 
-        // Swing animation state
+        // Swing animation state. Total swing duration covers three phases:
+        // anticipation (wind-back) → strike (fast committed swing past rest)
+        // → recovery (ease back). `swingDir` alternates ±1 between swings so
+        // back-to-back attacks read as a combo instead of a single repeated
+        // gesture.
         this.swingTimer = 0;
-        this.swingDuration = 0.25;
+        this.swingDuration = 0.28;
+        this.swingDir = 1;
 
         this.fpvGun = this._buildFpvGun();
         this.camera.add(this.fpvGun);
         this.fpvGun.visible = false;
+
+        this.fpvMachineGun = this._buildFpvMachineGun();
+        this.camera.add(this.fpvMachineGun);
+        this.fpvMachineGun.visible = false;
 
         this._gunRecoilT = 0;
         this._gunRecoilDur = 0.12;
@@ -1136,13 +1442,20 @@ class Game3D {
     // no socket is available yet.
     attachActiveWeaponToHand() {
         if (!this.player || !this.player.swordPivot || !this.player.gunPivot) return;
-        const cur = this.getCurrentWeapon && this.getCurrentWeapon();
-        const isRanged = cur && cur.type === 'ranged';
-        const active = isRanged ? this.player.gunPivot : this.player.swordPivot;
-        const inactive = isRanged ? this.player.swordPivot : this.player.gunPivot;
-        // Remove inactive from scene graph
-        if (inactive.parent) inactive.parent.remove(inactive);
-        // Attach active to socket (or player model root as fallback)
+        const weaponId = this.player.weapons[this.player.currentWeaponIndex];
+        let active;
+        if (weaponId === 'machineGun' && this.player.machineGunPivot) {
+            active = this.player.machineGunPivot;
+        } else if (weaponId === 'gun') {
+            active = this.player.gunPivot;
+        } else {
+            active = this.player.swordPivot;
+        }
+        // Remove all pivots that aren't the active one from the scene graph.
+        const allPivots = [this.player.swordPivot, this.player.gunPivot, this.player.machineGunPivot];
+        for (const p of allPivots) {
+            if (p && p !== active && p.parent) p.parent.remove(p);
+        }
         const target = this.player.handSocket || this.player.model;
         if (!target) return;
         if (active.parent !== target) {
@@ -1207,6 +1520,93 @@ class Game3D {
         return gun;
     }
 
+    _buildMachineGunMesh() {
+        // Distinctive bulkier ranged weapon: longer barrel + foregrip + drum magazine.
+        const gun = new THREE.Group();
+        const matBody = new THREE.MeshLambertMaterial({ color: 0x1a1f26, emissive: 0x03050a });
+        const matAccent = new THREE.MeshLambertMaterial({ color: 0x444a55, emissive: 0x080a10 });
+        const matGrip = new THREE.MeshLambertMaterial({ color: 0x2a1a10, emissive: 0x080403 });
+        const matBarrel = new THREE.MeshLambertMaterial({ color: 0x202428, emissive: 0x05060a });
+
+        // Receiver / body
+        const body = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.18, 0.62), matBody);
+        body.position.set(0, 0, -0.10);
+        gun.add(body);
+
+        // Top rail / sight
+        const rail = new THREE.Mesh(new THREE.BoxGeometry(0.10, 0.05, 0.50), matAccent);
+        rail.position.set(0, 0.12, -0.10);
+        gun.add(rail);
+        const rearSight = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.06, 0.05), matAccent);
+        rearSight.position.set(0, 0.17, 0.06);
+        gun.add(rearSight);
+        const frontSight = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.06, 0.04), matAccent);
+        frontSight.position.set(0, 0.17, -0.38);
+        gun.add(frontSight);
+
+        // Long barrel — segmented for a heavy-weapon silhouette.
+        const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.55, 14), matBarrel);
+        barrel.rotation.x = Math.PI / 2;
+        barrel.position.set(0, 0.02, -0.55);
+        gun.add(barrel);
+
+        // Barrel shroud (vented look via thin rings)
+        for (let i = 0; i < 4; i++) {
+            const ring = new THREE.Mesh(new THREE.TorusGeometry(0.055, 0.012, 6, 14), matAccent);
+            ring.rotation.y = Math.PI / 2;
+            ring.position.set(0, 0.02, -0.34 - i * 0.10);
+            gun.add(ring);
+        }
+
+        // Muzzle brake
+        const brake = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.05, 0.10, 8), matAccent);
+        brake.rotation.x = Math.PI / 2;
+        brake.position.set(0, 0.02, -0.85);
+        gun.add(brake);
+
+        // Foregrip (vertical, under the barrel)
+        const foregrip = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.16, 0.07), matGrip);
+        foregrip.position.set(0, -0.13, -0.30);
+        gun.add(foregrip);
+
+        // Trigger guard
+        const guard = new THREE.Mesh(new THREE.TorusGeometry(0.075, 0.013, 6, 14, Math.PI), matAccent);
+        guard.rotation.z = Math.PI;
+        guard.position.set(0, -0.09, 0.06);
+        gun.add(guard);
+
+        // Main grip (angled, behind trigger)
+        const grip = new THREE.Mesh(new THREE.BoxGeometry(0.10, 0.24, 0.13), matGrip);
+        grip.position.set(0, -0.20, 0.10);
+        grip.rotation.x = 0.22;
+        gun.add(grip);
+
+        // Drum magazine — instantly reads as "machine gun".
+        const drum = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.13, 0.10, 18), matBody);
+        drum.rotation.x = Math.PI / 2;
+        drum.position.set(0, -0.22, -0.06);
+        gun.add(drum);
+        const drumCap = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.13, 0.015, 18), matAccent);
+        drumCap.rotation.x = Math.PI / 2;
+        drumCap.position.set(0, -0.22, -0.115);
+        gun.add(drumCap);
+
+        // Stock (extends backward from receiver)
+        const stock = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.10, 0.26), matGrip);
+        stock.position.set(0, 0.02, 0.30);
+        gun.add(stock);
+        const stockPad = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.13, 0.04), matAccent);
+        stockPad.position.set(0, 0.02, 0.44);
+        gun.add(stockPad);
+
+        // Muzzle anchor — at the brake tip in local space.
+        const muzzle = new THREE.Object3D();
+        muzzle.position.set(0, 0.02, -0.92);
+        gun.add(muzzle);
+        gun.userData.muzzle = muzzle;
+        return gun;
+    }
+
     _buildFpvGun() {
         // Outer pivot positions the whole weapon on screen.
         const pivot = new THREE.Group();
@@ -1237,8 +1637,38 @@ class Game3D {
         return pivot;
     }
 
+    _buildFpvMachineGun() {
+        // Heavier weapon sits a touch lower-left and angled inward more aggressively.
+        const pivot = new THREE.Group();
+        pivot.position.set(0.32, -0.36, -0.7);
+        pivot.rotation.set(0, -0.10, 0);
+
+        const gun = this._buildMachineGunMesh();
+        pivot.userData.muzzle = gun.userData.muzzle;
+
+        const flashGeo = new THREE.PlaneGeometry(0.42, 0.42);
+        const flashMat = new THREE.MeshBasicMaterial({
+            color: 0xffe1a0, transparent: true, opacity: 0,
+            blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide
+        });
+        const flash = new THREE.Mesh(flashGeo, flashMat);
+        flash.position.copy(gun.userData.muzzle.position);
+        flash.position.z -= 0.04;
+        flash.userData.t = 0;
+        gun.add(flash);
+        pivot.userData.flash = flash;
+
+        gun.rotation.set(0.02, 0.16, -0.03);
+
+        pivot.add(gun);
+        pivot.userData.gun = gun;
+        return pivot;
+    }
+
     triggerSwordSwing() {
         this.swingTimer = this.swingDuration;
+        // Alternate diagonal direction every swing for a left/right combo feel.
+        this.swingDir = -(this.swingDir || 1);
     }
 
     updateSwordViewmodel(deltaTime) {
@@ -1253,50 +1683,82 @@ class Game3D {
             const rest = this._fpvSwordRest;
             if (this.swingTimer > 0) {
                 this.swingTimer = Math.max(0, this.swingTimer - deltaTime);
-                const t = 1 - (this.swingTimer / this.swingDuration);
-                const arc = Math.sin(t * Math.PI);
-                // Pivot swings diagonally down-left from the rest grip.
-                this.fpvSword.rotation.z = -arc * 1.1;
-                this.fpvSword.rotation.x = arc * 0.5;
-                this.fpvSword.position.z = rest.pos.z - arc * 0.2;
+                const t = 1 - (this.swingTimer / this.swingDuration); // 0 → 1
+                const dir = this.swingDir || 1;
+                // Phase splits: 20% anticipation, 35% strike, 45% recovery.
+                // The strike phase carries the visual punch; recovery is the
+                // longest so the blade settles smoothly instead of snapping back.
+                const A = 0.20, S = 0.55; // anticipation ends, strike ends
+                let antic = 0, strike = 0, recover = 0;
+                if (t < A) {
+                    // ease-out wind-back
+                    const u = t / A;
+                    antic = Math.sin(u * Math.PI / 2);
+                } else if (t < S) {
+                    // ease-in strike past rest (overshoot factor 1.15)
+                    const u = (t - A) / (S - A);
+                    strike = (u * u) * 1.15;
+                    antic = 1 - u; // bleed wind-back out as strike ramps in
+                } else {
+                    // smooth ease-out recovery back to rest
+                    const u = (t - S) / (1 - S);
+                    recover = 1 - (1 - u) * (1 - u);
+                    strike = (1 - recover) * 1.15;
+                }
+                // Compose: anticipation pulls blade up-and-back, strike drives
+                // it diagonally across the view, recovery interpolates to rest.
+                const swingZ = strike * 1.35;   // diagonal cut
+                const swingX = strike * 0.55;   // forward chop
+                const anticZ = antic * 0.30;    // raise blade before swing
+                const anticX = -antic * 0.25;
+                this.fpvSword.rotation.z = (-swingZ - anticZ) * dir;
+                this.fpvSword.rotation.x = swingX + anticX;
+                // Subtle yaw kick at the strike apex sells the follow-through.
+                this.fpvSword.rotation.y = strike * 0.25 * dir;
+                // Thrust forward on strike, slight pull-back on anticipation.
+                this.fpvSword.position.z = rest.pos.z - strike * 0.28 + antic * 0.08;
+                this.fpvSword.position.y = rest.pos.y + antic * 0.12 - strike * 0.08;
+                this.fpvSword.position.x = rest.pos.x + (strike * 0.18 - antic * 0.06) * dir;
             } else {
-                this.fpvSword.rotation.z = 0;
-                this.fpvSword.rotation.x = 0;
-                this.fpvSword.position.z = rest.pos.z;
+                this.fpvSword.rotation.set(0, 0, 0);
+                this.fpvSword.position.copy(rest.pos);
             }
         }
 
-        // ---- Gun viewmodel ----
-        if (this.fpvGun) {
-            const wieldingGun = cur && cur.type === 'ranged';
-            this.fpvGun.visible = wieldingGun && inFPV && inPlay;
+        // ---- Ranged viewmodels (pistol + machine gun share the same animation logic) ----
+        const weaponId = this.player.weapons[this.player.currentWeaponIndex];
+        const rangedModels = [
+            { pivot: this.fpvGun,        id: 'gun',        baseY: -0.32, baseX: 0.36, baseZ: -0.6, kickZ: 0.18, kickRotX: 0.45 },
+            { pivot: this.fpvMachineGun, id: 'machineGun', baseY: -0.36, baseX: 0.32, baseZ: -0.7, kickZ: 0.10, kickRotX: 0.22 }
+        ];
+        for (const r of rangedModels) {
+            if (!r.pivot) continue;
+            const isActive = cur && cur.type === 'ranged' && weaponId === r.id;
+            r.pivot.visible = isActive && inFPV && inPlay;
 
-            // Recoil tween: kick back along +Z (toward camera), ease back to rest.
-            const baseZ = -0.6;
-            const baseRotX = 0;
-            if (this._gunRecoilT > 0) {
-                this._gunRecoilT = Math.max(0, this._gunRecoilT - deltaTime);
-                const k = this._gunRecoilT / this._gunRecoilDur; // 1 → 0 over duration
-                const ease = k * k; // ease-out
-                this.fpvGun.position.z = baseZ + ease * 0.18;
-                this.fpvGun.rotation.x = baseRotX - ease * 0.45;
+            if (this._gunRecoilT > 0 && isActive) {
+                const k = this._gunRecoilT / this._gunRecoilDur;
+                const ease = k * k;
+                r.pivot.position.z = r.baseZ + ease * r.kickZ;
+                r.pivot.rotation.x = -ease * r.kickRotX;
             } else {
-                this.fpvGun.position.z = baseZ;
-                this.fpvGun.rotation.x = baseRotX;
+                r.pivot.position.z = r.baseZ;
+                r.pivot.rotation.x = 0;
             }
 
-            // Slight idle bob on the gun when moving (only when visible)
-            if (this.fpvGun.visible && this.player && this.player.velocity) {
+            if (r.pivot.visible && this.player && this.player.velocity) {
                 const v = this.player.velocity;
                 const speed = Math.hypot(v.x, v.z);
                 this._gunBobT = (this._gunBobT || 0) + deltaTime * (speed * 1.5 + 1.5);
                 const bobAmt = Math.min(1, speed / 6);
-                this.fpvGun.position.y = -0.32 + Math.sin(this._gunBobT * 2) * 0.012 * bobAmt;
-                this.fpvGun.position.x = 0.36 + Math.cos(this._gunBobT) * 0.008 * bobAmt;
+                r.pivot.position.y = r.baseY + Math.sin(this._gunBobT * 2) * 0.012 * bobAmt;
+                r.pivot.position.x = r.baseX + Math.cos(this._gunBobT) * 0.008 * bobAmt;
+            } else {
+                r.pivot.position.y = r.baseY;
+                r.pivot.position.x = r.baseX;
             }
 
-            // Muzzle flash sprite fade
-            const flash = this.fpvGun.userData.flash;
+            const flash = r.pivot.userData.flash;
             if (flash) {
                 flash.userData.t = Math.max(0, (flash.userData.t || 0) - deltaTime);
                 const k2 = flash.userData.t / 0.06;
@@ -1310,10 +1772,18 @@ class Game3D {
         }
     }
 
+    _getActiveFpvRanged() {
+        const weaponId = this.player.weapons[this.player.currentWeaponIndex];
+        if (weaponId === 'machineGun') return this.fpvMachineGun;
+        if (weaponId === 'gun') return this.fpvGun;
+        return null;
+    }
+
     triggerGunRecoil() {
         this._gunRecoilT = this._gunRecoilDur;
-        if (this.fpvGun && this.fpvGun.userData.flash) {
-            this.fpvGun.userData.flash.userData.t = 0.06;
+        const active = this._getActiveFpvRanged();
+        if (active && active.userData.flash) {
+            active.userData.flash.userData.t = 0.06;
         }
     }
     
@@ -1425,16 +1895,17 @@ class Game3D {
             return this._performMeleeArc({ damage, range, hitColor, missColor });
         }
 
-        const raycaster = new THREE.Raycaster();
-        raycaster.setFromCamera(new THREE.Vector2(0, 0), this.camera);
+        _scratchV2a.set(0, 0);
+        _sharedRaycaster.setFromCamera(_scratchV2a, this.camera);
 
-        const hits = raycaster.intersectObjects(this.playMode.enemies, true);
+        const hits = _sharedRaycaster.intersectObjects(this.playMode.enemies, true);
         for (const hit of hits) {
             if (hit.distance > range) break;
             const e = this.findEnemyRoot(hit.object);
             if (!e) continue;
             e.userData.hp -= damage;
             this.spawnImpact(hit.point.clone(), hitColor);
+            this.spawnDamageNumber(hit.point, damage);
             this.audio && this.audio.play(isRanged ? 'bulletHit' : 'swordHit');
 
             if (e.userData.hp <= 0) {
@@ -1449,7 +1920,7 @@ class Game3D {
 
         // Miss — show trail/impact at range end
         const origin = this.camera.position.clone();
-        const dir = raycaster.ray.direction.clone();
+        const dir = _sharedRaycaster.ray.direction.clone();
         const endPoint = origin.add(dir.multiplyScalar(range));
         this.spawnImpact(endPoint, missColor);
     }
@@ -1484,6 +1955,11 @@ class Game3D {
             }
         }
 
+        // Snap the body to the aim direction immediately so the swing visual
+        // and the strike line up — without this the body can be 90° off when a
+        // strafing player suddenly clicks.
+        this.characterRotation = Math.atan2(fx, fz);
+
         const arcCos = Math.cos(Math.PI / 3); // ±60° → 120° total swing arc
 
         let best = null;
@@ -1498,47 +1974,243 @@ class Game3D {
             if (distXZ < bestDist) { bestDist = distXZ; best = e; }
         }
 
+        // Always render a slash sweep in front of the player so the swing reads
+        // as a real arc, not a ground sparkle.
+        this._spawnMeleeSlash(fx, fz, range);
+
         if (best) {
             best.userData.hp -= damage;
             const hitPos = best.position.clone();
             hitPos.y += 1.0;
             this.spawnImpact(hitPos, hitColor);
+            this.spawnDamageNumber(hitPos, damage);
             this.audio && this.audio.play('swordHit');
+            // Small forward lunge — "step into" the strike, capped so it can't
+            // shove the player through a wall.
+            this.player.velocity.x += fx * 3.5;
+            this.player.velocity.z += fz * 3.5;
+            this._triggerHitShake(0.12, 0.1);
             if (best.userData.hp <= 0) {
                 this.killEnemy(best);
             } else {
-                this.applyEnemyKnockback(best, this.player.position, 6);
+                this.applyEnemyKnockback(best, this.player.position, 9);
                 this.flashEnemy(best);
                 this.showEnemyHPBar(best, 3.0);
             }
             return true;
         }
 
-        // Miss — sparkle at the aim cursor if it's within reach, else at the
-        // edge of the swing arc in front of the player.
-        let slashPos;
-        if (aimGround && Math.hypot(aimGround.x - px, aimGround.z - pz) <= range) {
-            slashPos = new THREE.Vector3(aimGround.x, this.player.position.y + 0.1, aimGround.z);
-        } else {
-            slashPos = new THREE.Vector3(
-                px + fx * range * 0.6,
-                this.player.position.y + 1.0,
-                pz + fz * range * 0.6
-            );
+        // No enemy in range — but maybe there's a destructible brick wall in the
+        // swing arc. If so, chip it for 1 hp and bail (no enemy-miss ping).
+        const wallHit = this._findMeleeWall(px, pz, fx, fz, range);
+        if (wallHit) {
+            this._damageWall(wallHit, 1);
+            return false;
         }
-        this.spawnImpact(slashPos, missColor);
+
+        // True miss — faint ground ping at the aim cursor if it's in reach so
+        // the player gets a clear "where did the swing land" cue.
+        if (aimGround && Math.hypot(aimGround.x - px, aimGround.z - pz) <= range) {
+            this.spawnImpact(aimGround, missColor);
+        }
         return false;
+    }
+
+    // Closest destructible wall whose AABB intersects the player's melee arc.
+    _findMeleeWall(px, pz, fx, fz, range) {
+        const arcCos = Math.cos(Math.PI / 3);
+        let best = null;
+        let bestDist = Infinity;
+        this._iterWallsNear(px, pz, range + 1, (w) => {
+            if (!w.destructible) return;
+            const halfX = w.size.x / 2;
+            const halfZ = w.size.z / 2;
+            const cx = Math.max(w.position.x - halfX, Math.min(px, w.position.x + halfX));
+            const cz = Math.max(w.position.z - halfZ, Math.min(pz, w.position.z + halfZ));
+            const dx = cx - px;
+            const dz = cz - pz;
+            const dist = Math.hypot(dx, dz);
+            if (dist > range || dist < 0.001) return;
+            const dot = (fx * dx + fz * dz) / dist;
+            if (dot < arcCos) return;
+            if (dist < bestDist) { bestDist = dist; best = w; }
+        });
+        return best;
+    }
+
+    // Apply damage to a destructible wall; remove from scene + walls list on
+    // death, with a chunky burst + audio + small camera punch. Survivors flash
+    // and darken so the player can see the damage progression.
+    _damageWall(wall, damage = 1) {
+        if (!wall || !wall.destructible) return;
+        wall.hp = (wall.hp != null ? wall.hp : (wall.maxHp || 4)) - damage;
+        const center = wall.position.clone();
+        center.y = Math.max(0.2, center.y - wall.size.y * 0.25);
+        if (wall.hp <= 0) {
+            this.audio && this.audio.play && this.audio.play('wallBreak');
+            this.spawnImpact(center, 0xb88a5a);
+            this._spawnWallFragments(wall);
+            this._triggerHitShake && this._triggerHitShake(0.18, 0.18);
+            // 15% chance the rubble leaves a pickup behind.
+            if (Math.random() < 0.15 && this.spawnPickup) {
+                this.spawnPickup(wall.position.x, wall.position.z);
+            }
+            const i = this.walls.indexOf(wall);
+            if (i !== -1) this.walls.splice(i, 1);
+            this._removeWallFromHash(wall);
+            if (wall.mesh) this.scene.remove(wall.mesh);
+            return;
+        }
+        this.audio && this.audio.play && this.audio.play('wallChip');
+        this.spawnImpact(center, 0xffeacc);
+        this._flashWall(wall);
+        this._tintDamagedWall(wall);
+    }
+
+    _flashWall(wall) {
+        if (!wall.mesh) return;
+        const flashed = [];
+        wall.mesh.traverse((c) => {
+            if (c.isMesh && c.material && c.material.color) {
+                flashed.push({ mat: c.material, orig: c.material.color.getHex() });
+                c.material.color.setHex(0xffffff);
+            }
+        });
+        setTimeout(() => flashed.forEach(({ mat, orig }) => mat.color.setHex(orig)), 70);
+    }
+
+    // Visually telegraph wall HP by darkening the mesh as it takes hits.
+    // `_origColor` is captured once so repeated darkening compounds correctly.
+    _tintDamagedWall(wall) {
+        if (!wall.mesh) return;
+        const ratio = Math.max(0.35, wall.hp / (wall.maxHp || 4));
+        wall.mesh.traverse((c) => {
+            if (!c.isMesh || !c.material || !c.material.color) return;
+            if (c.userData._origColor == null) c.userData._origColor = c.material.color.getHex();
+            const base = c.userData._origColor;
+            const r = ((base >> 16) & 0xff) * ratio;
+            const g = ((base >> 8) & 0xff) * ratio;
+            const b = (base & 0xff) * ratio;
+            const tinted = (Math.round(r) << 16) | (Math.round(g) << 8) | Math.round(b);
+            // Reapply on a tick after _flashWall's white pulse so it sticks.
+            setTimeout(() => c.material.color.setHex(tinted), 80);
+        });
+    }
+
+    _spawnWallFragments(wall) {
+        // 6 small cubes that fly outward from the wall and fade in ~0.5s.
+        const color = 0x8a6238;
+        const center = wall.position.clone();
+        for (let i = 0; i < 6; i++) {
+            const m = new THREE.Mesh(
+                new THREE.BoxGeometry(0.28, 0.28, 0.28),
+                new THREE.MeshLambertMaterial({ color, transparent: true, opacity: 1 })
+            );
+            m.position.copy(center);
+            m.position.y = Math.max(0.4, center.y - wall.size.y * 0.25 + Math.random() * wall.size.y * 0.5);
+            const ang = Math.random() * Math.PI * 2;
+            const vx = Math.cos(ang) * (2 + Math.random() * 2);
+            const vz = Math.sin(ang) * (2 + Math.random() * 2);
+            const vy = 3 + Math.random() * 2;
+            this.scene.add(m);
+            const start = performance.now();
+            const dur = 500;
+            const tick = () => {
+                const t = (performance.now() - start) / dur;
+                if (t >= 1) { this.scene.remove(m); m.geometry.dispose(); m.material.dispose(); return; }
+                const dt = 1 / 60;
+                m.position.x += vx * dt;
+                m.position.z += vz * dt;
+                m.position.y += (vy - 14 * t) * dt;
+                m.rotation.x += 0.2;
+                m.rotation.y += 0.15;
+                m.material.opacity = 1 - t;
+                requestAnimationFrame(tick);
+            };
+            requestAnimationFrame(tick);
+        }
+    }
+
+    // Translucent wedge that pops in front of the player and fades over ~140ms.
+    // Sized to the weapon range and oriented along the aim direction.
+    _spawnMeleeSlash(fx, fz, range) {
+        const arcRadians = (2 * Math.PI) / 3; // 120°
+        const segments = 18;
+        const inner = range * 0.35;
+        const outer = range * 1.0;
+        const geo = new THREE.RingGeometry(inner, outer, segments, 1, -arcRadians / 2, arcRadians);
+        const mat = new THREE.MeshBasicMaterial({
+            color: 0xeaf6ff,
+            transparent: true,
+            opacity: 0.55,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending
+        });
+        const slash = new THREE.Mesh(geo, mat);
+        slash.position.set(this.player.position.x, this.player.position.y + 0.9, this.player.position.z);
+        // The ring is built in the XY plane with its arc opening along +X.
+        // Lay it flat (XZ) and rotate so its center aligns with (fx, fz).
+        slash.rotation.x = -Math.PI / 2;
+        slash.rotation.z = -Math.atan2(fx, fz) + Math.PI / 2;
+        this.scene.add(slash);
+
+        const start = performance.now();
+        const dur = 140;
+        const animate = () => {
+            const t = (performance.now() - start) / dur;
+            if (t >= 1) { this.scene.remove(slash); geo.dispose(); mat.dispose(); return; }
+            mat.opacity = 0.55 * (1 - t);
+            const s = 1 + t * 0.12;
+            slash.scale.set(s, s, s);
+            requestAnimationFrame(animate);
+        };
+        requestAnimationFrame(animate);
+    }
+
+    _triggerHitShake(intensity, duration) {
+        // Piggyback on the arena shake channel — same camera, same updater.
+        const s = (this.arena && this.arena.shake) || null;
+        if (!s) return;
+        // Don't stomp a stronger ongoing shake (e.g., boss eruption).
+        if (s.intensity > intensity && s.elapsed < s.duration) return;
+        s.intensity = intensity;
+        s.duration = duration;
+        s.elapsed = 0;
     }
 
     applyEnemyKnockback(e, sourcePos, strength = 7) {
         const dx = e.position.x - sourcePos.x;
         const dz = e.position.z - sourcePos.z;
         const len = Math.hypot(dx, dz) || 1;
-        e.userData.knockback = new THREE.Vector2((dx / len) * strength, (dz / len) * strength);
-        e.userData.stunT = 0.35;
-        // Flinch: brief recoil away from the shot, decays in updateEnemies
-        e.userData.flinchT = 0.25;
-        e.userData.flinchMax = 0.25;
+        if (!e.userData.knockback) e.userData.knockback = new THREE.Vector2();
+        e.userData.knockback.set((dx / len) * strength, (dz / len) * strength);
+        e.userData.stunT = 0.4;
+        // Brief hit-stop so the impact reads visually (~70ms freeze)
+        e.userData.hitStopT = 0.07;
+        // Flinch: stronger recoil away from the shot, decays in updateEnemies
+        e.userData.flinchT = 0.32;
+        e.userData.flinchMax = 0.32;
+        // Hitting an enemy mid-wind-up cancels the attack — gives the player
+        // a real reward for the dodge-and-strike rhythm.
+        if (e.userData.attackWindupT > 0) {
+            e.userData.attackWindupT = 0;
+            e.userData.attackPending = false;
+        }
+        if (e.userData.rangedWindupT > 0) {
+            e.userData.rangedWindupT = 0;
+            e.userData.rangedPending = false;
+        }
+        // Getting hit alerts the enemy to the player's position even through
+        // walls — otherwise you could shoot a demon from cover and they'd
+        // just stand there.
+        const ud = e.userData;
+        if (ud.aiCfg) {
+            ud.awareT = Math.max(ud.awareT || 0, (ud.aiCfg.alertMemory || 4.0));
+            if (!ud.lastSeenPos) ud.lastSeenPos = new THREE.Vector2();
+            ud.lastSeenPos.set(this.player.position.x, this.player.position.z);
+            ud.aimPos = ud.lastSeenPos;
+        }
     }
 
     findEnemyRoot(obj) {
@@ -1550,14 +2222,96 @@ class Game3D {
     }
 
     flashEnemy(e) {
-        const flashed = [];
+        // Stash the true base color on each material the first time we ever
+        // flash it. Without this, overlapping flashes capture the *current*
+        // (already-white) color as "original" and revert to white forever.
+        const mats = [];
         e.traverse((child) => {
             if (child.isMesh && child.material && child.material.color) {
-                flashed.push({ mat: child.material, orig: child.material.color.getHex() });
-                child.material.color.setHex(0xffffff);
+                const mat = child.material;
+                if (mat.userData._baseColor == null) mat.userData._baseColor = mat.color.getHex();
+                if (mat.emissive && mat.userData._baseEmissive == null) {
+                    mat.userData._baseEmissive = mat.emissive.getHex();
+                }
+                mat.color.setHex(0xffffff);
+                if (mat.emissive) mat.emissive.setHex(0xffffff);
+                mats.push(mat);
             }
         });
-        setTimeout(() => flashed.forEach(({ mat, orig }) => mat.color.setHex(orig)), 80);
+        // Bump a per-enemy flash counter; only the *last* revert restores,
+        // so a rapid double-hit just extends the flash, never strands it.
+        if (e.userData._flashId == null) e.userData._flashId = 0;
+        const myId = ++e.userData._flashId;
+        setTimeout(() => {
+            if (e.userData._flashId !== myId) return; // a newer flash is active
+            for (const mat of mats) {
+                if (mat.userData._baseColor != null) mat.color.setHex(mat.userData._baseColor);
+                if (mat.emissive && mat.userData._baseEmissive != null) mat.emissive.setHex(mat.userData._baseEmissive);
+            }
+        }, 130);
+    }
+
+    // Floating damage number sprite. Drifts up, fades out, then disposed.
+    // Pooled by reusing canvas-textured sprites where possible.
+    spawnDamageNumber(worldPos, amount, opts = {}) {
+        const color = opts.color || (amount >= 20 ? '#ffd34a' : '#ffffff');
+        const text = String(Math.round(amount));
+        // Build a small canvas; reuse a shared pool to avoid per-hit garbage.
+        if (!this._dmgNumPool) this._dmgNumPool = [];
+        let entry = this._dmgNumPool.find(p => !p.active);
+        if (!entry) {
+            const canvas = document.createElement('canvas');
+            canvas.width = 128; canvas.height = 64;
+            const ctx = canvas.getContext('2d');
+            const tex = new THREE.CanvasTexture(canvas);
+            tex.minFilter = THREE.LinearFilter;
+            const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false });
+            const sprite = new THREE.Sprite(mat);
+            sprite.scale.set(1.6, 0.8, 1);
+            entry = { canvas, ctx, tex, sprite, mat, active: false };
+            this._dmgNumPool.push(entry);
+        }
+        entry.active = true;
+        // Render text
+        const ctx = entry.ctx;
+        ctx.clearRect(0, 0, entry.canvas.width, entry.canvas.height);
+        ctx.font = 'bold 44px Courier New, monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.lineWidth = 6;
+        ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+        ctx.strokeText(text, 64, 32);
+        ctx.fillStyle = color;
+        ctx.fillText(text, 64, 32);
+        entry.tex.needsUpdate = true;
+        // Position above hit, with a tiny random horizontal jitter
+        entry.sprite.position.set(
+            worldPos.x + (Math.random() - 0.5) * 0.4,
+            worldPos.y + 1.2,
+            worldPos.z + (Math.random() - 0.5) * 0.4
+        );
+        entry.mat.opacity = 1;
+        entry.sprite.scale.set(1.6, 0.8, 1);
+        this.scene.add(entry.sprite);
+        // Animate: drift up + fade, release back to pool when done.
+        const start = performance.now();
+        const dur = 800;
+        const startY = entry.sprite.position.y;
+        const tick = () => {
+            const t = (performance.now() - start) / dur;
+            if (t >= 1) {
+                this.scene.remove(entry.sprite);
+                entry.active = false;
+                return;
+            }
+            entry.sprite.position.y = startY + t * 1.4;
+            entry.mat.opacity = 1 - t;
+            // Slight pop early on
+            const s = 1 + (1 - Math.min(1, t * 4)) * 0.4;
+            entry.sprite.scale.set(1.6 * s, 0.8 * s, 1);
+            requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
     }
     
     // Translation helper
@@ -1575,10 +2329,33 @@ class Game3D {
     
     // Update all UI elements with current language
     updateAllUI() {
+        this.renderMazeButtons();
         this.updateModalContent();
         this._qbSig = null;
         this.updateInventoryGridUI && this.updateInventoryGridUI();
         if (this.isDrawerOpen) this.updateDrawerUI();
+    }
+
+    // Render the .maze-btn list from savedMazes. Called on init (after the
+    // settings click delegation is wired) and on language switch. Buttons
+    // are matched by data-maze index → savedMazes index, same contract the
+    // delegated click handler expects.
+    renderMazeButtons() {
+        const container = document.getElementById('maze-buttons');
+        if (!container || !this.savedMazes) return;
+        const html = this.savedMazes.map((maze, i) => {
+            const name = (maze.name || `Maze ${i + 1}`).replace(/[<>&"]/g, (c) => (
+                { '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]
+            ));
+            return `<button class="maze-btn" data-maze="${i}">${name}</button>`;
+        }).join('');
+        container.innerHTML = html;
+        // Re-apply the active highlight after rebuild.
+        container.querySelectorAll('.maze-btn').forEach((btn) => {
+            if (parseInt(btn.dataset.maze) === this.currentMazeIndex) {
+                btn.classList.add('active');
+            }
+        });
     }
 
     // Single source of truth for "is the player model visible?". Call this whenever
@@ -1587,6 +2364,85 @@ class Game3D {
         if (this.player && this.player.model) {
             this.player.model.visible = (this.viewMode !== 'fpv');
         }
+    }
+
+    // ---- Iso wall transparency: fade walls between camera and player ----
+    // Each wall mesh keeps a reference to its opaque material; when it sits
+    // on the line camera→player we swap to a shared faded clone, and swap
+    // back when it no longer occludes. Cheap reference assignment per
+    // transition, not per frame.
+    _getFadedMaterial(origMat) {
+        if (!origMat) return null;
+        // One faded clone per unique opaque material — cached on the mat itself.
+        // Opacity is intentionally very low: standard alpha-blending stacks
+        // multiplicatively, so N walls in a row leave only (1-α)^N of the
+        // background visible. At α=0.10, four stacked walls still transmit
+        // (0.9)^4 ≈ 66% — enough to see the player through chunky cover.
+        if (!origMat.userData._fadedClone) {
+            const f = origMat.clone();
+            f.transparent = true;
+            f.opacity = 0.10;
+            f.depthWrite = false;
+            // Drop emissive on the fade so stacked walls don't accumulate
+            // a glow that defeats the transparency. Lambert/Standard mats.
+            if (f.emissive && f.emissive.setHex) f.emissive.setHex(0x000000);
+            // Very faint white nudge so the fade reads as "intentional" without
+            // washing out the color when only one layer is visible.
+            if (f.color && f.color.lerp) f.color.lerp(new THREE.Color(0xffffff), 0.08);
+            origMat.userData._fadedClone = f;
+        }
+        return origMat.userData._fadedClone;
+    }
+
+    _setWallFaded(wall, faded) {
+        const mesh = wall.mesh || wall;
+        if (!mesh || !mesh.material) return;
+        if (faded) {
+            if (wall._fadedActive) return;
+            wall._origMat = mesh.material;
+            const f = this._getFadedMaterial(mesh.material);
+            if (f) mesh.material = f;
+            wall._fadedActive = true;
+        } else {
+            if (!wall._fadedActive) return;
+            if (wall._origMat) mesh.material = wall._origMat;
+            wall._fadedActive = false;
+        }
+    }
+
+    _updateWallFade() {
+        if (!this._fadedWalls) this._fadedWalls = new Set();
+        const wasFaded = this._fadedWalls;
+        // FPV → restore everything and bail.
+        if (this.viewMode === 'fpv' || !this.player || !this.player.position) {
+            if (wasFaded.size === 0) return;
+            for (const w of wasFaded) this._setWallFaded(w, false);
+            wasFaded.clear();
+            return;
+        }
+        const camX = this.camera.position.x, camZ = this.camera.position.z;
+        const pX = this.player.position.x, pZ = this.player.position.z;
+        const midX = (camX + pX) * 0.5, midZ = (camZ + pZ) * 0.5;
+        const halfLen = Math.hypot(camX - pX, camZ - pZ) * 0.5;
+        const nowFaded = new Set();
+        // Only walls whose top is above the player's mid-height can actually
+        // occlude — skip rubble/low debris so they stay solid.
+        const playerEyeY = (this.player.position.y || 0) + 1.0;
+        this._iterWallsNear(midX, midZ, halfLen + 1, (w) => {
+            const top = w.position.y + (w.size ? w.size.y / 2 : 0.5);
+            if (top < playerEyeY) return;
+            if (this._segmentVsAABB(camX, camZ, pX, pZ,
+                                    w.position.x, w.position.z,
+                                    (w.size ? w.size.x : 1) / 2, (w.size ? w.size.z : 1) / 2)) {
+                this._setWallFaded(w, true);
+                nowFaded.add(w);
+            }
+        });
+        // Restore walls that were faded last frame but no longer occlude.
+        for (const w of wasFaded) {
+            if (!nowFaded.has(w)) this._setWallFaded(w, false);
+        }
+        this._fadedWalls = nowFaded;
     }
 
     setViewMode(mode) {
@@ -1647,8 +2503,9 @@ class Game3D {
         this.renderer.setSize(window.innerWidth, window.innerHeight);
         this.renderer.setPixelRatio(1);
         this.renderer.setClearColor(0x000000);
-        this.renderer.shadowMap.enabled = true;
-        this.renderer.shadowMap.type = THREE.PCFShadowMap;
+        // Dynamic shadow mapping disabled — the cheap drop-shadow disc under
+        // the avatar carries the grounding cue and saves the PCF pass cost.
+        this.renderer.shadowMap.enabled = false;
         
         // Create player (invisible in second-person view)
         this.createPlayer();
@@ -1661,14 +2518,13 @@ class Game3D {
 
         // Add enemies group to scene
         this.scene.add(this.playMode.enemiesGroup);
+        this.scene.add(this.playMode.cratesGroup);
+        this.scene.add(this.playMode.keysGroup);
         // Add pickups group to scene
         this.pickupsGroup = new THREE.Group();
         this.scene.add(this.pickupsGroup);
 
-        // If starting in play mode, ensure enemies are spawned
-        if (this.gameMode === 'play') {
-            this.setupPlayMode();
-        }
+        // Play mode (enemies, etc.) is initialized when a mode is chosen via ModeRegistry.
 
         // Apply initial theme
         this.applyTheme(this.themeName);
@@ -1698,7 +2554,9 @@ class Game3D {
             invulnerabilityTimer: 0,
             weapons: [],
             currentWeaponIndex: 0,
-            weaponModel: null
+            weaponModel: null,
+            ducked: false,
+            duckBlend: 0
         };
         
         // Registry of swappable player characters (key matches data-character on the UI buttons)
@@ -2095,149 +2953,54 @@ class Game3D {
         }
     }
     
-    createFallbackCharacter() {
-        // Create a simple low-poly character using basic geometries
-        const characterGroup = new THREE.Group();
-        
-        // Head — warm desert tan
-        const headGeometry = new THREE.BoxGeometry(1, 1, 1);
-        const headMaterial = new THREE.MeshLambertMaterial({
-            color: 0xd9a76a,
-            emissive: 0x2a1808
-        });
-        const head = new THREE.Mesh(headGeometry, headMaterial);
-        head.position.y = 1.5;
-        head.castShadow = true;
-        characterGroup.add(head);
-        
-        
-        // Body — khaki tunic
-        const bodyGeometry = new THREE.BoxGeometry(1.2, 2, 0.8);
-        const bodyMaterial = new THREE.MeshLambertMaterial({
-            color: 0x8a6a3a,
-            emissive: 0x1a0e04
-        });
-        const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
-        body.position.y = 0.5;
-        body.castShadow = true;
-        characterGroup.add(body);
-        
-        // Arms — sand tone
-        const armGeometry = new THREE.BoxGeometry(0.3, 1.5, 0.3);
-        const armMaterial = new THREE.MeshLambertMaterial({
-            color: 0xd9a76a,
-            emissive: 0x2a1808
-        });
-        
-        const leftArm = new THREE.Mesh(armGeometry, armMaterial);
-        leftArm.position.set(-0.8, 0.5, 0);
-        leftArm.castShadow = true;
-        characterGroup.add(leftArm);
-        
-        const rightArm = new THREE.Mesh(armGeometry, armMaterial);
-        rightArm.position.set(0.8, 0.5, 0);
-        rightArm.castShadow = true;
-        characterGroup.add(rightArm);
-        
-        // Legs — darker khaki
-        const legGeometry = new THREE.BoxGeometry(0.4, 1.5, 0.4);
-        const legMaterial = new THREE.MeshLambertMaterial({
-            color: 0x6a4e22,
-            emissive: 0x1a0e04
-        });
-        
-        const leftLeg = new THREE.Mesh(legGeometry, legMaterial);
-        leftLeg.position.set(-0.3, -1, 0);
-        leftLeg.castShadow = true;
-        characterGroup.add(leftLeg);
-        
-        const rightLeg = new THREE.Mesh(legGeometry, legMaterial);
-        rightLeg.position.set(0.3, -1, 0);
-        rightLeg.castShadow = true;
-        characterGroup.add(rightLeg);
-        
-        // Add to scene
-        this.scene.add(characterGroup);
-        this.player.model = characterGroup;
-        
-        // Store references for animation
-        this.player.head = head;
-        this.player.body = body;
-        this.player.leftArm = leftArm;
-        this.player.rightArm = rightArm;
-        this.player.leftLeg = leftLeg;
-        this.player.rightLeg = rightLeg;
-        
-        // Add weapon if it exists
-        if (this.player.weaponModel) {
-            this.player.model.add(this.player.weaponModel);
-        }
-    }
-    
-    
-    loadCharacterModel(filePath) {
-        const loader = new THREE.GLTFLoader();
-        loader.load(filePath, (gltf) => {
-            // Remove fallback character
-            if (this.player.model) {
-                this.scene.remove(this.player.model);
-            }
-            
-            // Add new character model
-            const character = gltf.scene;
-            character.scale.set(1, 1, 1);
-            character.position.copy(this.player.position);
-            character.castShadow = true;
-            character.receiveShadow = true;
-            
-            // Apply desert hero materials
-            character.traverse((child) => {
-                if (child.isMesh) {
-                    child.material = new THREE.MeshLambertMaterial({
-                        color: 0xd9a76a,
-                        emissive: 0x2a1808
-                    });
-                    child.castShadow = true;
-                    child.receiveShadow = true;
-                }
-            });
-            
-            
-            this.scene.add(character);
-            this.player.model = character;
-            // Align model forward; adjust at runtime with Y/U/F keys if needed
-            this.modelYawOffset = 0;
-            
-            // Add weapon if it exists
-            if (this.player.weaponModel) {
-                this.player.model.add(this.player.weaponModel);
-            }
-            
-            // Set up animation mixer if animations exist
-            if (gltf.animations && gltf.animations.length > 0) {
-                this.player.mixer = new THREE.AnimationMixer(character);
-                gltf.animations.forEach((clip) => {
-                    this.player.mixer.clipAction(clip).play();
-                });
-            }
-            
-        }, undefined, (error) => {
-            console.error('Error loading character model:', error);
-        });
-    }
-
     preloadZombieTemplate() {
+        // Roster of all enemy types. The original `zombieTemplate` field is kept
+        // for back-compat with anything that still reads it; new code reads
+        // `this.enemyTemplates[typeKey]` instead.
+        // sightRange = how far they can see in a straight line (walls block).
+        // alertMemory = seconds they keep chasing the *last seen* position
+        // after losing line-of-sight; when it expires they go back to idle
+        // wander. Tuned so hiding feels viable but not trivial.
+        // sightRange = how far they can see in a straight line (walls block).
+        // alertMemory = seconds they keep chasing the *last seen* position
+        // after losing LOS; when it expires they go back to idle wander.
+        // viewCone = full FOV in degrees. Outside the cone the enemy is blind
+        // — you can sneak past from behind. Wide for jumpy prey (chicks),
+        // narrow for slow brutes (zombies).
+        this.enemyTypes = {
+            zombie:  { path: 'Zombie.gltf',                          scale: 0.9, hp: [50, 150],  speed: [1.2, 2.0], damage: 10, color: 0x6aa84f,
+                       ai: 'chase',     sightRange: 14, alertMemory: 4.0, viewCone: 140,
+                       lunge: { cooldown: [4, 7], dur: 0.4, mult: 2.4 } },
+            demon:   { path: 'assets/Blocks/enemies/Demon.gltf',     scale: 1.1, hp: [90, 140],  speed: [1.0, 1.4], damage: 12, color: 0xc73a2a,
+                       ai: 'kite',      sightRange: 22, alertMemory: 3.5, viewCone: 200,
+                       kite: { ideal: 9, retreat: 6, approach: 12, strafePeriod: [1.0, 2.2] },
+                       ranged: { cooldown: 2.0, range: 14, projectileSpeed: 18, damage: 10, color: 0xff5522 } },
+            goblin:  { path: 'assets/Blocks/enemies/Goblin.gltf',    scale: 0.85, hp: [45, 90],  speed: [1.6, 2.4], damage: 8,  color: 0x4d8a3a,
+                       ai: 'hitAndRun', sightRange: 18, alertMemory: 3.0, viewCone: 220,
+                       backoffDur: 0.9, backoffMult: 1.6, zigzagAmp: 0.55, zigzagPeriod: 0.55 },
+            chick:   { path: 'assets/Blocks/Animals/Chick.gltf',     scale: 0.7, hp: [10, 18],   speed: [1.8, 2.6], damage: 3,  color: 0xffd84d,
+                       ai: 'skittish',  sightRange: 10, alertMemory: 2.0, viewCone: 320,
+                       fleeDist: 4.5 },
+            chicken: { path: 'assets/Blocks/Animals/Chicken.gltf',   scale: 0.8, hp: [18, 28],   speed: [1.4, 2.0], damage: 4,  color: 0xeeeeee,
+                       ai: 'skittish',  sightRange: 10, alertMemory: 2.0, viewCone: 320,
+                       fleeDist: 5.0 },
+        };
+        this.enemyTemplates = {};
+
         const loader = new THREE.GLTFLoader();
-        loader.load('Zombie.gltf', (gltf) => {
-            this.zombieTemplate = { scene: gltf.scene, animations: gltf.animations };
-            console.log('Zombie template loaded:', gltf.animations.map(a => a.name).join(', '));
-            // If enemies already spawned as sphere fallbacks, swap them for zombies
-            if (this.playMode && this.playMode.enemies.length > 0) {
-                this.respawnEnemies();
-            }
-        }, undefined, (error) => {
-            console.error('Error loading Zombie.gltf:', error);
-        });
+        const onAnyLoad = () => {
+            // Swap fallback spheres → real models once their template arrives.
+            if (this.playMode && this.playMode.enemies.length > 0) this.respawnEnemies();
+        };
+        for (const [key, cfg] of Object.entries(this.enemyTypes)) {
+            loader.load(cfg.path, (gltf) => {
+                this.enemyTemplates[key] = { scene: gltf.scene, animations: gltf.animations || [] };
+                if (key === 'zombie') this.zombieTemplate = this.enemyTemplates[key];
+                onAnyLoad();
+            }, undefined, (err) => {
+                console.error(`Error loading enemy template "${key}" from ${cfg.path}:`, err);
+            });
+        }
     }
 
     createEnvironment() {
@@ -2260,8 +3023,10 @@ class Game3D {
         // Arena assets (platforms + decor)
         this.loadPixelBlockTemplates();
         this.loadArenaDecorTemplates();
-        // Crystal "sky" — a tiled ceiling above the tallest walls
-        this.roofTileSize = 2;
+        // Crystal "sky" — a tiled ceiling above the tallest walls. Tile size is
+        // tuned so each block reads as a discrete glowing cube from the ground
+        // (smaller tiles dissolved into speckle at the 20u viewing distance).
+        this.roofTileSize = 4;
         this.roofSize = 200;
         this.roofY = 20; // bottom face of ceiling blocks
         this.loadCrystalRoof();
@@ -2278,8 +3043,7 @@ class Game3D {
         // Preload zombie model used for all enemies
         this.preloadZombieTemplate();
 
-        // Create labyrinth
-        this.createLabyrinth();
+        // Maze / play space is built when a mode starts (see ModeRegistry), not at boot.
 
         // Create skybox
         this.createSkybox();
@@ -2372,6 +3136,8 @@ class Game3D {
             ['grassBig',   'assets/Blocks/environment/Grass_Big.gltf'],
             ['mushroom',   'assets/Blocks/environment/Mushroom.gltf'],
             ['chest',      'assets/Blocks/environment/Chest_Closed.gltf'],
+            ['chestOpen',  'assets/Blocks/environment/Chest_Open.gltf'],
+            ['key',        'assets/Blocks/environment/Key.gltf'],
             ['crate',      'assets/Blocks/Block_Crate.gltf'],
             ['sheep',      'assets/Blocks/Animals/Sheep.gltf'],
             ['pig',        'assets/Blocks/Animals/Pig.gltf'],
@@ -2456,9 +3222,14 @@ class Game3D {
             geom.applyMatrix4(sourceMesh.matrixWorld);
             geom.computeBoundingBox();
             const srcMat = sourceMesh.material;
+            // Pink/magenta self-illumination so the roof reads as a glowing
+            // crystal cube from below (matches the create-mode block preview),
+            // not just dimly-lit speckle.
             const mat = new THREE.MeshLambertMaterial({
                 map: srcMat.map || null,
                 color: srcMat.color ? srcMat.color.clone() : new THREE.Color(0xffffff),
+                emissive: new THREE.Color(0xff66ff),
+                emissiveIntensity: 0.55,
                 side: srcMat.side
             });
             this.roofSourceGeometry = geom;
@@ -2485,6 +3256,14 @@ class Game3D {
         const bb = this.roofSourceGeometry.boundingBox;
         // Bottom face of block in world = center.y + bb.min.y * scale → place center so bottom sits at roofY
         const blockCenterY = this.roofY - bb.min.y * scale;
+
+        // Per-tile destructible state. Key = "x,z" (tile center coords);
+        // tracks the InstancedMesh slot, hp, and an `alive` flag used by the
+        // ceiling collision checks so projectiles can fly through broken gaps.
+        this.roofTiles = new Map();
+        this._roofTileHalf = tile / 2;
+        this._roofTileMaxHp = 4;
+
         let i = 0;
         for (let x = -half; x <= half; x += tile) {
             for (let z = -half; z <= half; z += tile) {
@@ -2492,13 +3271,119 @@ class Game3D {
                 dummy.scale.set(scale, scale, scale);
                 dummy.rotation.y = 0;
                 dummy.updateMatrix();
-                mesh.setMatrixAt(i++, dummy.matrix);
+                mesh.setMatrixAt(i, dummy.matrix);
+                this.roofTiles.set(`${x},${z}`, {
+                    idx: i, x, z, alive: true,
+                    hp: this._roofTileMaxHp, maxHp: this._roofTileMaxHp,
+                });
+                i++;
             }
         }
         mesh.count = i;
         mesh.instanceMatrix.needsUpdate = true;
         this.scene.add(mesh);
         this.crystalRoof = mesh;
+    }
+
+    // Locate the roof tile under world coords (x, z). Returns the tile record
+    // or null (off-grid / already destroyed).
+    _roofTileAt(x, z) {
+        if (!this.roofTiles || !this.roofTileSize) return null;
+        const t = this.roofTileSize;
+        const tx = Math.round(x / t) * t;
+        const tz = Math.round(z / t) * t;
+        const rec = this.roofTiles.get(`${tx},${tz}`);
+        return (rec && rec.alive) ? rec : null;
+    }
+
+    _damageRoofTile(tile, damage = 1) {
+        if (!tile || !tile.alive) return;
+        tile.hp -= damage;
+        const impactPos = new THREE.Vector3(tile.x, this.roofY - 0.1, tile.z);
+        if (tile.hp <= 0) {
+            tile.alive = false;
+            if (this.crystalRoof) {
+                const m = new THREE.Matrix4().makeScale(0, 0, 0);
+                this.crystalRoof.setMatrixAt(tile.idx, m);
+                this.crystalRoof.instanceMatrix.needsUpdate = true;
+            }
+            this.audio && this.audio.play && this.audio.play('crystalBreak');
+            this.spawnImpact(impactPos, 0xff66ff);
+            this._spawnCrystalShards(tile);
+            this._spawnRoofLightShaft(tile);
+            this._triggerHitShake && this._triggerHitShake(0.10, 0.12);
+            return;
+        }
+        this.audio && this.audio.play && this.audio.play('wallChip');
+        this.spawnImpact(impactPos, 0xffaaff);
+    }
+
+    // Pink crystal shards rain down from a broken roof tile and fade.
+    _spawnCrystalShards(tile) {
+        const color = 0xff66ff;
+        const sz = this.roofTileSize * 0.18;
+        for (let i = 0; i < 7; i++) {
+            const m = new THREE.Mesh(
+                new THREE.BoxGeometry(sz, sz, sz),
+                new THREE.MeshLambertMaterial({
+                    color, emissive: color, emissiveIntensity: 0.55,
+                    transparent: true, opacity: 1
+                })
+            );
+            m.position.set(
+                tile.x + (Math.random() - 0.5) * this.roofTileSize * 0.6,
+                this.roofY - 0.2,
+                tile.z + (Math.random() - 0.5) * this.roofTileSize * 0.6
+            );
+            const vx = (Math.random() - 0.5) * 2.2;
+            const vz = (Math.random() - 0.5) * 2.2;
+            let vy = -1.0 - Math.random() * 1.5;
+            this.scene.add(m);
+            const start = performance.now();
+            const dur = 1200;
+            const tick = () => {
+                const t = (performance.now() - start) / dur;
+                if (t >= 1) { this.scene.remove(m); m.geometry.dispose(); m.material.dispose(); return; }
+                const dt = 1 / 60;
+                m.position.x += vx * dt;
+                m.position.z += vz * dt;
+                vy -= 18 * dt;
+                m.position.y += vy * dt;
+                m.rotation.x += 0.25;
+                m.rotation.y += 0.18;
+                m.material.opacity = 1 - t;
+                if (m.position.y < 0.2) {
+                    m.position.y = 0.2;
+                    vy = 0;
+                }
+                requestAnimationFrame(tick);
+            };
+            requestAnimationFrame(tick);
+        }
+    }
+
+    // Thin downward beam of light through a freshly-opened roof hole.
+    // Fades in ~1.5s and then sticks at low intensity until next reset.
+    _spawnRoofLightShaft(tile) {
+        const r = this.roofTileSize * 0.45;
+        const h = this.roofY;
+        const geo = new THREE.CylinderGeometry(r, r * 1.4, h, 12, 1, true);
+        const mat = new THREE.MeshBasicMaterial({
+            color: 0xffe7ff, transparent: true, opacity: 0,
+            blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide
+        });
+        const beam = new THREE.Mesh(geo, mat);
+        beam.position.set(tile.x, h / 2, tile.z);
+        this.scene.add(beam);
+        const start = performance.now();
+        const dur = 1400;
+        const tick = () => {
+            const t = (performance.now() - start) / dur;
+            if (t >= 1) { mat.opacity = 0.18; return; }
+            mat.opacity = 0.45 * (1 - Math.abs(0.5 - t) * 2) + 0.18 * t;
+            requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
     }
 
     loadCheeseFloor() {
@@ -2599,110 +3484,15 @@ class Game3D {
     }
     
     initializeSavedMazes() {
-        // Pre-defined maze layouts
+        // Pre-defined maze layouts. We trimmed the old "Classic Small / Open
+        // Arena / Spiral / Labyrinth" entries — Wide Halls is the open
+        // playground; ASCII is the curated maze.
         this.savedMazes = [
             {
                 name: this.t('wideHalls'),
                 size: 100,
                 type: "generated",
                 description: this.t('wideHallsDesc')
-            },
-            {
-                name: this.t('classicSmall'),
-                size: 15,
-                type: "static",
-                layout: [
-                    "###############",
-                    "#.............#",
-                    "#.##.......##.#",
-                    "#.#.........#.#",
-                    "#.#.#######.#.#",
-                    "#.#.........#.#",
-                    "#.##.......##.#",
-                    "#.#.........#.#",
-                    "#.#.#######.#.#",
-                    "#.#.........#.#",
-                    "#.##.......##.#",
-                    "#.#.........#.#",
-                    "#.#.#######.#.#",
-                    "#.............#",
-                    "###############"
-                ],
-                description: this.t('classicSmallDesc')
-            },
-            {
-                name: this.t('openArena'),
-                size: 20,
-                type: "static",
-                layout: [
-                    "####################",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "#..................#",
-                    "####################"
-                ],
-                description: this.t('openArenaDesc')
-            },
-            {
-                name: this.t('spiral'),
-                size: 25,
-                type: "static",
-                layout: this.generateSpiralMaze(25),
-                description: this.t('spiralDesc')
-            },
-            {
-                name: this.t('labyrinth'),
-                size: 61,
-                type: "static",
-                layout: [
-                    "#############################################################",
-                    "#############################################################",
-                    "#############################################################",
-                    "##......................................##.......##........##",
-                    "##..######.########.##################..###..######.......###",
-                    "##..##################################..###.#######.##.##..##",
-                    "##..###..######....###.#..#####.....#....##.###.#...#####.###",
-                    "##..##.......##..........................##.##......#####.###",
-                    "##..#..####..##..##########################.###.....###....##",
-                    "##..#..#####.##..##########################..###.##.##.....##",
-                    "##..##....##.##..................................#####..#####",
-                    "##..##....##.##..................................#####.######",
-                    "##..####..##.#########################..###########....##.###",
-                    "##..####..##..########################..###########....##..##",
-                    "#...##....##....##........##.....................##.#####..##",
-                    "#...##...###....##........#.........##...........##..####..##",
-                    "#...##...###....##........#.........##...........##..####..##",
-                    "##..####..##..########################..###########....##..##",
-                    "##..####..##.#########################..###########....##.###",
-                    "##..##....##.##..................................#####.######",
-                    "##..##....##.##..................................#####..#####",
-                    "##..#..#####.##..##########################..###.##.##.....##",
-                    "##..#..####..##..##########################.###.....###....##",
-                    "##..##.......##..........................##.##......#####.###",
-                    "##..###..######....###.#..#####.....#....##.###.#...#####.###",
-                    "##..##################################..###.#######.##.##..##",
-                    "##..######.########.##################..###..######.......###",
-                    "##......................................##.......##........##",
-                    "#############################################################",
-                    "#############################################################",
-                    "#############################################################"
-                ],
-                description: this.t('labyrinthDesc')
             },
             {
                 name: this.t('asciiMaze'),
@@ -2712,75 +3502,40 @@ class Game3D {
             }
         ];
     }
-    
-    generateSpiralMaze(size) {
-        const maze = [];
-        for (let y = 0; y < size; y++) {
-            maze[y] = [];
-            for (let x = 0; x < size; x++) {
-                maze[y][x] = '#';
-            }
-        }
-        
-        // Create spiral pattern
-        let x = 1, y = 1;
-        let dx = 1, dy = 0;
-        let steps = 1;
-        
-        while (x < size-1 && y < size-1) {
-            for (let i = 0; i < steps; i++) {
-                if (x >= 0 && x < size && y >= 0 && y < size) {
-                    maze[y][x] = '.';
-                }
-                x += dx;
-                y += dy;
-            }
-            
-            // Turn right
-            [dx, dy] = [-dy, dx];
-            if (dx === 0) steps++;
-        }
-        
-        return maze;
-    }
-    
+
+
     initializeCreateMode() {
-        // Initialize empty custom maze
         this.createMode.customMaze = [];
         for (let y = 0; y < this.createMode.gridSize; y++) {
             this.createMode.customMaze[y] = [];
             for (let x = 0; x < this.createMode.gridSize; x++) {
-                this.createMode.customMaze[y][x] = '.'; // Empty space
+                this.createMode.customMaze[y][x] = '.';
             }
         }
-        
-        // Create grid highlighting system
         this.createGridHighlights();
     }
-    
+
     createGridHighlights() {
-        // Clear existing highlights
         this.createMode.highlightObjects.forEach(obj => {
             this.scene.remove(obj);
         });
         this.createMode.highlightObjects = [];
-        
+
         if (this.gameMode !== 'create') return;
-        
-        // Create-mode placement highlight (sand-yellow)
+
+        // Sand-yellow placement highlight
         const highlightMaterial = new THREE.MeshBasicMaterial({
             color: 0xffe8a0,
             transparent: true,
             opacity: 0.25,
             side: THREE.DoubleSide
         });
-        
-        // Create grid highlights
+
         const gridSize = this.createMode.gridSize;
         const cellSize = 2;
         const startX = -gridSize;
         const startZ = -gridSize;
-        
+
         for (let y = 0; y < gridSize; y++) {
             for (let x = 0; x < gridSize; x++) {
                 const highlight = new THREE.Mesh(
@@ -2793,8 +3548,8 @@ class Game3D {
                     startZ + y * cellSize
                 );
                 highlight.rotation.x = -Math.PI / 2;
-                highlight.visible = true; // Make highlights visible
-                highlight.userData = { gridX: x, gridZ: y }; // Store grid coordinates
+                highlight.visible = true;
+                highlight.userData = { gridX: x, gridZ: y };
                 this.scene.add(highlight);
                 this.createMode.highlightObjects.push(highlight);
             }
@@ -2826,15 +3581,10 @@ class Game3D {
         this.gameMode = mode;
 
         if (mode === 'create') {
-            // Clear maze walls and markers
             this.clearMaze();
-            // Fresh empty grid and highlights
             this.initializeCreateMode();
-            // Initialize preview system
             this.updateToolPreview();
-            // Ensure cursor is visible in create mode
             document.body.style.cursor = 'crosshair';
-            // Exit pointer lock if active
             if (document.pointerLockElement) {
                 document.exitPointerLock();
             }
@@ -2843,7 +3593,6 @@ class Game3D {
             this.player.position.set(spawn.x, 1, spawn.z);
             this.characterRotation = spawn.facingY;
         } else {
-            // Clear highlights and preview
             this.createMode.highlightObjects.forEach(obj => {
                 this.scene.remove(obj);
             });
@@ -2852,11 +3601,8 @@ class Game3D {
                 this.scene.remove(this.createMode.previewObject);
                 this.createMode.previewObject = null;
             }
-            // Restore normal cursor behavior
             document.body.style.cursor = 'default';
-            // Rebuild current maze
             this.createLabyrinth();
-            // Setup play mode camera/controls and enemies
             this.setupPlayMode();
         }
 
@@ -2895,39 +3641,36 @@ class Game3D {
     }
 
     clearMaze() {
-        // Remove all walls from scene
         this.walls.forEach(wall => {
             const mesh = wall.mesh ? wall.mesh : wall;
             this.scene.remove(mesh);
         });
         this.walls = [];
+        this.wallHash = new Map();
 
-        // Remove labyrinth markers if any
         if (this.labyrinthMarkers && this.labyrinthMarkers.length) {
             this.labyrinthMarkers.forEach(m => this.scene.remove(m));
             this.labyrinthMarkers = [];
         }
 
-        // No props cleanup needed
-
-        // Clear pickups
         if (this.pickups && this.pickups.length) {
             this.pickups.forEach(p => this.pickupsGroup.remove(p));
             this.pickups = [];
         }
+
+        // Crates + keys live alongside the maze — wipe them together.
+        if (this.clearCratesAndKeys) this.clearCratesAndKeys();
     }
-    
-    
+
+
     setupToolboxListeners() {
-        // Toolbox modal close
         const closeToolbox = document.querySelector('.close-toolbox');
         if (closeToolbox) {
             closeToolbox.addEventListener('click', () => {
                 this.toggleToolboxModal();
             });
         }
-        
-        // Close modal when clicking outside
+
         const toolboxModal = document.getElementById('toolbox-modal');
         if (toolboxModal) {
             toolboxModal.addEventListener('click', (e) => {
@@ -2936,36 +3679,31 @@ class Game3D {
                 }
             });
         }
-        
-        // Tool selection
+
         document.querySelectorAll('.tool-btn').forEach(btn => {
             btn.addEventListener('click', () => {
                 const tool = btn.dataset.tool;
                 this.setCreateTool(tool);
-                // Close modal immediately after tool selection
                 this.toggleToolboxModal();
             });
         });
     }
-    
+
     toggleToolboxModal() {
         const modal = document.getElementById('toolbox-modal');
         if (modal.style.display === 'block') {
             modal.style.display = 'none';
             this.modalOpen = false;
             document.body.classList.remove('modal-open');
-            // Restore create mode cursor
             if (this.gameMode === 'create') {
                 document.body.style.cursor = 'crosshair';
             }
         } else {
-            // Close any other open modals first
             this.closeAllModals();
-            
+
             modal.style.display = 'block';
             this.modalOpen = true;
             document.body.classList.add('modal-open');
-            // Ensure cursor is immediately active
             document.body.style.cursor = 'default';
             this.updateToolboxContent();
         }
@@ -3006,15 +3744,13 @@ class Game3D {
     }
     
     updateToolPreview() {
-        // Remove existing preview
         if (this.createMode.previewObject) {
             this.scene.remove(this.createMode.previewObject);
             this.createMode.previewObject = null;
         }
-        
+
         if (this.gameMode !== 'create') return;
-        
-        // Create preview object based on tool
+
         let previewGeometry, previewMaterial;
         
         switch(this.createMode.tool) {
@@ -3057,30 +3793,17 @@ class Game3D {
         }
         
         this.createMode.previewObject = new THREE.Mesh(previewGeometry, previewMaterial);
-        this.createMode.previewObject.visible = false; // Hidden by default
+        this.createMode.previewObject.visible = false;
         this.scene.add(this.createMode.previewObject);
     }
-    
+
     updateToolboxContent() {
-        // Update tool buttons
         document.querySelectorAll('.tool-btn').forEach(btn => {
             btn.classList.remove('active');
             if (btn.dataset.tool === this.createMode.tool) {
                 btn.classList.add('active');
             }
         });
-    }
-    
-    getGridPositionFromWorld(worldX, worldZ) {
-        const gridSize = this.createMode.gridSize;
-        const cellSize = 2;
-        const startX = -gridSize;
-        const startZ = -gridSize;
-        
-        const gridX = Math.floor((worldX - startX) / cellSize);
-        const gridZ = Math.floor((worldZ - startZ) / cellSize);
-        
-        return { x: gridX, z: gridZ };
     }
     
     getWorldPositionFromGrid(gridX, gridZ) {
@@ -3097,59 +3820,49 @@ class Game3D {
     
     handleCreateModeHover() {
         if (this.gameMode !== 'create' || !this.createMode.previewObject) return;
-        
-        // Create raycaster from camera
+
         const raycaster = new THREE.Raycaster();
         const mouse = new THREE.Vector2();
-        
-        // Get mouse position in normalized device coordinates
+
         const canvas = document.getElementById('gameCanvas');
         const rect = canvas.getBoundingClientRect();
         const x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
         const y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-        
+
         mouse.x = x;
         mouse.y = y;
-        
+
         raycaster.setFromCamera(mouse, this.camera);
-        
-        // Intersect with highlight objects to get exact grid position
+
         const intersects = raycaster.intersectObjects(this.createMode.highlightObjects);
-        
+
         if (intersects.length > 0) {
             const highlight = intersects[0].object;
             const { gridX, gridZ } = highlight.userData;
-            
-            // Check bounds
+
             if (gridX >= 0 && gridX < this.createMode.gridSize && gridZ >= 0 && gridZ < this.createMode.gridSize) {
-                // Show preview at this position (with tool-specific visibility rules)
                 const worldPos = this.getWorldPositionFromGrid(gridX, gridZ);
                 this.createMode.previewObject.position.set(worldPos.x, 2, worldPos.z);
                 if (this.createMode.tool === 'erase') {
-                    // Only show red erase preview if there's an existing wall
+                    // Suppress the red erase preview on empty cells
                     const hasWall = this.createMode.customMaze[gridZ][gridX] === '#';
                     this.createMode.previewObject.visible = hasWall;
                 } else {
                     this.createMode.previewObject.visible = true;
                 }
-                
-                // Handle continuous placement if mouse is down
+
                 if (this.createMode.isMouseDown) {
                     const currentGridPos = { x: gridX, z: gridZ };
                     const lastPos = this.createMode.lastGridPos;
-                    
+
                     if (this.createMode.isShiftHeld) {
-                        // Straight line mode
                         if (!this.createMode.startLinePos) {
-                            // First click - set start position
                             this.createMode.startLinePos = currentGridPos;
                             this.handleContinuousPlacement(gridX, gridZ);
                         } else {
-                            // Draw straight line from start to current position
                             this.drawStraightLine(this.createMode.startLinePos, currentGridPos);
                         }
                     } else {
-                        // Normal continuous placement
                         if (!lastPos || lastPos.x !== currentGridPos.x || lastPos.z !== currentGridPos.z) {
                             this.createMode.lastGridPos = currentGridPos;
                             this.handleContinuousPlacement(gridX, gridZ);
@@ -3163,9 +3876,8 @@ class Game3D {
             this.createMode.previewObject.visible = false;
         }
     }
-    
+
     handleContinuousPlacement(gridX, gridZ) {
-        // Only allow continuous placement for wall and erase tools
         if (this.createMode.tool === 'wall' || this.createMode.tool === 'erase') {
             switch(this.createMode.tool) {
                 case 'wall':
@@ -3177,12 +3889,10 @@ class Game3D {
             }
         }
     }
-    
+
     drawStraightLine(startPos, endPos) {
-        // Calculate line points using Bresenham's line algorithm
         const points = this.getLinePoints(startPos.x, startPos.z, endPos.x, endPos.z);
-        
-        // Place/erase at each point
+
         points.forEach(point => {
             if (point.x >= 0 && point.x < this.createMode.gridSize && 
                 point.z >= 0 && point.z < this.createMode.gridSize) {
@@ -3230,43 +3940,36 @@ class Game3D {
     
     handleCreateModeClick() {
         if (this.gameMode !== 'create') return;
-        
-        // Create raycaster from camera
+
         const raycaster = new THREE.Raycaster();
         const mouse = new THREE.Vector2();
-        
-        // Get mouse position in normalized device coordinates
+
         const canvas = document.getElementById('gameCanvas');
         const rect = canvas.getBoundingClientRect();
         const x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
         const y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-        
+
         mouse.x = x;
         mouse.y = y;
-        
+
         raycaster.setFromCamera(mouse, this.camera);
-        
-        // Intersect with highlight objects to get exact grid position
+
         const intersects = raycaster.intersectObjects(this.createMode.highlightObjects);
-        
+
         if (intersects.length > 0) {
             const highlight = intersects[0].object;
             const { gridX, gridZ } = highlight.userData;
-            
-            // Check bounds
+
             if (gridX >= 0 && gridX < this.createMode.gridSize && gridZ >= 0 && gridZ < this.createMode.gridSize) {
                 if (this.createMode.isShiftHeld) {
-                    // Straight line mode
+                    // Shift = straight-line drag; first click anchors, hover draws.
                     if (!this.createMode.startLinePos) {
-                        // First click - set start position
                         this.createMode.startLinePos = { x: gridX, z: gridZ };
                         this.handleContinuousPlacement(gridX, gridZ);
                     }
-                    // Line drawing is handled in hover function
                 } else {
-                    // Normal mode
                     this.createMode.lastGridPos = { x: gridX, z: gridZ };
-                    
+
                     switch(this.createMode.tool) {
                         case 'wall':
                             this.placeWall(gridX, gridZ);
@@ -3285,23 +3988,22 @@ class Game3D {
             }
         }
     }
-    
+
     placeWall(gridX, gridZ) {
-        if (this.createMode.customMaze[gridZ][gridX] === '#') return; // Already a wall
-        
+        if (this.createMode.customMaze[gridZ][gridX] === '#') return;
+
         this.createMode.customMaze[gridZ][gridX] = '#';
         this.createWallAtGrid(gridX, gridZ);
     }
-    
+
     eraseWall(gridX, gridZ) {
-        if (this.createMode.customMaze[gridZ][gridX] === '.') return; // Already empty
-        
+        if (this.createMode.customMaze[gridZ][gridX] === '.') return;
+
         this.createMode.customMaze[gridZ][gridX] = '.';
         this.removeWallAtGrid(gridX, gridZ);
     }
-    
+
     placeStartPoint(gridX, gridZ) {
-        // Remove existing start point
         for (let y = 0; y < this.createMode.gridSize; y++) {
             for (let x = 0; x < this.createMode.gridSize; x++) {
                 if (this.createMode.customMaze[y][x] === 'S') {
@@ -3309,7 +4011,7 @@ class Game3D {
                 }
             }
         }
-        
+
         this.createMode.customMaze[gridZ][gridX] = 'S';
         this.player.position.set(
             this.getWorldPositionFromGrid(gridX, gridZ).x,
@@ -3317,9 +4019,8 @@ class Game3D {
             this.getWorldPositionFromGrid(gridX, gridZ).z
         );
     }
-    
+
     placeEndPoint(gridX, gridZ) {
-        // Remove existing end point
         for (let y = 0; y < this.createMode.gridSize; y++) {
             for (let x = 0; x < this.createMode.gridSize; x++) {
                 if (this.createMode.customMaze[y][x] === 'E') {
@@ -3327,46 +4028,284 @@ class Game3D {
                 }
             }
         }
-        
+
         this.createMode.customMaze[gridZ][gridX] = 'E';
     }
     
     createWallAtGrid(gridX, gridZ) {
         const worldPos = this.getWorldPositionFromGrid(gridX, gridZ);
-        const t = this.themes.desert;
-        const wallMaterial = (this.materials && this.materials.wall) || new THREE.MeshLambertMaterial({
-            color: t.wall,
-            emissive: t.wallEmissive,
-            transparent: true,
-            opacity: 0.95
-        });
-        
-        const wall = this.createBrickWallMesh(2, 4, 2) || new THREE.Mesh(
-            new THREE.BoxGeometry(2, 4, 2),
-            wallMaterial
-        );
-        wall.position.set(worldPos.x, 2, worldPos.z);
-        this.scene.add(wall);
-        this.walls.push({
-            mesh: wall,
-            position: wall.position,
-            size: { x: 2, y: 4, z: 2 }
-        });
+        // Build the 2×4×2 wall as a stack of 1×1×1 destructible sub-blocks.
+        // Each sub-block has its own AABB + HP, so melee/projectile hits chip
+        // away one Minecraft-style cube at a time instead of removing the wall.
+        this._addDestructibleBlockColumn(worldPos.x, 0, worldPos.z, 2, 4, 2);
     }
-    
+
+    // ===== Spatial hash for walls =====
+    _wallCellsForBox(px, pz, sx, sz) {
+        const c = this._wallHashCell;
+        const minX = Math.floor((px - sx / 2) / c);
+        const maxX = Math.floor((px + sx / 2) / c);
+        const minZ = Math.floor((pz - sz / 2) / c);
+        const maxZ = Math.floor((pz + sz / 2) / c);
+        const out = [];
+        for (let cx = minX; cx <= maxX; cx++)
+            for (let cz = minZ; cz <= maxZ; cz++)
+                out.push(`${cx},${cz}`);
+        return out;
+    }
+
+    _addWallToHash(wall) {
+        if (!wall || !wall.size || !wall.position) return;
+        const keys = this._wallCellsForBox(wall.position.x, wall.position.z, wall.size.x, wall.size.z);
+        wall._hashKeys = keys;
+        for (const k of keys) {
+            let arr = this.wallHash.get(k);
+            if (!arr) { arr = []; this.wallHash.set(k, arr); }
+            arr.push(wall);
+        }
+    }
+
+    _removeWallFromHash(wall) {
+        if (!wall || !wall._hashKeys) return;
+        for (const k of wall._hashKeys) {
+            const arr = this.wallHash.get(k);
+            if (!arr) continue;
+            const i = arr.indexOf(wall);
+            if (i !== -1) arr.splice(i, 1);
+            if (arr.length === 0) this.wallHash.delete(k);
+        }
+        wall._hashKeys = null;
+    }
+
+    _rehashAllWalls() {
+        this.wallHash = new Map();
+        for (const w of this.walls) {
+            if (w._hashKeys) w._hashKeys = null;
+            this._addWallToHash(w);
+        }
+    }
+
+    // Iterate every wall whose bucket overlaps the XZ disc (cx, cz, radius).
+    // Callback may return false to short-circuit (e.g. first-hit found).
+    _iterWallsNear(cx, cz, radius, cb) {
+        const c = this._wallHashCell;
+        const minX = Math.floor((cx - radius) / c);
+        const maxX = Math.floor((cx + radius) / c);
+        const minZ = Math.floor((cz - radius) / c);
+        const maxZ = Math.floor((cz + radius) / c);
+        const seen = new Set();
+        for (let ix = minX; ix <= maxX; ix++) {
+            for (let iz = minZ; iz <= maxZ; iz++) {
+                const arr = this.wallHash.get(`${ix},${iz}`);
+                if (!arr) continue;
+                for (const w of arr) {
+                    if (seen.has(w)) continue;
+                    seen.add(w);
+                    if (cb(w) === false) return;
+                }
+            }
+        }
+    }
+
+    // Decompose a (sizeX × sizeY × sizeZ) brick column centered at (cx, cz)
+    // and sitting on top of baseY into 1×1×1 cubes. Each cube is its own
+    // wall entry. When opts.destructible is true (default) each brick has
+    // hp=1 so a single hit chips it off; when false they route through the
+    // merged-geometry path: one mesh per column, same brick look, ~64× fewer
+    // draw calls (critical for the ASCII maze).
+    _addDestructibleBlockColumn(cx, baseY, cz, sizeX, sizeY, sizeZ, opts) {
+        const destructible = !opts || opts.destructible !== false;
+        if (!destructible) {
+            return this._addMergedBrickColumn(cx, baseY, cz, sizeX, sizeY, sizeZ);
+        }
+        const nx = Math.max(1, Math.round(sizeX));
+        const ny = Math.max(1, Math.round(sizeY));
+        const nz = Math.max(1, Math.round(sizeZ));
+        const x0 = cx - nx / 2 + 0.5;
+        const z0 = cz - nz / 2 + 0.5;
+        const y0 = baseY + 0.5;
+        for (let iy = 0; iy < ny; iy++) {
+            for (let ix = 0; ix < nx; ix++) {
+                for (let iz = 0; iz < nz; iz++) {
+                    const mesh = this._createUnitBrickMesh();
+                    mesh.position.set(x0 + ix, y0 + iy, z0 + iz);
+                    this.scene.add(mesh);
+                    const entry = {
+                        mesh,
+                        position: mesh.position,
+                        size: { x: 1, y: 1, z: 1 },
+                        destructible: true,
+                        hp: 1, maxHp: 1,
+                    };
+                    this.walls.push(entry);
+                    this._addWallToHash(entry);
+                }
+            }
+        }
+    }
+
+    // Non-destructible wall column. Bakes N copies of the brick template
+    // geometry into one merged BufferGeometry at compile-time positions, so
+    // a 4×4×4 wall ships as a single Mesh instead of 64. Looks identical
+    // to the destructible version (same template, same material). Geometry
+    // is cached per column size — most ASCII walls share one buffer.
+    _addMergedBrickColumn(cx, baseY, cz, sizeX, sizeY, sizeZ) {
+        const tpl = this.bricksTemplate;
+        // Bricks GLTF not loaded yet — fall back to plain boxes; rebuildMaze
+        // fires once the template arrives and we'll re-stamp with the merge.
+        if (!tpl || !tpl.geometry) {
+            const mat = (this.materials && this.materials.wall) || new THREE.MeshLambertMaterial({ color: 0x8a6238 });
+            const mesh = new THREE.Mesh(new THREE.BoxGeometry(sizeX, sizeY, sizeZ), mat);
+            mesh.position.set(cx, baseY + sizeY / 2, cz);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            this.scene.add(mesh);
+            const entry = { mesh, position: mesh.position, size: { x: sizeX, y: sizeY, z: sizeZ }, destructible: false };
+            this.walls.push(entry);
+            this._addWallToHash(entry);
+            return;
+        }
+        const geo = this._getMergedBrickColumnGeometry(sizeX, sizeY, sizeZ);
+        const mesh = new THREE.Mesh(geo, tpl.material);
+        // Mesh sits with its origin at the column's CENTER on every axis so
+        // mesh.position can double as the collision AABB center. The merged
+        // geometry is built centered at origin to match.
+        mesh.position.set(cx, baseY + sizeY / 2, cz);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        this.scene.add(mesh);
+        const entry = {
+            mesh,
+            position: mesh.position,
+            size: { x: sizeX, y: sizeY, z: sizeZ },
+            destructible: false,
+        };
+        this.walls.push(entry);
+        this._addWallToHash(entry);
+    }
+
+    // Build (and cache) the merged BufferGeometry for a wall column of a
+    // given size, by repeating the brick template at nx×ny×nz positions
+    // and baking per-instance offsets directly into the position attribute.
+    _getMergedBrickColumnGeometry(sx, sy, sz) {
+        if (!this._mergedBrickCache) this._mergedBrickCache = {};
+        const key = `${sx}x${sy}x${sz}`;
+        if (this._mergedBrickCache[key]) return this._mergedBrickCache[key];
+
+        const tpl = this.bricksTemplate;
+        const src = tpl.geometry;
+        const bb = src.boundingBox;
+        const native = (bb && (bb.max.y - bb.min.y)) || 2;
+        const scale = 1 / native;
+
+        const nx = Math.max(1, Math.round(sx));
+        const ny = Math.max(1, Math.round(sy));
+        const nz = Math.max(1, Math.round(sz));
+        // Bake bricks centered around the geometry origin on all three axes
+        // so the mesh.position (placed at baseY + sizeY/2) lines up with the
+        // collision AABB center. Without the y centering the top half of
+        // the wall had no collision.
+        const x0 = -nx / 2 + 0.5;
+        const z0 = -nz / 2 + 0.5;
+        const y0 = -ny / 2 + 0.5;
+
+        const srcPos = src.attributes.position ? src.attributes.position.array : null;
+        const srcNorm = src.attributes.normal ? src.attributes.normal.array : null;
+        const srcUV = src.attributes.uv ? src.attributes.uv.array : null;
+        const srcIdx = src.index ? src.index.array : null;
+        if (!srcPos) return new THREE.BoxGeometry(sx, sy, sz);
+        const vertCount = srcPos.length / 3;
+        const totalInst = nx * ny * nz;
+
+        const mPos = new Float32Array(srcPos.length * totalInst);
+        const mNorm = srcNorm ? new Float32Array(srcNorm.length * totalInst) : null;
+        const mUV = srcUV ? new Float32Array(srcUV.length * totalInst) : null;
+        const mIdx = srcIdx ? new Uint32Array(srcIdx.length * totalInst) : null;
+
+        let inst = 0;
+        for (let iy = 0; iy < ny; iy++) {
+            for (let ix = 0; ix < nx; ix++) {
+                for (let iz = 0; iz < nz; iz++) {
+                    const dx = x0 + ix, dy = y0 + iy, dz = z0 + iz;
+                    const posBase = inst * srcPos.length;
+                    for (let v = 0; v < vertCount; v++) {
+                        mPos[posBase + v * 3 + 0] = srcPos[v * 3 + 0] * scale + dx;
+                        mPos[posBase + v * 3 + 1] = srcPos[v * 3 + 1] * scale + dy;
+                        mPos[posBase + v * 3 + 2] = srcPos[v * 3 + 2] * scale + dz;
+                        if (srcNorm) {
+                            mNorm[posBase + v * 3 + 0] = srcNorm[v * 3 + 0];
+                            mNorm[posBase + v * 3 + 1] = srcNorm[v * 3 + 1];
+                            mNorm[posBase + v * 3 + 2] = srcNorm[v * 3 + 2];
+                        }
+                    }
+                    if (srcUV) {
+                        const uvBase = inst * srcUV.length;
+                        for (let v = 0; v < vertCount; v++) {
+                            mUV[uvBase + v * 2 + 0] = srcUV[v * 2 + 0];
+                            mUV[uvBase + v * 2 + 1] = srcUV[v * 2 + 1];
+                        }
+                    }
+                    if (srcIdx) {
+                        const idxBase = inst * srcIdx.length;
+                        const vertOff = inst * vertCount;
+                        for (let i = 0; i < srcIdx.length; i++) {
+                            mIdx[idxBase + i] = srcIdx[i] + vertOff;
+                        }
+                    }
+                    inst++;
+                }
+            }
+        }
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(mPos, 3));
+        if (mNorm) geo.setAttribute('normal', new THREE.BufferAttribute(mNorm, 3));
+        if (mUV) geo.setAttribute('uv', new THREE.BufferAttribute(mUV, 2));
+        if (mIdx) geo.setIndex(new THREE.BufferAttribute(mIdx, 1));
+        geo.computeBoundingBox();
+        geo.computeBoundingSphere();
+        this._mergedBrickCache[key] = geo;
+        return geo;
+    }
+
+    // Single 1×1×1 brick mesh, using the loaded bricks GLTF when available so
+    // the visual matches the rest of the maze. Falls back to a flat-colored
+    // cube while the template is still loading.
+    _createUnitBrickMesh() {
+        if (this.bricksTemplate && this.bricksTemplate.geometry) {
+            const bb = this.bricksTemplate.geometry.boundingBox;
+            const native = (bb && (bb.max.y - bb.min.y)) || 2;
+            const m = new THREE.Mesh(this.bricksTemplate.geometry, this.bricksTemplate.material);
+            m.scale.setScalar(1 / native);
+            m.castShadow = true;
+            m.receiveShadow = true;
+            return m;
+        }
+        const t = (this.themes && this.themes.desert) || {};
+        const mat = (this.materials && this.materials.wall) || new THREE.MeshLambertMaterial({
+            color: t.wall || 0x8a6238,
+            emissive: t.wallEmissive || 0x140a04,
+        });
+        const m = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), mat);
+        m.castShadow = true;
+        m.receiveShadow = true;
+        return m;
+    }
+
     removeWallAtGrid(gridX, gridZ) {
         const worldPos = this.getWorldPositionFromGrid(gridX, gridZ);
-        
-        // Find and remove wall at this position
+        // Walls are now stacks of 1×1×1 sub-blocks; remove every sub-block
+        // whose center sits within the cell (±cellHalf on X/Z, any Y).
+        const cellHalf = 1; // 2-unit cells → ±1u from center
         for (let i = this.walls.length - 1; i >= 0; i--) {
             const w = this.walls[i];
             const mesh = w.mesh ? w.mesh : w;
             const pos = w.position ? w.position : mesh.position;
-            if (Math.abs(pos.x - worldPos.x) < 1 && 
-                Math.abs(pos.z - worldPos.z) < 1) {
+            if (Math.abs(pos.x - worldPos.x) <= cellHalf &&
+                Math.abs(pos.z - worldPos.z) <= cellHalf) {
                 this.scene.remove(mesh);
+                this._removeWallFromHash(w);
                 this.walls.splice(i, 1);
-                break;
             }
         }
     }
@@ -3395,65 +4334,63 @@ class Game3D {
             this.scene.remove(wall.mesh);
         });
         this.walls = [];
+        this.wallHash = new Map();
         
         // Create new maze
         this.createLabyrinth();
         // If this is the labyrinth map and start is known, spawn player there
         const cur = this.savedMazes[this.currentMazeIndex];
-        if (cur && (cur.type === 'labyrinth' || cur.name === 'Labyrinth' || cur.type === 'ascii') && this.levelStartWorld) {
-            this.player.position.set(this.levelStartWorld.x, 0, this.levelStartWorld.z);
-            // Face toward the maze interior (toward end)
-            if (this.levelEndWorld) {
-                const dx = this.levelEndWorld.x - this.levelStartWorld.x;
-                const dz = this.levelEndWorld.z - this.levelStartWorld.z;
-                this.characterRotation = Math.atan2(dx, dz);
+        if (cur && (cur.type === 'labyrinth' || cur.type === 'ascii') && this.levelStartWorld) {
+            if (this.activeModeId === 'campaign' && this._campaignSpawnAtStart) {
+                this._campaignSpawnAtStart();
+            } else {
+                this.player.position.set(this.levelStartWorld.x, 0, this.levelStartWorld.z);
+                if (this.levelEndWorld) {
+                    const dx = this.levelEndWorld.x - this.levelStartWorld.x;
+                    const dz = this.levelEndWorld.z - this.levelStartWorld.z;
+                    this.characterRotation = Math.atan2(dx, dz);
+                }
             }
         }
     }
     
     
     closeAllModals() {
-        // Close settings modal
         const settingsModal = document.getElementById('settings-modal');
         if (settingsModal) {
             settingsModal.style.display = 'none';
         }
-        
-        // Close toolbox modal
+
         const toolboxModal = document.getElementById('toolbox-modal');
         if (toolboxModal) {
             toolboxModal.style.display = 'none';
         }
-        
+
         this.modalOpen = false;
         document.body.classList.remove('modal-open');
-        
-        // Restore appropriate cursor based on game mode
+
         if (this.gameMode === 'create') {
             document.body.style.cursor = 'crosshair';
         } else {
             document.body.style.cursor = 'default';
         }
     }
-    
+
     toggleSettingsModal() {
         const modal = document.getElementById('settings-modal');
         if (modal.style.display === 'block') {
             modal.style.display = 'none';
             this.modalOpen = false;
-            // Remove cursor class and re-enable pointer lock
             document.body.classList.remove('modal-open');
-            // In play mode, re-acquire pointer lock for continuous mouse aim (desktop only).
+            // Re-acquire pointer lock for continuous mouse aim (desktop only).
             if (this.gameMode === 'play' && !this.isPointerLocked && !this.isTouchDevice) {
                 setTimeout(() => document.body.requestPointerLock(), 50);
             }
         } else {
-            // Close any other open modals first
             this.closeAllModals();
-            
+
             modal.style.display = 'block';
             this.modalOpen = true;
-            // Add cursor class and exit pointer lock
             document.body.classList.add('modal-open');
             if (document.pointerLockElement) {
                 document.exitPointerLock();
@@ -3461,36 +4398,31 @@ class Game3D {
             this.updateModalContent();
         }
     }
-    
+
     updateModalContent() {
-        // Update view buttons
         document.querySelectorAll('.view-btn').forEach(btn => {
             btn.classList.remove('active');
             if (btn.dataset.view === this.viewMode) {
                 btn.classList.add('active');
             }
         });
-        
-        // Update maze buttons
+
         document.querySelectorAll('.maze-btn').forEach(btn => {
             btn.classList.remove('active');
             if (parseInt(btn.dataset.maze) === this.currentMazeIndex) {
                 btn.classList.add('active');
             }
         });
-        
-        // Update maze description
+
         const mazeDesc = document.getElementById('maze-desc');
         if (mazeDesc) {
             mazeDesc.textContent = this.savedMazes[this.currentMazeIndex].description;
         }
-        // Reflect difficulty slider
         const diff = document.getElementById('maze-difficulty');
         const diffVal = document.getElementById('maze-difficulty-value');
         if (diff) diff.value = this.mazeDifficulty;
         if (diffVal) diffVal.textContent = String(this.mazeDifficulty);
-        
-        // Update language buttons
+
         document.querySelectorAll('.language-btn').forEach(btn => {
             btn.classList.remove('active');
             if (btn.dataset.language === this.language) {
@@ -3498,19 +4430,14 @@ class Game3D {
             }
         });
 
-        // Update character buttons
         document.querySelectorAll('.character-btn').forEach(btn => {
             btn.classList.toggle('active', btn.dataset.character === this.currentCharacterKey);
         });
-        
-        // Update modal text elements
+
         this.updateModalText();
-        
-        // Update game info - removed old UI elements
     }
-    
+
     updateModalText() {
-        // Update modal headers and labels
         const settingsTitle = document.getElementById('settings-title');
         if (settingsTitle) settingsTitle.textContent = this.t('settings');
         
@@ -3534,14 +4461,12 @@ class Game3D {
         if (gameInfoTitle) gameInfoTitle.textContent = this.t('gameInfo');
         
         
-        // Update view button labels
         document.querySelectorAll('.view-btn').forEach(btn => {
             const view = btn.dataset.view;
             if (view === 'iso') btn.textContent = 'Isometrisk';
             if (view === 'fpv') btn.textContent = 'Første Person';
         });
-        
-        // Update mode button labels
+
         document.querySelectorAll('.mode-btn').forEach(btn => {
             const mode = btn.dataset.mode;
             if (mode === 'play') btn.textContent = this.t('playMode');
@@ -3552,15 +4477,13 @@ class Game3D {
     
     
     setupModalListeners() {
-        // Close modal when clicking X
         const closeBtn = document.querySelector('.close');
         if (closeBtn) {
             closeBtn.addEventListener('click', () => {
                 this.toggleSettingsModal();
             });
         }
-        
-        // Close modal when clicking outside
+
         const modal = document.getElementById('settings-modal');
         if (modal) {
             modal.addEventListener('click', (e) => {
@@ -3569,16 +4492,14 @@ class Game3D {
                 }
             });
         }
-        
-        // Close modal with Escape key
+
         document.addEventListener('keydown', (event) => {
             if (event.code === 'Escape' && this.modalOpen) {
                 this.toggleSettingsModal();
             }
         });
-        
 
-        // View mode buttons
+
         document.querySelectorAll('.view-btn').forEach(btn => {
             btn.addEventListener('click', () => {
                 const view = btn.dataset.view;
@@ -3586,8 +4507,7 @@ class Game3D {
                 this.toggleSettingsModal();
             });
         });
-        
-        // Language buttons
+
         document.querySelectorAll('.language-btn').forEach(btn => {
             btn.addEventListener('click', () => {
                 const language = btn.dataset.language;
@@ -3595,17 +4515,25 @@ class Game3D {
                 this.toggleSettingsModal();
             });
         });
-        
-        // Maze selection buttons
-        document.querySelectorAll('.maze-btn').forEach(btn => {
-            btn.addEventListener('click', () => {
-                const mazeIndex = parseInt(btn.dataset.maze);
-                this.switchMaze(mazeIndex);
-                this.toggleSettingsModal(); // Close modal immediately
-            });
-        });
 
-        // Difficulty slider wiring
+        // Maze buttons are rendered dynamically from savedMazes — wire a
+        // single delegated click handler on the container so new buttons
+        // pick up the behavior without needing to re-bind on each render.
+        const mazeContainer = document.getElementById('maze-buttons');
+        if (mazeContainer && !mazeContainer._delegated) {
+            mazeContainer.addEventListener('click', (e) => {
+                const btn = e.target.closest('.maze-btn');
+                if (!btn || !mazeContainer.contains(btn)) return;
+                const mazeIndex = parseInt(btn.dataset.maze);
+                if (Number.isFinite(mazeIndex)) {
+                    this.switchMaze(mazeIndex);
+                    this.toggleSettingsModal();
+                }
+            });
+            mazeContainer._delegated = true;
+        }
+        this.renderMazeButtons();
+
         const diff = document.getElementById('maze-difficulty');
         const diffVal = document.getElementById('maze-difficulty-value');
         if (diff) {
@@ -3624,7 +4552,6 @@ class Game3D {
             });
         }
 
-        // Audio settings wiring
         const aEnabled = document.getElementById('audio-enabled');
         const aVol = document.getElementById('audio-volume');
         const aVolVal = document.getElementById('audio-volume-value');
@@ -3646,16 +4573,14 @@ class Game3D {
         }
 
 
-        // Game mode buttons
         document.querySelectorAll('.mode-btn').forEach(btn => {
             btn.addEventListener('click', () => {
                 const mode = btn.dataset.mode;
                 this.setGameMode(mode);
-                this.toggleSettingsModal(); // Close modal immediately
+                this.toggleSettingsModal();
             });
         });
 
-        // Character selection buttons
         document.querySelectorAll('.character-btn').forEach(btn => {
             btn.addEventListener('click', () => {
                 const key = btn.dataset.character;
@@ -3670,66 +4595,58 @@ class Game3D {
     generateMaze(width, height) {
         // Create a maze using recursive backtracking algorithm with wide halls
         const maze = [];
-        
-        // Initialize maze with all walls
+
         for (let y = 0; y < height; y++) {
             maze[y] = [];
             for (let x = 0; x < width; x++) {
                 maze[y][x] = '#';
             }
         }
-        
-        // Carve out paths starting from (3,3) - accounting for wider halls
+
+        // Carve from (3,3) — first interior cell that respects 5-wide halls.
         this.carvePath(maze, 3, 3, width, height);
-        
-        // Ensure entrance and exit are open with wide openings
+
+        // Wide entrance/exit gaps
         for (let i = 0; i < 5; i++) {
             if (maze[3 + i]) {
-                maze[3 + i][0] = '.'; // Wide entrance
+                maze[3 + i][0] = '.';
             }
             if (maze[height-4 + i]) {
-                maze[height-4 + i][width-1] = '.'; // Wide exit
+                maze[height-4 + i][width-1] = '.';
             }
         }
-        
+
         return maze;
     }
-    
+
     carvePath(maze, x, y, width, height) {
-        // Carve a 5x5 area around the current position
         this.carveArea(maze, x, y, 5, 5);
-        
-        // Define directions (up, down, left, right) with 6-unit spacing for wide halls
+
+        // 6-unit jumps so wide-hall carving leaves a 3-cell-wide corridor between rooms
         const directions = [
-            [0, -6], // up
-            [0, 6],  // down
-            [-6, 0], // left
-            [6, 0]   // right
+            [0, -6],
+            [0, 6],
+            [-6, 0],
+            [6, 0]
         ];
-        
-        // Shuffle directions for randomness
+
         for (let i = directions.length - 1; i > 0; i--) {
             const j = Math.floor(Math.random() * (i + 1));
             [directions[i], directions[j]] = [directions[j], directions[i]];
         }
-        
-        // Try each direction
+
         for (const [dx, dy] of directions) {
             const nx = x + dx;
             const ny = y + dy;
-            
-            // Check if the new position is valid and unvisited
+
             if (nx > 2 && nx < width - 3 && ny > 2 && ny < height - 3 && maze[ny][nx] === '#') {
-                // Carve the wall between current and new position (3-unit wide corridor)
                 this.carveArea(maze, x + dx/2, y + dy/2, 3, 3);
-                // Recursively carve from the new position
                 this.carvePath(maze, nx, ny, width, height);
             }
         }
     }
-    
+
     carveArea(maze, startX, startY, width, height) {
-        // Carve out a rectangular area
         for (let y = startY - Math.floor(height/2); y < startY + Math.ceil(height/2); y++) {
             for (let x = startX - Math.floor(width/2); x < startX + Math.ceil(width/2); x++) {
                 if (x >= 0 && x < maze[0].length && y >= 0 && y < maze.length && maze[y]) {
@@ -3783,16 +4700,21 @@ class Game3D {
             startZ = -((rows - 1) * cellSize) / 2;
             this.updateGroundAndFog((cols - 1) * cellSize, (rows - 1) * cellSize);
         } else if (currentMaze.type === "ascii") {
-            // Generate perfect ASCII maze based on difficulty
+            // Generate perfect ASCII maze based on difficulty.
+            // cellSize=4 doubles corridor width (and wall thickness) vs the
+            // previous tight 2-unit grid. wallHeight stays at 4 so brick
+            // count per cell goes 16 → 64. Still cheaper than Wide Halls
+            // overall because there are fewer wall cells in the smaller
+            // ASCII grid (33×33 at diff 5 vs 100×100).
             maze = this.generateAsciiPerfectMazeByDifficulty(this.mazeDifficulty || 5);
-            cellSize = 3;
-            wallHeight = 8;
+            cellSize = 4;
+            wallHeight = 4;
             const cols = maze[0].length;
             const rows = maze.length;
             startX = -((cols - 1) * cellSize) / 2;
             startZ = -((rows - 1) * cellSize) / 2;
             this.updateGroundAndFog((cols - 1) * cellSize, (rows - 1) * cellSize);
-            
+
             // Store maze info for enemy spawning
             this.lastMazeInfo = { maze, startX, startZ, cellSize };
         } else if (currentMaze.type === "generated") {
@@ -3810,7 +4732,7 @@ class Game3D {
             // Use static layout
             maze = currentMaze.layout;
             cellSize = 3;
-            wallHeight = (currentMaze.name === 'Labyrinth') ? 8 : 4;
+            wallHeight = 4;
             const cols = maze[0].length;
             const rows = maze.length;
             startX = -((cols - 1) * cellSize) / 2;
@@ -3818,7 +4740,10 @@ class Game3D {
             this.updateGroundAndFog((cols - 1) * cellSize, (rows - 1) * cellSize);
         }
         
-        // Create walls based on layout
+        // Create walls based on layout. Both maze types use the same brick
+        // decomposition for a consistent visual; ASCII bricks are flagged
+        // non-destructible so wall hits no-op there.
+        const isAscii = currentMaze.type === 'ascii';
         for (let row = 0; row < maze.length; row++) {
             for (let col = 0; col < maze[row].length; col++) {
                 const tile = maze[row][col];
@@ -3828,27 +4753,17 @@ class Game3D {
                     if (currentMaze.type === 'generated' && !isBorder) {
                         if (Math.random() > this.wallDensity) continue; // skip most interior walls
                     }
-                     // Vary wall height for visual interest
-                    const h = (currentMaze.type === 'labyrinth') ? wallHeight : (wallHeight * THREE.MathUtils.lerp(0.7, 1.6, Math.random()));
-                    const wall = this.createBrickWallMesh(cellSize, h, cellSize) || (() => {
-                        const m = new THREE.Mesh(new THREE.BoxGeometry(cellSize, h, cellSize), wallMaterial);
-                        m.castShadow = true;
-                        m.receiveShadow = true;
-                        return m;
-                    })();
-                    wall.position.set(
-                        startX + col * cellSize,
-                        h / 2,
-                        startZ + row * cellSize
-                    );
-                    this.scene.add(wall);
-                    
-                    // Store wall for collision detection
-                    this.walls.push({
-                        mesh: wall,
-                        position: wall.position,
-                        size: { x: cellSize, y: h, z: cellSize }
-                    });
+                    // Clean fixed height for ASCII/labyrinth, varied for brick
+                    // mazes. Rounded so brick decomposition lines up.
+                    let h;
+                    if (isAscii || currentMaze.type === 'labyrinth') {
+                        h = wallHeight;
+                    } else {
+                        h = Math.max(1, Math.round(wallHeight * THREE.MathUtils.lerp(0.7, 1.6, Math.random())));
+                    }
+                    const cx = startX + col * cellSize;
+                    const cz = startZ + row * cellSize;
+                    this._addDestructibleBlockColumn(cx, 0, cz, cellSize, h, cellSize, { destructible: !isAscii });
                 }
             }
         }
@@ -3881,21 +4796,16 @@ class Game3D {
         const { startX, startZ, cellSize } = info;
         const rows = maze.length;
         const cols = maze[0].length;
-        // Find entrance near left side and exit near right side (handling solid borders)
-        let entRow = Math.floor(rows / 2), entCol = 1;
-        let exitRow = Math.floor(rows / 2), exitCol = cols - 2;
-        // Scan a band from the edge inward to locate the closest open cell
+        // Match generateAsciiPerfectMaze: entrance on west edge col 0, exit on east col cols-1
+        let entRow = Math.floor(rows / 2);
+        let entCol = 0;
+        let exitRow = Math.floor(rows / 2);
+        let exitCol = cols - 1;
         for (let r = 1; r < rows - 1; r++) {
-            for (let c = 0; c < Math.min(10, cols); c++) {
-                if (maze[r][c] === '.') { entRow = r; entCol = Math.max(1, c); break; }
-            }
-            if (entCol !== 1 || maze[entRow][1] === '.') break;
+            if (maze[r][0] === '.') { entRow = r; entCol = 0; break; }
         }
-        for (let r = rows - 2; r >= 1; r--) {
-            for (let c = cols - 1; c >= Math.max(cols - 10, 0); c--) {
-                if (maze[r][c] === '.') { exitRow = r; exitCol = Math.min(cols - 2, c); break; }
-            }
-            if (exitCol !== cols - 2 || maze[exitRow][cols - 2] === '.') break;
+        for (let r = 1; r < rows - 1; r++) {
+            if (maze[r][cols - 1] === '.') { exitRow = r; exitCol = cols - 1; break; }
         }
         // Create markers slightly above ground at cell centers
         const entranceGeometry = new THREE.ConeGeometry(0.5, 2, 8);
@@ -3977,47 +4887,6 @@ class Game3D {
     // Build a static ASCII labyrinth with wide corridors and small loops.
     // baseSize: odd number (e.g., 61); passageScale: width of corridors in cells (e.g., 5)
     // braidFactor: 0..1 chance to open a wall between parallel passages to create loops
-    generateWideImperfectLabyrinth(baseSize = 61, passageScale = 1, braidFactor = 0.12) {
-        const { grid } = this.generatePerfectLabyrinth(baseSize); // '.' and '#'
-        const H = grid.length, W = grid[0].length;
-        // Upscale: '.' -> passageScale x passageScale block; '#' stays 1x1 to keep walls 1 cell thick
-        const out = [];
-        for (let y = 0; y < H; y++) {
-            const row = grid[y];
-            const expandedRow = [];
-            for (let x = 0; x < W; x++) {
-                if (row[x] === '.') {
-                    for (let k = 0; k < passageScale; k++) expandedRow.push('.');
-                } else {
-                    expandedRow.push('#');
-                }
-            }
-            const vrep = row.some(c => c === '.') ? passageScale : 1;
-            for (let r = 0; r < vrep; r++) out.push(expandedRow.slice());
-        }
-        const H2 = out.length, W2 = out[0].length;
-        // Outer border walls
-        for (let x = 0; x < W2; x++) { out[0][x] = '#'; out[H2-1][x] = '#'; }
-        for (let y = 0; y < H2; y++) { out[y][0] = '#'; out[y][W2-1] = '#'; }
-        // Punch some internal walls to add loops
-        for (let y = 1; y < H2 - 1; y++) {
-            for (let x = 1; x < W2 - 1; x++) {
-                if (out[y][x] !== '#') continue;
-                const left = out[y][x-1] === '.'; const right = out[y][x+1] === '.';
-                const up = out[y-1][x] === '.'; const down = out[y+1][x] === '.';
-                const separatesHoriz = left && right && !(up || down);
-                const separatesVert = up && down && !(left || right);
-                if ((separatesHoriz || separatesVert) && Math.random() < braidFactor) out[y][x] = '.';
-            }
-        }
-        // Entrance on left, exit on right
-        let entY = Math.floor(H2/2), extY = Math.floor(H2/2);
-        for (let y = 1; y < H2 - 1; y++) if (out[y][1] === '.') { entY = y; break; }
-        for (let y = H2 - 2; y >= 1; y--) if (out[y][W2-2] === '.') { extY = y; break; }
-        out[entY][0] = '.'; out[extY][W2-1] = '.';
-        return out.map(r => r.join(''));
-    }
-
     // ===== ASCII perfect maze (strings) with difficulty =====
     generateAsciiPerfectMaze(width, height) {
         let w = (width % 2 === 0) ? width - 1 : width;
@@ -4065,67 +4934,50 @@ class Game3D {
     }
 
     // ===== Static Labyrinth Editing Helpers =====
-    findMazeIndexByName(name) {
-        return this.savedMazes.findIndex(m => m.name === name);
-    }
-
-    exportCurrentMazeASCII() {
-        if (!this.lastMazeInfo || !this.lastMazeInfo.maze) {
-            console.warn('No maze built yet');
-            return '';
-        }
-        const lines = this.lastMazeInfo.maze.map(row => Array.isArray(row) ? row.join('') : row);
-        const text = lines.join('\n');
-        try { console.log(text); } catch(_) {}
-        return text;
-    }
-
-    setLabyrinthLayout(layoutLines) {
-        // Accept array of strings or single text
-        const lines = Array.isArray(layoutLines) ? layoutLines : String(layoutLines).trim().split(/\r?\n/);
-        const idx = this.findMazeIndexByName('Labyrinth');
-        if (idx === -1) { console.error('Labyrinth entry not found'); return; }
-        // Validate rectangular
-        const w = lines[0].length;
-        if (!lines.every(l => l.length === w)) {
-            console.error('Layout rows must be equal length'); return;
-        }
-        this.savedMazes[idx] = {
-            name: 'Labyrinth',
-            size: lines.length,
-            type: 'static',
-            layout: lines,
-            description: `Static labyrinth ${lines.length}x${w}`
-        };
-        // Switch to it and rebuild
-        this.currentMazeIndex = idx;
-        this.rebuildMaze();
-    }
-
-
     // --- Play Mode (Diablo-style) helpers ---
     setupPlayMode() {
-        // Use pointer lock aiming; cursor hidden in play mode
         if (!document.pointerLockElement) {
-            // Will be acquired on first click (user gesture)
+            // Lock acquired on first click; hide cursor in the meantime.
             document.body.style.cursor = 'none';
         }
-        // Clear existing click target
         this.playMode.clickTarget = null;
-        // (Re)spawn targets
         this.respawnEnemies();
-        
-        // Reset enemy spawn timer for continuous spawning
         this.enemySpawnTimer = 0;
     }
 
+    // Attempt to place an enemy at (x, z), then verify with the enemy's
+    // ACTUAL post-scale hitRadius (not the fixed broad-phase 0.9 used by
+    // isPositionFree). If the spawn position clips a wall, snap back to the
+    // owning cell's center and re-check. Returns the enemy or null on fail.
+    _tryPlaceEnemy(x, z, cellCenter = null) {
+        const m = this.createEnemyAt(x, z);
+        const ud = m.userData;
+        const r = ud.hitRadius || 0.6;
+        const h = ud.collisionHeight || ud.hitHeight || 1.8;
+        _scratchV3a.set(x, 0, z);
+        if (this.pointHitsWall(_scratchV3a, r, h)) {
+            // Step 1: try snapping to the owning cell's center.
+            if (cellCenter) {
+                _scratchV3a.set(cellCenter.x, 0, cellCenter.z);
+                if (!this.pointHitsWall(_scratchV3a, r, h)) {
+                    m.position.x = cellCenter.x;
+                    m.position.z = cellCenter.z;
+                    return m;
+                }
+            }
+            // Step 2: cell center is also blocked (large enemy in narrow
+            // corridor). Reject — caller will try another cell.
+            return null;
+        }
+        return m;
+    }
+
     spawnTestEnemies(count = this.enemyCount) {
-        // Don't spawn if we're at max capacity
         if (this.playMode.enemies.length >= this.maxEnemies) {
             return;
         }
-        
-        // Prefer spawning on open maze cells for reliability
+
+        // Prefer placing on open maze cells; falls through to random sampling.
         let placed = 0;
         if (this.lastMazeInfo && this.lastMazeInfo.maze) {
             const { maze, startX, startZ, cellSize } = this.lastMazeInfo;
@@ -4136,30 +4988,33 @@ class Game3D {
                     if (maze[r][c] === '.') openCells.push({ r, c });
                 }
             }
-            // Shuffle cells for randomness
             for (let i = openCells.length - 1; i > 0; i--) {
                 const j = Math.floor(Math.random() * (i + 1));
                 [openCells[i], openCells[j]] = [openCells[j], openCells[i]];
             }
             let idx = 0;
             const maxToPlace = Math.min(count, this.maxEnemies - this.playMode.enemies.length);
+            // Tighter jitter (±25% of cell instead of ±30%) keeps enemies
+            // well clear of adjacent wall blocks even for the largest hit
+            // radii (~0.9 for demons after global ENEMY_SIZE_MULT).
+            const jitterRange = cellSize * 0.5;
             while (placed < maxToPlace && idx < openCells.length) {
                 const { r, c } = openCells[idx++];
                 const baseX = startX + c * cellSize;
                 const baseZ = startZ + r * cellSize;
-                const jitterX = (Math.random() - 0.5) * (cellSize * 0.6);
-                const jitterZ = (Math.random() - 0.5) * (cellSize * 0.6);
+                const jitterX = (Math.random() - 0.5) * jitterRange;
+                const jitterZ = (Math.random() - 0.5) * jitterRange;
                 const x = baseX + jitterX;
                 const z = baseZ + jitterZ;
-                if (this.isPositionFree(x, z, 0.9) && this.player.position.distanceTo(new THREE.Vector3(x,0,z)) > 5) {
-                    const m = this.createEnemyAt(x, z);
-                    this.playMode.enemiesGroup.add(m);
-                    this.playMode.enemies.push(m);
-                    placed++;
-                }
+                if (!this.isPositionFree(x, z, 0.9)) continue;
+                if (this.player.position.distanceTo(new THREE.Vector3(x, 0, z)) <= 5) continue;
+                const m = this._tryPlaceEnemy(x, z, { x: baseX, z: baseZ });
+                if (!m) continue;
+                this.playMode.enemiesGroup.add(m);
+                this.playMode.enemies.push(m);
+                placed++;
             }
         }
-        // If not enough placed (e.g., no maze info), fallback to random world sampling
         if (placed < count) {
             const bounds = this.getMazeBounds();
             let attempts = 0;
@@ -4168,47 +5023,93 @@ class Game3D {
                 attempts++;
                 const x = THREE.MathUtils.lerp(bounds.minX + 2, bounds.maxX - 2, Math.random());
                 const z = THREE.MathUtils.lerp(bounds.minZ + 2, bounds.maxZ - 2, Math.random());
-                if (this.isPositionFree(x, z, 0.9) && this.player.position.distanceTo(new THREE.Vector3(x,0,z)) > 5) {
-                    const m = this.createEnemyAt(x, z);
-                    this.playMode.enemiesGroup.add(m);
-                    this.playMode.enemies.push(m);
-                }
+                if (!this.isPositionFree(x, z, 0.9)) continue;
+                if (this.player.position.distanceTo(new THREE.Vector3(x, 0, z)) <= 5) continue;
+                const m = this._tryPlaceEnemy(x, z, null);
+                if (!m) continue;
+                this.playMode.enemiesGroup.add(m);
+                this.playMode.enemies.push(m);
             }
         }
     }
 
-    createEnemyAt(x, z) {
-        const bodyColor = 0x6aa84f; // zombie green — used by death-fragment particles
+    createEnemyAt(x, z, typeKey = null) {
+        // Pick an enemy type. If no template for that type has loaded yet, we
+        // still set the metadata + spawn a fallback sphere; respawnEnemies()
+        // re-creates the enemy with the real mesh once the GLTF arrives.
+        if (!typeKey) {
+            const keys = Object.keys(this.enemyTypes || { zombie: null });
+            typeKey = keys[Math.floor(Math.random() * keys.length)];
+        }
+        const cfg = (this.enemyTypes && this.enemyTypes[typeKey]) || { scale: 0.9, hp: [50, 150], speed: [1.2, 2.0], damage: 10, color: 0x6aa84f };
+        const bodyColor = cfg.color;
         const m = new THREE.Group();
         m.position.set(x, 0, z);
 
-        if (this.zombieTemplate && THREE.SkeletonUtils) {
-            const clone = THREE.SkeletonUtils.clone(this.zombieTemplate.scene);
-            clone.scale.set(0.9, 0.9, 0.9);
+        const template = this.enemyTemplates && this.enemyTemplates[typeKey];
+        if (template && THREE.SkeletonUtils) {
+            const clone = THREE.SkeletonUtils.clone(template.scene);
+            // Global 10% downscale on top of each type's authored scale —
+            // keeps relative proportions (chick still tiny vs giant demon)
+            // but pulls everyone in tighter for maze corridor readability.
+            const enemyScale = cfg.scale * (this.ENEMY_SIZE_MULT || 0.9);
+            clone.scale.set(enemyScale, enemyScale, enemyScale);
             clone.traverse((child) => {
                 if (child.isMesh) {
                     child.castShadow = true;
                     child.receiveShadow = true;
+                    // SkeletonUtils.clone shares Material instances across
+                    // every enemy of this type — so flashEnemy/_tintEnemy
+                    // mutating .color would whiten every other giant on the
+                    // map. Clone the material(s) per-instance so each enemy
+                    // owns its own. Handles both single-material meshes and
+                    // multi-material arrays.
+                    if (Array.isArray(child.material)) {
+                        child.material = child.material.map(m => m.clone());
+                    } else if (child.material) {
+                        child.material = child.material.clone();
+                    }
                 }
             });
             m.add(clone);
             clone.updateMatrixWorld(true);
 
-            // Derive hit box from the actual scaled model so it adapts to whatever size we pick
             const bbox = new THREE.Box3().setFromObject(clone);
             const size = bbox.getSize(new THREE.Vector3());
             m.userData.hitHeight = size.y;
             m.userData.hitRadius = Math.max(size.x, size.z) * 0.5 + 0.1;
+            m.userData.collisionHeight = size.y;
             m.userData.hpBarY = size.y + 0.4;
 
-            const mixer = new THREE.AnimationMixer(clone);
-            const anims = this.zombieTemplate.animations;
-            const walk = anims.find(c => /walk/i.test(c.name)) || anims[0];
-            if (walk) mixer.clipAction(walk).play();
-            m.userData.zombieClone = clone;
-            m.userData.mixer = mixer;
+            if (template.animations && template.animations.length) {
+                const mixer = new THREE.AnimationMixer(clone);
+                const anims = template.animations;
+                const pick = (re) => anims.find(c => re.test(c.name));
+                const walkClip = pick(/walk|run/i) || pick(/move/i) || anims[0];
+                const idleClip = pick(/^idle$/i) || pick(/idle/i);
+                let walkAction = null;
+                let idleAction = null;
+                if (walkClip) {
+                    walkAction = mixer.clipAction(walkClip);
+                    walkAction.setLoop(THREE.LoopRepeat, Infinity);
+                    if (cfg.animScale) walkAction.timeScale = cfg.animScale;
+                    walkAction.play();
+                }
+                if (idleClip && idleClip !== walkClip) {
+                    idleAction = mixer.clipAction(idleClip);
+                    idleAction.setLoop(THREE.LoopRepeat, Infinity);
+                    idleAction.setEffectiveWeight(0);
+                    idleAction.play();
+                }
+                m.userData.mixer = mixer;
+                m.userData.walkAction = walkAction;
+                m.userData.idleAction = idleAction;
+                m.userData.animBlend = 0;
+                m.userData.animScaleBase = cfg.animScale || 1;
+            }
+            m.userData.boneLock = this._cacheEnemyRootBones(clone);
+            m.userData.zombieClone = clone; // legacy name kept for back-compat with old callers
         } else {
-            // Fallback sphere if zombie template hasn't finished loading yet
             const fallback = new THREE.Mesh(
                 new THREE.SphereGeometry(0.5, 12, 12),
                 new THREE.MeshLambertMaterial({ color: bodyColor, emissive: 0x081808 })
@@ -4221,19 +5122,58 @@ class Game3D {
             m.userData.hpBarY = 1.4;
         }
 
-        const maxHp = Math.round(50 + Math.random() * 100); // 50–150
+        const [hpMin, hpMax] = cfg.hp;
+        const [spdMin, spdMax] = cfg.speed;
+        const maxHp = Math.round(THREE.MathUtils.lerp(hpMin, hpMax, Math.random()));
+        const aiKind = cfg.ai || 'chase';
         m.userData = Object.assign(m.userData || {}, {
             type: 'enemy',
+            enemyKind: typeKey,
             hp: maxHp,
             hpMax: maxHp,
             bodyColor,
-            speed: 1.2 + Math.random() * 0.8,
+            contactDamage: cfg.damage,
+            speed: THREE.MathUtils.lerp(spdMin, spdMax, Math.random()),
             dir: new THREE.Vector2(Math.cos(Math.random()*Math.PI*2), Math.sin(Math.random()*Math.PI*2)),
             changeT: 1 + Math.random() * 2,
             stunT: 0,
-            knockback: null
+            knockback: null,
+            // Ranged config (demon). null on melee-only / meleeOnly types.
+            ranged: cfg.ranged ? Object.assign({}, cfg.ranged) : null,
+            rangedTimer: cfg.ranged ? Math.random() * (cfg.ranged.cooldown || 2) : 0,
+            // Per-AI behavior config + transient state. Keeps the dispatch in
+            // updateEnemies branchless beyond a single switch.
+            aiKind,
+            aiCfg: cfg,
+            aiState: this._initEnemyAIState(aiKind, cfg),
+            // Cosmetic hit-stop: when >0, movement is paused this frame (used
+            // by the hit-feedback pulse to make impacts read).
+            hitStopT: 0,
+            // Attack telegraph (melee/contact): when >0, the enemy is leaning
+            // in for a hit. Damage is committed when it ticks to 0 IF the
+            // player is still in range — gives a real dodge window.
+            attackWindupT: 0,
+            attackWindupMax: 0,
+            attackPending: false,
+            // Ranged charge-up (demon): mirror of attackWindup for fireballs.
+            rangedWindupT: 0,
+            rangedWindupMax: 0,
+            rangedPending: false,
+            // Used by skittish/hitAndRun behaviors to time their state changes.
+            contactCdT: 0,
+            // Awareness state — refreshed each frame by _updateAwareness.
+            // awareT > 0 means "I know where the player is/was". aimPos is
+            // the position to head toward (current player when LOS, else
+            // last-seen). When awareT depletes, aimPos clears and the AI
+            // falls back to idle wander.
+            awareT: 0,
+            lastSeenPos: new THREE.Vector2(),
+            aimPos: null,
+            // Throttle the LOS raycast — it's the most expensive check, so
+            // we only run it every few frames per enemy with a small offset
+            // so they don't all spike on the same tick.
+            losCheckT: Math.random() * 0.15,
         });
-        // Add simple health bar (initially hidden)
         const barW = 1.4, barH = 0.15;
         const back = new THREE.Mesh(
             new THREE.PlaneGeometry(barW, barH),
@@ -4248,10 +5188,512 @@ class Game3D {
         bar.add(back); bar.add(front);
         bar.position.set(0, m.userData.hpBarY || 2.2, 0);
         bar.userData = { back, front, width: barW, showTimer: 0 };
-        bar.visible = false; // Initially hidden
+        bar.visible = false;
         m.add(bar);
         m.userData.hpBar = bar;
         return m;
+    }
+
+    // 2D segment vs axis-aligned box (slab method). Returns true if the
+    // segment (x1,z1)→(x2,z2) intersects the AABB centered at (cx,cz)
+    // with half-extents (hx,hz). Cheap, allocation-free.
+    _segmentVsAABB(x1, z1, x2, z2, cx, cz, hx, hz) {
+        const dx = x2 - x1, dz = z2 - z1;
+        const minX = cx - hx, maxX = cx + hx;
+        const minZ = cz - hz, maxZ = cz + hz;
+        let tmin = 0, tmax = 1;
+        if (Math.abs(dx) < 1e-9) {
+            if (x1 < minX || x1 > maxX) return false;
+        } else {
+            const inv = 1 / dx;
+            let t1 = (minX - x1) * inv, t2 = (maxX - x1) * inv;
+            if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp; }
+            if (t1 > tmin) tmin = t1;
+            if (t2 < tmax) tmax = t2;
+            if (tmin > tmax) return false;
+        }
+        if (Math.abs(dz) < 1e-9) {
+            if (z1 < minZ || z1 > maxZ) return false;
+        } else {
+            const inv = 1 / dz;
+            let t1 = (minZ - z1) * inv, t2 = (maxZ - z1) * inv;
+            if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp; }
+            if (t1 > tmin) tmin = t1;
+            if (t2 < tmax) tmax = t2;
+            if (tmin > tmax) return false;
+        }
+        return true;
+    }
+
+    // True if any (solid) wall blocks the line from (x1,z1) to (x2,z2).
+    // Uses the existing wall spatial hash via _iterWallsNear for a cheap
+    // broad-phase, then segment-vs-AABB for the narrow-phase.
+    _segmentHitsWall(x1, z1, x2, z2) {
+        const mx = (x1 + x2) * 0.5, mz = (z1 + z2) * 0.5;
+        const half = Math.hypot(x2 - x1, z2 - z1) * 0.5;
+        let blocked = false;
+        this._iterWallsNear(mx, mz, half + 1, (w) => {
+            if (this._segmentVsAABB(x1, z1, x2, z2, w.position.x, w.position.z, w.size.x / 2, w.size.z / 2)) {
+                blocked = true; return false;
+            }
+        });
+        return blocked;
+    }
+
+    // Can `e` actually see the player right now? Cheap range gate first,
+    // then FOV cone, then a single segment-vs-walls test. Vertical (Y) is
+    // ignored — gameplay is XZ-planar so a 2D LOS check is the right model.
+    _canEnemySeePlayer(e, ud) {
+        const cfg = ud.aiCfg;
+        const sight = (cfg && cfg.sightRange) || 14;
+        const dx = this.player.position.x - e.position.x;
+        const dz = this.player.position.z - e.position.z;
+        const d2 = dx * dx + dz * dz;
+        if (d2 > sight * sight) return false;
+
+        // FOV cone — player must be within viewCone degrees of the enemy's
+        // facing direction (ud.dir). Default 360 means no cone gate. We use
+        // a small "intimate radius" override so brushing right up against an
+        // enemy still alerts them even from behind — otherwise a player can
+        // dance on their back forever.
+        // In maze gameplay (campaign/arena and any non-openworld play), give
+        // enemies full 360° vision — the corridors are tight enough that a
+        // blind-spot cone made stealth trivial and unfun.
+        const inMaze = !(this.openWorld && this.openWorld.active);
+        const coneDeg = inMaze ? 360 : ((cfg && cfg.viewCone) || 360);
+        const intimate = 1.5; // within this distance, the cone doesn't matter
+        if (coneDeg < 360 && d2 > intimate * intimate) {
+            const fx = ud.dir ? ud.dir.x : Math.sin(e.rotation.y);
+            const fz = ud.dir ? ud.dir.y : Math.cos(e.rotation.y);
+            const fLen = Math.hypot(fx, fz);
+            if (fLen > 0.01) {
+                const d = Math.sqrt(d2);
+                const dot = (dx * fx + dz * fz) / (d * fLen);
+                // cos(halfCone): if dot is smaller, the player is outside the arc
+                const cosHalf = Math.cos((coneDeg * Math.PI / 180) * 0.5);
+                if (dot < cosHalf) return false;
+            }
+        }
+
+        return !this._segmentHitsWall(e.position.x, e.position.z, this.player.position.x, this.player.position.z);
+    }
+
+    // Refresh awareness state for one enemy. LOS is the only "alert" trigger
+    // for now — getting hit also alerts via the killEnemy/applyEnemyKnockback
+    // paths (we set awareT there too).
+    _updateAwareness(e, ud, deltaTime) {
+        // Throttle LOS raycast to ~7Hz per enemy; cheap range test is fine
+        // every frame. losCheckT was seeded random so checks are staggered.
+        ud.losCheckT -= deltaTime;
+        let canSee;
+        if (ud.losCheckT <= 0) {
+            canSee = this._canEnemySeePlayer(e, ud);
+            ud.losCheckT = 0.14;
+            ud._lastSeenLOS = canSee;
+        } else {
+            // Between checks, fall back to last LOS result. Range gate is
+            // still applied so a player who left the radius is ignored.
+            const sight = (ud.aiCfg && ud.aiCfg.sightRange) || 14;
+            const dx = this.player.position.x - e.position.x;
+            const dz = this.player.position.z - e.position.z;
+            canSee = !!ud._lastSeenLOS && (dx * dx + dz * dz <= sight * sight);
+        }
+        if (canSee) {
+            ud.awareT = (ud.aiCfg && ud.aiCfg.alertMemory) || 4.0;
+            ud.lastSeenPos.set(this.player.position.x, this.player.position.z);
+            ud.aimPos = ud.lastSeenPos;
+        } else if (ud.awareT > 0) {
+            ud.awareT -= deltaTime;
+            if (ud.awareT <= 0) {
+                ud.aimPos = null;
+            }
+            // While searching, also drop aim if we've arrived at lastSeen —
+            // prevents enemies from oscillating around the player's old spot.
+            else if (ud.aimPos) {
+                const adx = ud.lastSeenPos.x - e.position.x;
+                const adz = ud.lastSeenPos.y - e.position.z;
+                if (adx * adx + adz * adz < 1.0) {
+                    // Reached last-seen point with no LOS — give up faster.
+                    ud.awareT = Math.min(ud.awareT, 0.6);
+                }
+            }
+        }
+    }
+
+    _initEnemyAIState(aiKind, cfg) {
+        switch (aiKind) {
+            case 'chase':
+                return {
+                    lungeCdT: THREE.MathUtils.lerp(cfg.lunge.cooldown[0], cfg.lunge.cooldown[1], Math.random()),
+                    lungeT: 0,
+                };
+            case 'slam':
+                // phase: 'approach' | 'windup' | 'strike' | 'recover'
+                return { phase: 'approach', phaseT: 0, struck: false };
+            case 'kite':
+                return {
+                    strafeDir: Math.random() < 0.5 ? 1 : -1,
+                    strafeT: THREE.MathUtils.lerp(cfg.kite.strafePeriod[0], cfg.kite.strafePeriod[1], Math.random()),
+                };
+            case 'hitAndRun':
+                return { backoffT: 0, zigzagPhase: Math.random() * Math.PI * 2 };
+            case 'skittish':
+                return { wanderT: 0.5 + Math.random() * 1.5 };
+            default:
+                return {};
+        }
+    }
+
+    // Some Kenney enemy walk clips include horizontal root motion on the
+    // hip/body bone — the bone translates forward over the cycle, then
+    // snaps back at loop wrap. Combined with our parent-group movement this
+    // reads as "two positions at once" or a per-frame teleport. We cache the
+    // authored rest XZ of those bones at spawn time and re-clamp after every
+    // mixer.update so the mesh stays anchored to the hitbox while preserving
+    // bob (Y) and sway/twist (rotation).
+    _cacheEnemyRootBones(clone) {
+        const lock = [];
+        clone.traverse((o) => {
+            const n = o.name || '';
+            // Match common root/hip bone names across Kenney + Mixamo rigs.
+            if (/^(Root|Body|Hips|Pelvis|Spine|Armature|EnemyArmature)$/i.test(n)
+                || /mixamorig:?Hips/i.test(n)) {
+                lock.push({ node: o, x: o.position.x, z: o.position.z });
+            }
+        });
+        return lock.length ? lock : null;
+    }
+
+    _lockEnemyRootMotion(ud) {
+        if (!ud.boneLock) return;
+        for (let i = 0; i < ud.boneLock.length; i++) {
+            const b = ud.boneLock[i];
+            b.node.position.x = b.x;
+            b.node.position.z = b.z;
+            // Y is intentionally left free → preserves walk-cycle bob.
+        }
+    }
+
+    _updateEnemyAnimation(e, ud, deltaTime, moved) {
+        if (!ud.mixer) return;
+        ud.mixer.update(deltaTime);
+        this._lockEnemyRootMotion(ud);
+
+        // Smooth a 0..1 "is walking" signal so brief wall-blocks don't cause
+        // per-frame snap between idle and walk poses.
+        const target = moved ? 1 : 0;
+        ud.animBlend = THREE.MathUtils.lerp(ud.animBlend || 0, target, Math.min(1, deltaTime * 6));
+
+        if (ud.walkAction && ud.idleAction) {
+            ud.walkAction.setEffectiveWeight(ud.animBlend);
+            ud.idleAction.setEffectiveWeight(1 - ud.animBlend);
+            // Both actions tick at their natural speed — weight does the work.
+            ud.walkAction.timeScale = (ud.animScaleBase || 1)
+                * THREE.MathUtils.clamp((ud.speed || 1.5) / 1.5, 0.55, 1.75);
+        } else if (ud.walkAction) {
+            // No idle clip available — keep the walk cycle running at all
+            // times. Walking in place looks fine for these chunky enemies
+            // and is much less jarring than snapping timeScale to ~0 between
+            // frames whenever movement briefly stalls (wall scrape, overlap
+            // resolve, etc.).
+            ud.walkAction.timeScale = (ud.animScaleBase || 1)
+                * THREE.MathUtils.lerp(0.35, THREE.MathUtils.clamp((ud.speed || 1.5) / 1.5, 0.55, 1.75), ud.animBlend);
+        }
+    }
+
+    _bounceEnemyDir(ud) {
+        if (ud.wallBounceT > 0) return;
+        ud.dir.x *= -1;
+        ud.dir.y *= -1;
+        ud.wallBounceT = 0.2;
+        ud.changeT = Math.min(ud.changeT || 0.3, 0.25);
+    }
+
+    // Render interpolation was previously here. It was meant to smooth 60 Hz
+    // physics to high-refresh displays, but any other code path that wrote
+    // enemy positions between snap-to and restore (knockback decay applied in
+    // multiple ticks, spawn-during-step, etc.) caused two-frame teleports —
+    // which presented as a per-frame flicker in maze gameplay. Restoring the
+    // simpler "render whatever the 60 Hz step produced" path. If high-refresh
+    // smoothing matters later, re-add as a single render hook that ALWAYS
+    // restores even on error, and gate it behind a flag.
+    _enemyInterpSnapFrom() { /* no-op */ }
+    _enemyInterpSnapTo() { /* no-op */ }
+    _applyEnemyRenderInterp() { /* no-op */ }
+    _restoreEnemyRenderInterp() { /* no-op */ }
+
+    // Try to move `e` by (vx, vz) over dt, respecting walls. Returns true if
+    // any part of the move succeeded; on wall block, callers may bounce/reroute.
+    _moveEnemyBy(e, vx, vz, dt) {
+        const ud = e.userData;
+        const r = ud.hitRadius || 0.6;
+        const h = ud.collisionHeight || 1.8;
+        const stepDist = Math.hypot(vx, vz) * dt;
+        const steps = Math.min(4, Math.max(1, Math.ceil(stepDist / Math.max(0.12, r * 0.4))));
+        const subDt = dt / steps;
+        let moved = false;
+        for (let s = 0; s < steps; s++) {
+            const nextX = e.position.x + vx * subDt;
+            const nextZ = e.position.z + vz * subDt;
+            _scratchV3a.set(nextX, e.position.y, nextZ);
+            if (!this.pointHitsWall(_scratchV3a, r, h)) {
+                e.position.x = nextX;
+                e.position.z = nextZ;
+                moved = true;
+                continue;
+            }
+            // Slide along one axis so enemies don't tunnel on corners.
+            _scratchV3a.set(nextX, e.position.y, e.position.z);
+            if (!this.pointHitsWall(_scratchV3a, r, h)) {
+                e.position.x = nextX;
+                moved = true;
+                continue;
+            }
+            _scratchV3a.set(e.position.x, e.position.y, nextZ);
+            if (!this.pointHitsWall(_scratchV3a, r, h)) {
+                e.position.z = nextZ;
+                moved = true;
+            }
+        }
+        return moved;
+    }
+
+    _tryNudgeEnemy(e, dx, dz) {
+        const ud = e.userData;
+        const r = ud.hitRadius || 0.6;
+        const h = ud.collisionHeight || 1.8;
+        const nx = e.position.x + dx;
+        const nz = e.position.z + dz;
+        _scratchV3a.set(nx, e.position.y, nz);
+        if (!this.pointHitsWall(_scratchV3a, r, h)) {
+            e.position.x = nx;
+            e.position.z = nz;
+            return true;
+        }
+        return false;
+    }
+
+    // Unit vector from enemy to player, with distance. Reads/writes to ud.
+    _playerVec(e) {
+        const dx = this.player.position.x - e.position.x;
+        const dz = this.player.position.z - e.position.z;
+        const d = Math.hypot(dx, dz) || 1;
+        return { dx, dz, d, ux: dx / d, uz: dz / d };
+    }
+
+    // Unit vector from enemy toward its current aim (player when seen, else
+    // last-seen position). Returns null when the enemy has no aim — the AI
+    // should fall back to idle wander in that case.
+    _aimVec(e, ud) {
+        const aim = ud.aimPos;
+        if (!aim) return null;
+        const dx = aim.x - e.position.x;
+        const dz = aim.y - e.position.z;
+        const d = Math.hypot(dx, dz) || 1;
+        return { dx, dz, d, ux: dx / d, uz: dz / d };
+    }
+
+    // Idle wander: pick a fresh random heading every so often, drift slowly.
+    // Used by every AI kind when ud.aimPos is null (no awareness).
+    _idleWander(e, ud, deltaTime) {
+        ud.changeT -= deltaTime;
+        if (ud.changeT <= 0) {
+            const ang = Math.random() * Math.PI * 2;
+            ud.dir.set(Math.cos(ang), Math.sin(ang));
+            ud.changeT = 1.5 + Math.random() * 2.5;
+        }
+        const ok = this._moveEnemyBy(e, ud.dir.x * ud.speed * 0.45, ud.dir.y * ud.speed * 0.45, deltaTime);
+        if (!ok) this._bounceEnemyDir(ud);
+    }
+
+    _aiChase(e, ud, deltaTime) {
+        const v = this._aimVec(e, ud);
+        if (!v) { this._idleWander(e, ud, deltaTime); return; }
+        const s = ud.aiState;
+        const cfg = ud.aiCfg;
+        // Trigger a lunge: short burst toward aim at multiplied speed.
+        if (s.lungeT > 0) {
+            s.lungeT -= deltaTime;
+            if (s.lungeT <= 0) {
+                // Squash ease-out — without this the scale stays at (1.15,0.92,1)
+                // forever after the first lunge.
+                e.scale.set(1, 1, 1);
+            }
+        } else {
+            s.lungeCdT -= deltaTime;
+            if (s.lungeCdT <= 0) {
+                if (v.d < 12) {
+                    s.lungeT = cfg.lunge.dur;
+                    ud.dir.set(v.ux, v.uz);
+                    // Squash forward to telegraph
+                    e.scale.set(1.15, 0.92, 1);
+                }
+                s.lungeCdT = THREE.MathUtils.lerp(cfg.lunge.cooldown[0], cfg.lunge.cooldown[1], Math.random());
+            }
+        }
+        // Re-pick wander every 1-3s when not lunging
+        ud.changeT -= deltaTime;
+        if (s.lungeT <= 0 && ud.changeT <= 0) {
+            const ang = Math.random() * Math.PI * 2;
+            const sx = v.ux * 0.6 + Math.cos(ang) * 0.4;
+            const sz = v.uz * 0.6 + Math.sin(ang) * 0.4;
+            const slen = Math.hypot(sx, sz) || 1;
+            ud.dir.set(sx / slen, sz / slen);
+            ud.changeT = 1 + Math.random() * 1.5;
+        }
+        const speedMult = s.lungeT > 0 ? cfg.lunge.mult : 1;
+        const ok = this._moveEnemyBy(e, ud.dir.x * ud.speed * speedMult, ud.dir.y * ud.speed * speedMult, deltaTime);
+        if (!ok) this._bounceEnemyDir(ud);
+    }
+
+    _aiSlam(e, ud, deltaTime) {
+        const s = ud.aiState;
+        const cfg = ud.aiCfg;
+        s.phaseT += deltaTime;
+        if (s.phase === 'approach') {
+            // No awareness → wander; abort approach.
+            const av = this._aimVec(e, ud);
+            if (!av) { this._idleWander(e, ud, deltaTime); return; }
+            ud.dir.set(av.ux, av.uz);
+            this._moveEnemyBy(e, ud.dir.x * ud.speed, ud.dir.y * ud.speed, deltaTime);
+            // Only commit to windup if we have *real* LOS — don't slam empty air.
+            const seesNow = this._canEnemySeePlayer(e, ud);
+            const playerD = this._playerVec(e).d;
+            if (seesNow && playerD <= cfg.slamRange) {
+                s.phase = 'windup'; s.phaseT = 0; s.struck = false;
+                // Visual telegraph: tint red on the giant via flash
+                this._tintEnemy(e, 0xff5544, cfg.windup * 1000);
+                this.audio && this.audio.play && this.audio.play('enemyGrowl');
+            }
+            return;
+        }
+        // Windup/strike/recover use the live player position (committed).
+        const v = this._playerVec(e);
+        if (s.phase === 'windup') {
+            // Stop, rear back: rotate body backward + scale up slightly
+            const p = Math.min(1, s.phaseT / cfg.windup);
+            e.rotation.x = -0.35 * p;
+            e.scale.set(1 + 0.1 * p, 1 + 0.15 * p, 1 + 0.1 * p);
+            if (s.phaseT >= cfg.windup) { s.phase = 'strike'; s.phaseT = 0; }
+        } else if (s.phase === 'strike') {
+            // Fast lunge forward. Damage if we hit during strike.
+            this._moveEnemyBy(e, v.ux * ud.speed * 5, v.uz * ud.speed * 5, deltaTime);
+            if (!s.struck && v.d < (ud.hitRadius || 0.8) + 1.5) {
+                this.damagePlayer(cfg.slamDamage);
+                s.struck = true;
+                // Camera shake if available
+                this._cameraShake && this._cameraShake(0.5, 0.25);
+            }
+            if (s.phaseT >= cfg.strikeDur) { s.phase = 'recover'; s.phaseT = 0; }
+        } else if (s.phase === 'recover') {
+            e.rotation.x = THREE.MathUtils.lerp(e.rotation.x, 0, 0.2);
+            e.scale.lerp(_scratchV3c.set(1, 1, 1), 0.2);
+            if (s.phaseT >= cfg.recover) { s.phase = 'approach'; s.phaseT = 0; e.rotation.x = 0; e.scale.set(1,1,1); }
+        }
+    }
+
+    _aiKite(e, ud, deltaTime) {
+        // No awareness → wander; demons don't kite an empty room.
+        const v = this._aimVec(e, ud);
+        if (!v) { this._idleWander(e, ud, deltaTime); return; }
+        const s = ud.aiState;
+        const cfg = ud.aiCfg.kite;
+        s.strafeT -= deltaTime;
+        if (s.strafeT <= 0) {
+            s.strafeDir = -s.strafeDir;
+            s.strafeT = THREE.MathUtils.lerp(cfg.strafePeriod[0], cfg.strafePeriod[1], Math.random());
+        }
+        // Radial component: retreat if too close, approach if too far, hold if in sweet spot
+        let radial = 0;
+        if (v.d < cfg.retreat) radial = -1;
+        else if (v.d > cfg.approach) radial = 1;
+        else radial = (cfg.ideal - v.d) * 0.2; // gentle drift to ideal
+        // Perpendicular (strafe) component
+        const px = -v.uz * s.strafeDir;
+        const pz = v.ux * s.strafeDir;
+        const vx = v.ux * radial + px;
+        const vz = v.uz * radial + pz;
+        const len = Math.hypot(vx, vz) || 1;
+        ud.dir.set(vx / len, vz / len);
+        const ok = this._moveEnemyBy(e, (vx / len) * ud.speed, (vz / len) * ud.speed, deltaTime);
+        if (!ok) { s.strafeDir = -s.strafeDir; s.strafeT = 0.2; }
+    }
+
+    _aiHitAndRun(e, ud, deltaTime) {
+        const s = ud.aiState;
+        const cfg = ud.aiCfg;
+        // Backoff phase: always uses live player position even if LOS is
+        // broken (we just hit them; we know where they were).
+        if (s.backoffT > 0) {
+            const pv = this._playerVec(e);
+            s.backoffT -= deltaTime;
+            ud.dir.set(-pv.ux, -pv.uz);
+            this._moveEnemyBy(e, -pv.ux * ud.speed * cfg.backoffMult, -pv.uz * ud.speed * cfg.backoffMult, deltaTime);
+            return;
+        }
+        const v = this._aimVec(e, ud);
+        if (!v) { this._idleWander(e, ud, deltaTime); return; }
+        // Zigzag chase: oscillate perpendicular component
+        s.zigzagPhase += deltaTime / cfg.zigzagPeriod * Math.PI;
+        const zig = Math.sin(s.zigzagPhase) * cfg.zigzagAmp;
+        const vx = v.ux + (-v.uz) * zig;
+        const vz = v.uz + (v.ux) * zig;
+        const len = Math.hypot(vx, vz) || 1;
+        ud.dir.set(vx / len, vz / len);
+        const ok = this._moveEnemyBy(e, (vx / len) * ud.speed, (vz / len) * ud.speed, deltaTime);
+        if (!ok) { s.zigzagPhase += Math.PI; }
+    }
+
+    _aiSkittish(e, ud, deltaTime) {
+        const cfg = ud.aiCfg;
+        // Only flee if we actually see (or recently saw) the player AND
+        // they're within fleeDist — being aware *of an empty corridor*
+        // doesn't trigger panic.
+        const v = ud.awareT > 0 ? this._playerVec(e) : null;
+        if (v && v.d < cfg.fleeDist) {
+            // Run away from player (with a touch of randomness)
+            const jitter = (Math.random() - 0.5) * 0.4;
+            const fx = -v.ux + (-v.uz) * jitter;
+            const fz = -v.uz + (v.ux) * jitter;
+            const len = Math.hypot(fx, fz) || 1;
+            ud.dir.set(fx / len, fz / len);
+            const ok = this._moveEnemyBy(e, (fx / len) * ud.speed * 1.2, (fz / len) * ud.speed * 1.2, deltaTime);
+            if (!ok) this._bounceEnemyDir(ud);
+            return;
+        }
+        // Calm idle wander
+        const s = ud.aiState;
+        s.wanderT -= deltaTime;
+        if (s.wanderT <= 0) {
+            const ang = Math.random() * Math.PI * 2;
+            ud.dir.set(Math.cos(ang), Math.sin(ang));
+            s.wanderT = 1.0 + Math.random() * 2.0;
+        }
+        const ok = this._moveEnemyBy(e, ud.dir.x * ud.speed * 0.5, ud.dir.y * ud.speed * 0.5, deltaTime);
+        if (!ok) { this._bounceEnemyDir(ud); s.wanderT = 0.4; }
+    }
+
+    // Brief solid-color tint that auto-reverts. Used for slam wind-up etc.
+    // Same overlap protection as flashEnemy — stash the true base color on
+    // the material, gate revert behind a counter so the latest tint wins.
+    _tintEnemy(e, color, durMs) {
+        const mats = [];
+        e.traverse((c) => {
+            if (c.isMesh && c.material && c.material.color) {
+                const mat = c.material;
+                if (mat.userData._baseColor == null) mat.userData._baseColor = mat.color.getHex();
+                mat.color.setHex(color);
+                mats.push(mat);
+            }
+        });
+        if (e.userData._tintId == null) e.userData._tintId = 0;
+        const myId = ++e.userData._tintId;
+        setTimeout(() => {
+            if (e.userData._tintId !== myId) return;
+            for (const mat of mats) {
+                if (mat.userData._baseColor != null) mat.color.setHex(mat.userData._baseColor);
+            }
+        }, durMs);
     }
 
     updateEnemies(deltaTime) {
@@ -4259,82 +5701,205 @@ class Game3D {
         for (let i = this.playMode.enemies.length - 1; i >= 0; i--) {
             const e = this.playMode.enemies[i];
             const ud = e.userData;
-            // Stun: pause wandering/movement while knocked back
-            if (ud.stunT > 0) {
-                ud.stunT -= deltaTime;
-            } else {
-                // Wander; occasionally turn or bounce off walls
-                ud.changeT -= deltaTime;
-                if (ud.changeT <= 0) {
-                    // Random new direction, slight bias toward player
-                    const toPlayer = new THREE.Vector2(
-                        this.player.position.x - e.position.x,
-                        this.player.position.z - e.position.z
-                    ).normalize();
-                    const rand = new THREE.Vector2(Math.cos(Math.random()*Math.PI*2), Math.sin(Math.random()*Math.PI*2)).multiplyScalar(0.5);
-                    ud.dir = toPlayer.multiplyScalar(0.5).add(rand).normalize();
-                    ud.changeT = 1 + Math.random() * 2;
-                }
-                // Try to move
-                const nextX = e.position.x + ud.dir.x * ud.speed * deltaTime;
-                const nextZ = e.position.z + ud.dir.y * ud.speed * deltaTime;
-                const test = new THREE.Vector3(nextX, e.position.y, nextZ);
-                if (this.pointHitsWall(test)) {
-                    // Bounce: flip direction and try again next frame
-                    ud.dir.x *= -1; ud.dir.y *= -1;
-                    ud.changeT = 0.2;
+            const posX0 = e.position.x;
+            const posZ0 = e.position.z;
+            // Tick contact damage cooldown so goblins can read "i hit them" once per encounter.
+            if (ud.contactCdT > 0) ud.contactCdT -= deltaTime;
+            if (ud.wallBounceT > 0) ud.wallBounceT -= deltaTime;
+            // Attack telegraph. Has three phases driven by a single timer:
+            //   phase 0..0.75 of windup → REAR BACK (rotate up + grow). Enemy
+            //                              is locked in place so it reads as
+            //                              "stopped to wind up".
+            //   phase 0.75..1.0        → STRIKE (rotate forward + pop forward)
+            //   timer hits 0           → COMMIT damage if still in hit range.
+            // Damage NOT dealt if the player stepped out during the wind-up.
+            if (ud.attackWindupT > 0) {
+                ud.attackWindupT -= deltaTime;
+                const p = 1 - Math.max(0, ud.attackWindupT) / (ud.attackWindupMax || 0.001);
+                if (p < 0.75) {
+                    // REAR BACK
+                    const t = p / 0.75; // 0..1
+                    const ease = t * t * (3 - 2 * t); // smoothstep
+                    e.rotation.x = -0.55 * ease;
+                    const grow = 1 + 0.25 * ease;
+                    e.scale.set(grow, grow, grow);
                 } else {
-                    e.position.x = nextX;
-                    e.position.z = nextZ;
+                    // STRIKE — fast snap forward
+                    const t = (p - 0.75) / 0.25;
+                    e.rotation.x = THREE.MathUtils.lerp(-0.55, 0.45, t);
+                    const grow = THREE.MathUtils.lerp(1.25, 1.05, t);
+                    e.scale.set(grow, grow * 0.9, grow);
+                    // Lunge forward a little so the strike has visible impact.
+                    if (ud.attackPending && ud.dir) {
+                        const lunge = ud.speed * 0.5 * deltaTime;
+                        this._tryNudgeEnemy(e, ud.dir.x * lunge, ud.dir.y * lunge);
+                    }
+                }
+                if (ud.attackWindupT <= 0 && ud.attackPending) {
+                    ud.attackPending = false;
+                    e.rotation.x = 0;
+                    e.scale.set(1, 1, 1);
+                    const dx = this.player.position.x - e.position.x;
+                    const dz = this.player.position.z - e.position.z;
+                    const dist = Math.hypot(dx, dz);
+                    const hitR = (ud.hitRadius || 0.6) + 0.9;
+                    if (dist < hitR) {
+                        this.damagePlayer(ud.contactDamage || 10);
+                        if (ud.aiKind === 'hitAndRun' && ud.aiState) {
+                            ud.aiState.backoffT = ud.aiCfg.backoffDur;
+                        }
+                    }
+                    ud.contactCdT = 0.6;
                 }
             }
-            // Apply decaying knockback impulse (works during and after stun)
-            if (ud.knockback) {
-                const kbX = ud.knockback.x * deltaTime;
-                const kbZ = ud.knockback.y * deltaTime;
-                const kbTest = new THREE.Vector3(e.position.x + kbX, e.position.y, e.position.z + kbZ);
-                if (!this.pointHitsWall(kbTest)) {
-                    e.position.x = kbTest.x;
-                    e.position.z = kbTest.z;
+            // Refresh awareness (LOS → awareT, lastSeenPos, aimPos) BEFORE
+            // dispatch so each AI sees a consistent view of the world.
+            this._updateAwareness(e, ud, deltaTime);
+            // Hit-stop pauses movement briefly for impact readability.
+            // Attack wind-up also locks the enemy in place so the rear-back
+            // pose is visible — without this, they walk straight through the
+            // pose and the player can't react.
+            if (ud.hitStopT > 0) {
+                ud.hitStopT -= deltaTime;
+            } else if (ud.stunT > 0) {
+                ud.stunT -= deltaTime;
+            } else if (ud.attackWindupT > 0) {
+                // intentionally no AI tick — enemy is committed to the strike
+            } else {
+                switch (ud.aiKind) {
+                    case 'slam':      this._aiSlam(e, ud, deltaTime); break;
+                    case 'kite':      this._aiKite(e, ud, deltaTime); break;
+                    case 'hitAndRun': this._aiHitAndRun(e, ud, deltaTime); break;
+                    case 'skittish':  this._aiSkittish(e, ud, deltaTime); break;
+                    case 'chase':
+                    default:          this._aiChase(e, ud, deltaTime); break;
                 }
+            }
+            // Knockback decays even while stun is active (so the body slides to rest)
+            if (ud.knockback) {
+                this._moveEnemyBy(e, ud.knockback.x, ud.knockback.y, deltaTime);
                 ud.knockback.multiplyScalar(Math.pow(0.001, deltaTime));
                 if (ud.knockback.lengthSq() < 0.05) ud.knockback = null;
             }
-            // Face direction of travel
             if (ud.dir && (ud.dir.x !== 0 || ud.dir.y !== 0)) {
                 e.rotation.y = Math.atan2(ud.dir.x, ud.dir.y);
             }
-            // Hit flinch: lean back + squish, decays to neutral
+            // Hit flinch: lean back + squish, decays to neutral. Stronger
+            // numbers than before so hits read clearly — combined with the
+            // 130ms white/emissive flash and the new floating dmg number.
             if (ud.flinchT > 0) {
                 ud.flinchT -= deltaTime;
                 const p = Math.max(0, ud.flinchT) / ud.flinchMax;
-                e.rotation.x = -0.45 * p;
-                e.scale.y = 1 - 0.12 * p;
-                e.scale.x = 1 + 0.08 * p;
+                e.rotation.x = -0.7 * p;
+                e.scale.y = 1 - 0.22 * p;
+                e.scale.x = 1 + 0.16 * p;
+                e.scale.z = 1 + 0.05 * p;
                 if (ud.flinchT <= 0) {
                     e.rotation.x = 0;
                     e.scale.set(1, 1, 1);
                 }
             }
-            // Tick zombie animation
-            if (ud.mixer) ud.mixer.update(deltaTime);
+            // Ranged enemies (demon): cast on a per-enemy cooldown, but with
+            // a visible charge-up so the fireball doesn't materialize out of
+            // nowhere. The tint pulses brighter as the cast progresses, then
+            // the projectile fires when rangedWindupT hits 0.
+            if (ud.ranged && ud.stunT <= 0 && ud.awareT > 0) {
+                if (ud.rangedWindupT > 0) {
+                    ud.rangedWindupT -= deltaTime;
+                    // Pulse intensity ramps up over the cast.
+                    const p = 1 - Math.max(0, ud.rangedWindupT) / (ud.rangedWindupMax || 0.001);
+                    if (Math.random() < deltaTime * 12) {
+                        // Re-tint occasionally so the glow flickers like a charging spell.
+                        this._tintEnemy(e, 0xff7733, 120);
+                    }
+                    if (ud.rangedWindupT <= 0 && ud.rangedPending) {
+                        ud.rangedPending = false;
+                        // Confirm aim is still valid before committing.
+                        const dx = this.player.position.x - e.position.x;
+                        const dz = this.player.position.z - e.position.z;
+                        const distXZ = Math.hypot(dx, dz);
+                        if (distXZ <= ud.ranged.range && distXZ > 0.1 &&
+                            !this._segmentHitsWall(e.position.x, e.position.z, this.player.position.x, this.player.position.z)) {
+                            this.spawnEnemyProjectile(e, this.player.position);
+                        }
+                        ud.rangedTimer = ud.ranged.cooldown;
+                    }
+                } else {
+                    ud.rangedTimer -= deltaTime;
+                    if (ud.rangedTimer <= 0) {
+                        const dx = this.player.position.x - e.position.x;
+                        const dz = this.player.position.z - e.position.z;
+                        const distXZ = Math.hypot(dx, dz);
+                        // Need clear LOS to actually shoot — don't lob fireballs
+                        // through stone walls based on a half-second-old memory.
+                        if (distXZ <= ud.ranged.range && distXZ > 0.1 &&
+                            !this._segmentHitsWall(e.position.x, e.position.z, this.player.position.x, this.player.position.z)) {
+                            // Start charge-up instead of firing immediately.
+                            const castTime = 0.55;
+                            ud.rangedWindupT = castTime;
+                            ud.rangedWindupMax = castTime;
+                            ud.rangedPending = true;
+                            this._tintEnemy(e, 0xff6622, castTime * 1000);
+                            this.audio && this.audio.play && this.audio.play('enemyGrowl');
+                        } else {
+                            // Try again soon instead of waiting the full cooldown.
+                            ud.rangedTimer = 0.4;
+                        }
+                    }
+                }
+            }
+            const moved = Math.hypot(e.position.x - posX0, e.position.z - posZ0) > 0.0005;
+            this._updateEnemyAnimation(e, ud, deltaTime, moved);
             // Update health bar visibility and display
             if (ud.hpBar) {
-                // Update show timer
                 if (ud.hpBar.userData.showTimer > 0) {
                     ud.hpBar.userData.showTimer -= deltaTime;
                     if (ud.hpBar.userData.showTimer <= 0) {
                         ud.hpBar.visible = false;
                     }
                 }
-                
-                // Only update bar if it's visible
+
                 if (ud.hpBar.visible) {
                     const cam = this.camera.position;
                     ud.hpBar.lookAt(cam.x, ud.hpBar.position.y + e.position.y, cam.z);
                     const ratio = Math.max(0, Math.min(1, ud.hp / ud.hpMax));
                     ud.hpBar.userData.front.scale.x = ratio;
                     ud.hpBar.userData.front.position.x = -(ud.hpBar.userData.width * (1 - ratio)) / 2;
+                }
+            }
+        }
+        // Enemy ↔ enemy soft separation only — player collision is handled in
+        // checkEnemyCollision so enemies are not shoved by the player.
+        this._resolveEnemyOverlaps();
+    }
+
+    _resolveEnemyOverlaps() {
+        const list = this.playMode.enemies;
+        const n = list.length;
+        if (n < 2) return;
+        // Enemy ↔ enemy: split overlap, weighted by mass; never nudge into walls.
+        for (let i = 0; i < n; i++) {
+            const a = list[i];
+            const ar = (a.userData.hitRadius || 0.6);
+            const am = Math.max(0.5, (a.userData.hpMax || 50) / 80);
+            for (let j = i + 1; j < n; j++) {
+                const b = list[j];
+                const br = (b.userData.hitRadius || 0.6);
+                const r = ar + br;
+                const dx = b.position.x - a.position.x;
+                const dz = b.position.z - a.position.z;
+                const d2 = dx * dx + dz * dz;
+                if (d2 < r * r && d2 > 0.0001) {
+                    const d = Math.sqrt(d2);
+                    const overlap = r - d;
+                    const bm = Math.max(0.5, (b.userData.hpMax || 50) / 80);
+                    const total = am + bm;
+                    const ux = dx / d, uz = dz / d;
+                    const sep = 0.55;
+                    const aPush = overlap * (bm / total) * sep;
+                    const bPush = overlap * (am / total) * sep;
+                    this._tryNudgeEnemy(a, -ux * aPush, -uz * aPush);
+                    this._tryNudgeEnemy(b, ux * bPush, uz * bPush);
                 }
             }
         }
@@ -4352,14 +5917,13 @@ class Game3D {
         
         this.player.hp = Math.max(0, this.player.hp - amount);
         this.player.invulnerable = true;
-        this.player.invulnerabilityTimer = 1.0; // 1 second invulnerability
+        this.player.invulnerabilityTimer = 1.0;
         this.audio && this.audio.play('playerHurt');
         this._damageVignetteT = 0.45;
 
-        // Visual feedback
         this.showMessage(`${this.t('playerHit')} - ${this.t('health')}: ${this.player.hp}/${this.player.maxHp}`);
-        
-        // Flash effect
+
+        // Brief red flash on every material in the player model
         if (this.player.model) {
             const originalMaterials = [];
             this.player.model.traverse((child) => {
@@ -4368,15 +5932,14 @@ class Game3D {
                     child.material.color.setHex(0xff0000);
                 }
             });
-            
+
             setTimeout(() => {
                 originalMaterials.forEach(({ child, original }) => {
                     child.material.color.setHex(original);
                 });
             }, 200);
         }
-        
-        // Check for death
+
         if (this.player.hp <= 0) {
             this.showMessage(this.t('playerDeath'));
             this.audio && this.audio.play('gameOver');
@@ -4384,7 +5947,6 @@ class Game3D {
                 // Arena run failed — restart from wave 1
                 this.startArenaMode();
             } else {
-                // Reset player position or respawn
                 this.player.position.set(0, 1, 0);
                 this.player.hp = this.player.maxHp;
             }
@@ -4394,7 +5956,6 @@ class Game3D {
     // ===== Audio-driven feel helpers =====
     updatePlayerLocomotion(deltaTime) {
         if (!this.player || !this.player.model) return;
-        // Sync model position/rotation with the logical player
         const m = this.player.model;
         m.position.copy(this.player.position);
         // Procedural model: animate limbs based on horizontal velocity
@@ -4405,12 +5966,11 @@ class Game3D {
             const walkAmt = Math.min(1, speed / 6);
             const swing = Math.sin(this._locoT * 2) * 0.6 * walkAmt;
             const idleBob = (1 - walkAmt) * Math.sin((this._locoT) * 1.5) * 0.05;
-            // Legs swing forward/back
             const restLx = this.player._legRestX.L;
             const restRx = this.player._legRestX.R;
             if (this.player.leftLeg) this.player.leftLeg.rotation.x = restLx + swing;
             if (this.player.rightLeg) this.player.rightLeg.rotation.x = restRx - swing;
-            // Arms counter-swing on Z; skip while attacking so the swing anim takes over
+            // Skip arm counter-swing while attacking so the swing anim wins
             if (!this._attackPoseT) {
                 const restLz = this.player._armRestZ.L;
                 const restRz = this.player._armRestZ.R;
@@ -4419,7 +5979,6 @@ class Game3D {
                 if (this.player.leftArm) this.player.leftArm.rotation.z = restLz;
                 if (this.player.rightArm) this.player.rightArm.rotation.z = restRz;
             }
-            // Small vertical body bob
             if (this.player.body) this.player.body.position.y = (this.player.body.userData._restY ?? this.player.body.position.y);
             if (this.player.body && this.player.body.userData._restY === undefined) {
                 this.player.body.userData._restY = this.player.body.position.y;
@@ -4595,19 +6154,25 @@ class Game3D {
         }
     }
 
-    pointHitsWall(pos, radius = 0.6) {
-        for (const w of this.walls) {
+    pointHitsWall(pos, radius = 0.6, height = 2) {
+        let hit = false;
+        const entityBottom = pos.y;
+        const entityTop = pos.y + height;
+        this._iterWallsNear(pos.x, pos.z, radius + 1, (w) => {
             const p = w.position; const s = w.size;
             if (pos.x + radius > p.x - s.x/2 && pos.x - radius < p.x + s.x/2 &&
                 pos.z + radius > p.z - s.z/2 && pos.z - radius < p.z + s.z/2) {
-                return true;
+                const wallTop = p.y + s.y/2;
+                const wallBottom = p.y - s.y/2;
+                if (entityTop > wallBottom && entityBottom < wallTop) {
+                    hit = true; return false;
+                }
             }
-        }
-        return false;
+        });
+        return hit;
     }
 
     getMazeBounds() {
-        // Approximate bounds from current maze or ground size
         const currentMaze = this.savedMazes[this.currentMazeIndex];
         if (currentMaze) {
             if (currentMaze.type === 'generated') {
@@ -4621,25 +6186,20 @@ class Game3D {
                 return { minX: -Math.floor(cols / 2) * cellSize, maxX: Math.floor(cols / 2) * cellSize, minZ: -Math.floor(rows / 2) * cellSize, maxZ: Math.floor(rows / 2) * cellSize };
             }
         }
-        // Fallback to ground area
+        // Fallback to ground plane size
         return { minX: -50, maxX: 50, minZ: -50, maxZ: 50 };
     }
 
     isPositionFree(x, z, radius = 0.8) {
-        // Simple overlap test against walls
-        const testPos = new THREE.Vector3(x, 1, z);
-        // Reuse checkCollision logic with temporary radius by inflating test
-        for (let wall of this.walls) {
-            const wallPos = wall.position;
-            const wallSize = wall.size;
-            if (x + radius > wallPos.x - wallSize.x/2 &&
-                x - radius < wallPos.x + wallSize.x/2 &&
-                z + radius > wallPos.z - wallSize.z/2 &&
-                z - radius < wallPos.z + wallSize.z/2) {
-                return false;
+        let free = true;
+        this._iterWallsNear(x, z, radius + 1, (wall) => {
+            const wp = wall.position; const ws = wall.size;
+            if (x + radius > wp.x - ws.x/2 && x - radius < wp.x + ws.x/2 &&
+                z + radius > wp.z - ws.z/2 && z - radius < wp.z + ws.z/2) {
+                free = false; return false;
             }
-        }
-        return true;
+        });
+        return free;
     }
 
     clearEnemies() {
@@ -4651,6 +6211,12 @@ class Game3D {
             this.playMode.dyingEnemies.forEach(e => this.playMode.enemiesGroup.remove(e));
             this.playMode.dyingEnemies = [];
         }
+        // Drop any in-flight enemy fireballs/etc — otherwise demon shots
+        // outlive the demons that fired them across resets.
+        if (this.playMode.enemyProjectiles && this.playMode.enemyProjectiles.length) {
+            this.playMode.enemyProjectiles.forEach(p => this.scene.remove(p));
+            this.playMode.enemyProjectiles = [];
+        }
     }
 
     respawnEnemies() {
@@ -4659,23 +6225,18 @@ class Game3D {
     }
     
     updateEnemySpawning(deltaTime) {
-        // Only spawn continuously in play mode
         if (this.gameMode !== 'play') return;
         // Arena mode owns its own spawn cadence
         if (this.arena && this.arena.active) return;
-        
-        // Update spawn timer
+
         this.enemySpawnTimer += deltaTime;
-        
-        // Spawn new enemies periodically
+
         if (this.enemySpawnTimer >= this.enemySpawnInterval) {
             this.enemySpawnTimer = 0;
-            
-            // Spawn 1-3 enemies at a time
+
             const spawnCount = 1 + Math.floor(Math.random() * 3);
             this.spawnTestEnemies(spawnCount);
-            
-            // Show spawn message occasionally
+
             if (Math.random() < 0.3) {
                 this.showMessage(`${this.t('enemiesApproaching')} (${this.playMode.enemies.length}/${this.maxEnemies})`);
             }
@@ -4683,6 +6244,11 @@ class Game3D {
     }
 
     handlePlayClick(event) {
+        // Block placement takes precedence over weapon use when armed.
+        if (this.activeBlockId) {
+            this.placeActiveBlock();
+            return;
+        }
         // Route by selected weapon: sword swings, gun fires a projectile.
         const weapon = this.getCurrentWeapon();
         if (weapon && weapon.type === 'melee') {
@@ -4725,9 +6291,10 @@ class Game3D {
         // Compute spawn position — from gun muzzle in FPV, from in front of the
         // player in iso/third-person.
         let spawn;
-        if (this.viewMode === 'fpv' && this.fpvGun && this.fpvGun.userData.muzzle) {
+        const activeFpv = this._getActiveFpvRanged && this._getActiveFpvRanged();
+        if (this.viewMode === 'fpv' && activeFpv && activeFpv.userData.muzzle) {
             spawn = new THREE.Vector3();
-            this.fpvGun.userData.muzzle.getWorldPosition(spawn);
+            activeFpv.userData.muzzle.getWorldPosition(spawn);
         } else {
             const forward = new THREE.Vector3(
                 Math.sin(this.characterRotation), 0,
@@ -4803,12 +6370,19 @@ class Game3D {
     }
 
     handleMelee(event) {
+        // Cooldown gate — handlePlayClick bypasses attackWithWeapon for melee,
+        // so we have to enforce the cooldown here ourselves (otherwise mashing
+        // left-click fires every frame).
+        if (!this.canFire()) return;
+        const weapon = this.getCurrentWeapon();
+        const weaponId = this.player.weapons[this.player.currentWeaponIndex];
+        if (weapon) this.weaponCooldowns[weaponId] = weapon.cooldown;
+
         this.triggerSwordSwing();
         this.playOneShotAnimation('Attack', 0.4);
         this.triggerAttackPose && this.triggerAttackPose();
         this.audio && this.audio.play('swordSwing');
 
-        const weapon = this.getCurrentWeapon();
         const damage = weapon ? weapon.damage : 2;
         const range = (weapon && weapon.type === 'melee') ? weapon.range : 2.5;
 
@@ -4819,15 +6393,16 @@ class Game3D {
         }
 
         // FPV: ray from screen center.
-        const raycaster = new THREE.Raycaster();
-        raycaster.setFromCamera(new THREE.Vector2(0, 0), this.camera);
-        const hits = raycaster.intersectObjects(this.playMode.enemies, true);
+        _scratchV2a.set(0, 0);
+        _sharedRaycaster.setFromCamera(_scratchV2a, this.camera);
+        const hits = _sharedRaycaster.intersectObjects(this.playMode.enemies, true);
         for (const hit of hits) {
             if (hit.distance > range) break;
             const e = this.findEnemyRoot(hit.object);
             if (!e) continue;
             e.userData.hp -= damage;
             this.spawnImpact(hit.point.clone(), 0xffaa55);
+            this.spawnDamageNumber(hit.point, damage);
             this.audio && this.audio.play('swordHit');
             if (e.userData.hp <= 0) {
                 this.killEnemy(e);
@@ -4838,15 +6413,8 @@ class Game3D {
             }
             return;
         }
-        const endPoint = this.camera.position.clone().add(raycaster.ray.direction.clone().multiplyScalar(range));
+        const endPoint = this.camera.position.clone().add(_sharedRaycaster.ray.direction.clone().multiplyScalar(range));
         this.spawnImpact(endPoint, 0xcccccc);
-    }
-
-    shootAt(targetPos) {
-        // Backward compatibility: derive ray from player/camera toward targetPos
-        const origin = (this.viewMode === 'fpv') ? this.camera.position.clone() : this.player.position.clone().add(new THREE.Vector3(0,1.2,0));
-        const dir = targetPos.clone().sub(origin).normalize();
-        this.shootRay(origin, dir);
     }
 
     shootRay(origin, dir) {
@@ -4910,18 +6478,39 @@ class Game3D {
             const prevPos = p.position.clone();
             const step = p.userData.dir.clone().multiplyScalar(speed * deltaTime);
             const nextPos = prevPos.clone().add(step);
-            let collidedWall = null;
-            for (const w of this.walls) {
-                const wp = w.position; const s = w.size; const r = p.userData.radius;
-                if (nextPos.x + r > wp.x - s.x/2 && nextPos.x - r < wp.x + s.x/2 &&
-                    nextPos.y + r > wp.y - s.y/2 && nextPos.y - r < wp.y + s.y/2 &&
-                    nextPos.z + r > wp.z - s.z/2 && nextPos.z - r < wp.z + s.z/2) {
-                    collidedWall = w;
-                    break;
+            // Solid ceiling — chip the roof tile at this XZ; despawn the shot
+            // if the tile is still alive (otherwise the shot passes through
+            // the hole the previous hits opened).
+            if (this.roofY != null && nextPos.y + p.userData.radius >= this.roofY) {
+                const tile = this._roofTileAt(nextPos.x, nextPos.z);
+                if (tile) {
+                    this._damageRoofTile(tile, 1);
+                    this.scene.remove(p);
+                    this.playMode.projectiles.splice(i, 1);
+                    continue;
                 }
+                // No tile here (off-grid or already destroyed): let it fly.
             }
+            let collidedWall = null;
+            const _pr = p.userData.radius;
+            this._iterWallsNear(nextPos.x, nextPos.z, _pr + 1.5, (w) => {
+                const wp = w.position; const s = w.size;
+                if (nextPos.x + _pr > wp.x - s.x/2 && nextPos.x - _pr < wp.x + s.x/2 &&
+                    nextPos.y + _pr > wp.y - s.y/2 && nextPos.y - _pr < wp.y + s.y/2 &&
+                    nextPos.z + _pr > wp.z - s.z/2 && nextPos.z - _pr < wp.z + s.z/2) {
+                    collidedWall = w;
+                    return false; // short-circuit
+                }
+            });
             if (collidedWall) {
                 this.spawnImpact(nextPos);
+                // Destructible maze bricks take damage; bullets are consumed on hit.
+                if (collidedWall.destructible) {
+                    this._damageWall(collidedWall, 1);
+                    this.scene.remove(p);
+                    this.playMode.projectiles.splice(i, 1);
+                    continue;
+                }
 
                 const data = p.userData;
                 if ((data.bounces || 0) >= 2) {
@@ -5001,6 +6590,7 @@ class Game3D {
                     const dmg = (p.userData.damage != null) ? p.userData.damage : 1;
                     e.userData.hp -= dmg;
                     this.spawnImpact(p.position.clone(), 0xff5533);
+                    this.spawnDamageNumber(p.position, dmg);
                     this.audio && this.audio.play('bulletHit');
                     this.scene.remove(p);
                     this.playMode.projectiles.splice(i, 1);
@@ -5019,6 +6609,103 @@ class Game3D {
                 this.scene.remove(p);
                 this.playMode.projectiles.splice(i, 1);
                 continue;
+            }
+        }
+    }
+
+    // ----- Enemy-fired projectiles (e.g. demon fireballs) -----
+    spawnEnemyProjectile(enemy, targetPos) {
+        const cfg = enemy.userData.ranged;
+        if (!cfg) return;
+        const origin = enemy.position.clone();
+        origin.y += (enemy.userData.hitHeight || 1.5) * 0.6;
+        const dir = new THREE.Vector3(
+            targetPos.x - origin.x,
+            (targetPos.y + 1.0) - origin.y,
+            targetPos.z - origin.z
+        );
+        if (dir.lengthSq() < 0.001) return;
+        dir.normalize();
+
+        const color = cfg.color || 0xff5522;
+        const group = new THREE.Group();
+        const core = new THREE.Mesh(
+            new THREE.SphereGeometry(0.18, 12, 12),
+            new THREE.MeshBasicMaterial({ color })
+        );
+        const halo = new THREE.Mesh(
+            new THREE.SphereGeometry(0.3, 12, 12),
+            new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.4, blending: THREE.AdditiveBlending, depthWrite: false })
+        );
+        group.add(core); group.add(halo);
+        group.add(new THREE.PointLight(color, 0.6, 4, 2));
+        group.position.copy(origin);
+        group.userData = {
+            dir, speed: cfg.projectileSpeed || 18, ttl: 4,
+            radius: 0.22, damage: cfg.damage || 8, color
+        };
+        this.scene.add(group);
+        this.playMode.enemyProjectiles.push(group);
+        this.audio && this.audio.play && this.audio.play('shoot');
+    }
+
+    updateEnemyProjectiles(deltaTime) {
+        const list = this.playMode.enemyProjectiles;
+        if (!list || list.length === 0) return;
+        const playerHitR = 0.7;
+        for (let i = list.length - 1; i >= 0; i--) {
+            const p = list[i];
+            const d = p.userData;
+            const step = d.dir.clone().multiplyScalar(d.speed * deltaTime);
+            const next = p.position.clone().add(step);
+
+            // Solid ceiling — chip the roof tile, or pass through if it's
+            // already been broken open.
+            if (this.roofY != null && next.y + d.radius >= this.roofY) {
+                const tile = this._roofTileAt(next.x, next.z);
+                if (tile) {
+                    this._damageRoofTile(tile, 1);
+                    this.scene.remove(p);
+                    list.splice(i, 1);
+                    continue;
+                }
+            }
+            // Wall collision — despawn with a small impact ping.
+            let hitWall = false;
+            const _dr = d.radius;
+            this._iterWallsNear(next.x, next.z, _dr + 1.5, (w) => {
+                const wp = w.position; const s = w.size;
+                if (next.x + _dr > wp.x - s.x/2 && next.x - _dr < wp.x + s.x/2 &&
+                    next.y + _dr > wp.y - s.y/2 && next.y - _dr < wp.y + s.y/2 &&
+                    next.z + _dr > wp.z - s.z/2 && next.z - _dr < wp.z + s.z/2) {
+                    hitWall = true; return false;
+                }
+            });
+            if (hitWall) {
+                this.spawnImpact(next, d.color);
+                this.scene.remove(p);
+                list.splice(i, 1);
+                continue;
+            }
+
+            p.position.copy(next);
+            d.ttl -= deltaTime;
+
+            // Player collision (cylinder around player).
+            const dx = p.position.x - this.player.position.x;
+            const dz = p.position.z - this.player.position.z;
+            const dy = p.position.y - this.player.position.y;
+            if (dx*dx + dz*dz < (playerHitR + d.radius) * (playerHitR + d.radius) && dy >= -0.1 && dy <= 2.2) {
+                this.spawnImpact(p.position.clone(), d.color);
+                this.damagePlayer(d.damage);
+                this.scene.remove(p);
+                list.splice(i, 1);
+                continue;
+            }
+
+            if (d.ttl <= 0) {
+                this.scene.remove(p);
+                list.splice(i, 1);
             }
         }
     }
@@ -5062,9 +6749,23 @@ class Game3D {
         if (isBoss && this.arena && this.arena.active) {
             this.onArenaBossKilled();
         }
-        // Skip the standard random drop for the boss — wave-complete drops are handled separately
-        if (!isBoss && Math.random() < this.dropChance) {
-            this.spawnPickup(deathPos.x, deathPos.z);
+        // Skip the standard random drop for the boss — wave-complete drops are
+        // handled separately. Bigger enemies drop more loot; chicks/chickens
+        // drop almost nothing.
+        if (!isBoss) {
+            const kind = (e.userData && e.userData.enemyKind) || 'zombie';
+            const dropCounts = { demon: 2, goblin: 1, zombie: 1, chick: 0, chicken: 0 };
+            const dropProb   = { demon: 0.9, goblin: this.dropChance, zombie: this.dropChance, chick: 0.25, chicken: 0.3 };
+            const count = dropCounts[kind] != null ? dropCounts[kind] : 1;
+            const prob  = dropProb[kind]   != null ? dropProb[kind]   : this.dropChance;
+            for (let i = 0; i < count; i++) {
+                if (Math.random() < prob) {
+                    // Spread multi-drops in a small ring so they don't stack on one spot.
+                    const ang = (count > 1) ? (Math.PI * 2 * i / count) + Math.random() * 0.4 : 0;
+                    const r = (count > 1) ? 0.6 + Math.random() * 0.5 : 0;
+                    this.spawnPickup(deathPos.x + Math.cos(ang) * r, deathPos.z + Math.sin(ang) * r);
+                }
+            }
         }
         // Clone every material first — the GLTF is cloned via SkeletonUtils, which
         // shares materials across all instances. Fading the shared mats would fade
@@ -5222,6 +6923,27 @@ class Game3D {
                 grp.geometry = flag.geometry;
                 return grp;
             }
+            case 'speed': {
+                const grp = new THREE.Group();
+                const boltMat = new THREE.MeshLambertMaterial({
+                    color: 0x66ddff, emissive: 0x224466, emissiveIntensity: 1.2
+                });
+                const bolt = new THREE.Mesh(new THREE.OctahedronGeometry(0.38, 0), boltMat);
+                bolt.rotation.z = Math.PI / 4;
+                const ring = new THREE.Mesh(
+                    new THREE.TorusGeometry(0.42, 0.06, 8, 16),
+                    new THREE.MeshBasicMaterial({
+                        color: 0xaae8ff, transparent: true, opacity: 0.7,
+                        blending: THREE.AdditiveBlending, depthWrite: false
+                    })
+                );
+                ring.rotation.x = Math.PI / 2;
+                grp.add(ring);
+                grp.add(bolt);
+                grp.material = boltMat;
+                grp.geometry = bolt.geometry;
+                return grp;
+            }
             default: {
                 const geo = new THREE.IcosahedronGeometry(0.35, 0);
                 const mat = new THREE.MeshLambertMaterial({
@@ -5251,6 +6973,13 @@ class Game3D {
                 this.spawnPickupCollectFx && this.spawnPickupCollectFx(p);
                 this.pickupsGroup.remove(p);
                 this.pickups.splice(i, 1);
+                if (p.userData.weaponId) {
+                    if (this.grantWeapon && this.grantWeapon(p.userData.weaponId)) {
+                        this.spawnImpact(p.position.clone(), 0x66ffcc);
+                        this.audio && this.audio.play('pickupPowerup');
+                    }
+                    continue;
+                }
                 if (p.userData.item) {
                     const item = p.userData.item;
                     const def = this.ITEM_DEFS[item.type];
@@ -5281,30 +7010,584 @@ class Game3D {
         }
     }
 
+    // ===== Crates & Keys (campaign maze loot) =====
+    //
+    // Crates sit at maze dead-ends, locked. Each maze has N matching keys
+    // scattered in regular corridors. Picking up a key bumps inventory.keys;
+    // walking up to a crate consumes one and pops the lid (swap closed→open),
+    // then drops the crate's loot table as normal pickups around the crate.
+    // Crates also have a small ring of guardian enemies that the spawner
+    // places adjacent to them.
+
+    _findMazeDeadEnds(maze) {
+        const rows = maze.length;
+        const cols = maze[0].length;
+        const ends = [];
+        for (let r = 1; r < rows - 1; r++) {
+            for (let c = 1; c < cols - 1; c++) {
+                if (maze[r][c] !== '.') continue;
+                let open = 0;
+                if (maze[r - 1][c] === '.') open++;
+                if (maze[r + 1][c] === '.') open++;
+                if (maze[r][c - 1] === '.') open++;
+                if (maze[r][c + 1] === '.') open++;
+                if (open === 1) ends.push({ r, c });
+            }
+        }
+        return ends;
+    }
+
+    // Pick a loot bundle for one crate. Always includes a weapon (gun / mg /
+    // jetpack) so cracking a crate feels like an upgrade moment, plus a mix
+    // of consumables. Returns array of item type strings.
+    _rollCrateLoot() {
+        const weapons = ['gun', 'machineGun', 'jetpack'];
+        const weapon = weapons[Math.floor(Math.random() * weapons.length)];
+        const bundle = [weapon];
+        // Always include at least one health + ammo so it's never a flop.
+        bundle.push('health', 'ammo', 'ammo');
+        // Mix-ins
+        const mixinPool = ['speed', 'flag', 'flag', 'health', 'ammo'];
+        const mixinCount = 2 + Math.floor(Math.random() * 2);
+        for (let i = 0; i < mixinCount; i++) {
+            bundle.push(mixinPool[Math.floor(Math.random() * mixinPool.length)]);
+        }
+        return bundle;
+    }
+
+    _createCrateMesh(x, z) {
+        const template = (this._decorTemplates && this._decorTemplates.chest) || null;
+        const group = new THREE.Group();
+        group.position.set(x, 0, z);
+        if (template && THREE.SkeletonUtils) {
+            const clone = THREE.SkeletonUtils.clone(template);
+            // 75% of the original 1.4 baseline.
+            clone.scale.setScalar(1.05);
+            clone.traverse((c) => { if (c.isMesh) { c.castShadow = true; c.receiveShadow = true; } });
+            group.add(clone);
+            group.userData._chestClone = clone;
+        } else {
+            // Fallback box so the system still works pre-template-load.
+            const fb = new THREE.Mesh(
+                new THREE.BoxGeometry(0.9, 0.75, 0.6),
+                new THREE.MeshLambertMaterial({ color: 0x7a4a1c })
+            );
+            fb.position.y = 0.38;
+            fb.castShadow = true;
+            group.add(fb);
+        }
+        // Padlock glow — pulsing ring sits just above the chest so it stays
+        // the visible "this is interactive AND locked" cue.
+        const lock = new THREE.Mesh(
+            new THREE.TorusGeometry(0.22, 0.05, 8, 18),
+            new THREE.MeshBasicMaterial({ color: 0xffd060, transparent: true, opacity: 0.9 })
+        );
+        lock.rotation.x = Math.PI / 2;
+        lock.position.y = 0.95;
+        group.add(lock);
+        const lockLight = new THREE.PointLight(0xffd060, 0.7, 4, 2);
+        lockLight.position.y = 0.95;
+        group.add(lockLight);
+        group.userData.lockBadge = lock;
+        group.userData.lockLight = lockLight;
+        return group;
+    }
+
+    _swapCrateToOpenMesh(crate) {
+        const tplOpen = (this._decorTemplates && this._decorTemplates.chestOpen) || null;
+        const closed = crate.userData._chestClone;
+        if (closed) {
+            crate.remove(closed);
+            crate.userData._chestClone = null;
+        }
+        if (tplOpen && THREE.SkeletonUtils) {
+            const clone = THREE.SkeletonUtils.clone(tplOpen);
+            clone.scale.setScalar(1.05);
+            clone.traverse((c) => { if (c.isMesh) { c.castShadow = true; c.receiveShadow = true; } });
+            crate.add(clone);
+            crate.userData._chestClone = clone;
+        }
+        // Drop the padlock visual since it's no longer locked.
+        if (crate.userData.lockBadge) {
+            crate.remove(crate.userData.lockBadge);
+            crate.userData.lockBadge = null;
+        }
+        if (crate.userData.lockLight) {
+            crate.remove(crate.userData.lockLight);
+            crate.userData.lockLight = null;
+        }
+    }
+
+    _createKeyMesh(x, z) {
+        const template = (this._decorTemplates && this._decorTemplates.key) || null;
+        const group = new THREE.Group();
+        group.position.set(x, 1.0, z);
+        if (template && THREE.SkeletonUtils) {
+            const clone = THREE.SkeletonUtils.clone(template);
+            // 90% smaller than the original 2.0 baseline; the halo + light
+            // do the heavy lifting for spotability.
+            clone.scale.setScalar(0.2);
+            clone.traverse((c) => { if (c.isMesh) { c.castShadow = true; c.receiveShadow = true; } });
+            group.add(clone);
+        } else {
+            const fb = new THREE.Mesh(
+                new THREE.SphereGeometry(0.06, 10, 10),
+                new THREE.MeshBasicMaterial({ color: 0xffd060 })
+            );
+            group.add(fb);
+        }
+        // Glow halo + point light so the tiny key still pops at distance.
+        const halo = new THREE.Mesh(
+            new THREE.SphereGeometry(0.35, 12, 12),
+            new THREE.MeshBasicMaterial({ color: 0xffe080, transparent: true, opacity: 0.22, blending: THREE.AdditiveBlending, depthWrite: false })
+        );
+        group.add(halo);
+        group.add(new THREE.PointLight(0xffd060, 0.7, 5, 2));
+        group.userData.t = Math.random() * Math.PI * 2;
+        return group;
+    }
+
+    placeCampaignMazeContent() {
+        if (this.activeModeId !== 'campaign') return;
+        const info = this.lastMazeInfo;
+        if (!info || !info.maze) return;
+
+        this.clearCratesAndKeys();
+
+        const startCell = this.levelStartCell ? { r: this.levelStartCell.y, c: this.levelStartCell.x } : null;
+        const endCell = this.levelEndCell ? { r: this.levelEndCell.y, c: this.levelEndCell.x } : null;
+        const isReserved = (r, c) =>
+            (startCell && startCell.r === r && startCell.c === c) ||
+            (endCell && endCell.r === r && endCell.c === c);
+
+        const deadEnds = this._findMazeDeadEnds(info.maze).filter(p => !isReserved(p.r, p.c));
+        if (deadEnds.length === 0) return;
+
+        for (let i = deadEnds.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [deadEnds[i], deadEnds[j]] = [deadEnds[j], deadEnds[i]];
+        }
+
+        // 2-4 crates per level, scaled by maze size.
+        const target = Math.min(deadEnds.length, 2 + Math.floor(Math.random() * 3));
+        const crateCells = deadEnds.slice(0, target);
+
+        for (const cell of crateCells) {
+            const x = info.startX + cell.c * info.cellSize;
+            const z = info.startZ + cell.r * info.cellSize;
+            const group = this._createCrateMesh(x, z);
+            group.userData = Object.assign(group.userData || {}, {
+                type: 'crate',
+                locked: true,
+                opened: false,
+                loot: this._rollCrateLoot(),
+                cell,
+                t: Math.random() * Math.PI * 2,
+                spawnPos: { x, z }
+            });
+            this.playMode.cratesGroup.add(group);
+            this.playMode.crates.push(group);
+            // Spawn 1-2 guardian enemies in the corridor leading to the crate.
+            this._spawnCrateGuardians(cell, info);
+        }
+
+        // Place keys equal to crate count, away from the dead-ends so the
+        // player has to actually hunt for them.
+        this._placeCampaignKeys(crateCells.length, info, crateCells);
+
+        // DEBUG: drop a free key + crate next to the player spawn so the loop
+        // can be exercised in seconds. Toggled by DEBUG_SPAWN_LOOT_NEAR_PLAYER.
+        if (this.DEBUG_SPAWN_LOOT_NEAR_PLAYER) {
+            this._spawnDebugLootNearPlayer();
+        }
+    }
+
+    _spawnDebugLootNearPlayer() {
+        if (!this.player) return;
+        const px = this.player.position.x;
+        const pz = this.player.position.z;
+        // Forward = direction the player faces (toward the maze entry).
+        const dir = this.levelEntryDir || { x: 1, z: 0 };
+        const flen = Math.hypot(dir.x, dir.z) || 1;
+        const fx = dir.x / flen;
+        const fz = dir.z / flen;
+        // Right-hand perpendicular (so key goes left, crate goes right).
+        const rx = -fz;
+        const rz = fx;
+
+        // Key on the player's left, ~2.5u away.
+        const kx = px - rx * 2.5 + fx * 1.0;
+        const kz = pz - rz * 2.5 + fz * 1.0;
+        const key = this._createKeyMesh(kx, kz);
+        key.userData = Object.assign(key.userData || {}, {
+            type: 'key',
+            spawnPos: { x: kx, z: kz },
+            _debugSpawn: true
+        });
+        this.playMode.keysGroup.add(key);
+        this.playMode.keys.push(key);
+
+        // Crate on the player's right, ~2.5u away.
+        const cx = px + rx * 2.5 + fx * 1.0;
+        const cz = pz + rz * 2.5 + fz * 1.0;
+        const crate = this._createCrateMesh(cx, cz);
+        crate.userData = Object.assign(crate.userData || {}, {
+            type: 'crate',
+            locked: true,
+            opened: false,
+            loot: this._rollCrateLoot(),
+            cell: null,
+            t: Math.random() * Math.PI * 2,
+            spawnPos: { x: cx, z: cz },
+            _debugSpawn: true
+        });
+        this.playMode.cratesGroup.add(crate);
+        this.playMode.crates.push(crate);
+
+        this.showMessage && this.showMessage('Debug: free key (left) + crate (right) placed at spawn');
+    }
+
+    _spawnCrateGuardians(cell, info) {
+        const maze = info.maze;
+        const candidates = [];
+        const tryCell = (r, c) => {
+            if (r < 0 || r >= maze.length || c < 0 || c >= maze[0].length) return;
+            if (maze[r][c] === '.') candidates.push({ r, c });
+        };
+        // Walk outward up to 3 steps from the dead-end to find spawnable cells.
+        for (let dr = -3; dr <= 3; dr++) {
+            for (let dc = -3; dc <= 3; dc++) {
+                if (dr === 0 && dc === 0) continue;
+                if (Math.abs(dr) + Math.abs(dc) > 3) continue;
+                tryCell(cell.r + dr, cell.c + dc);
+            }
+        }
+        const count = 1 + Math.floor(Math.random() * 2);
+        for (let i = 0; i < count && candidates.length; i++) {
+            const idx = Math.floor(Math.random() * candidates.length);
+            const { r, c } = candidates.splice(idx, 1)[0];
+            const x = info.startX + c * info.cellSize;
+            const z = info.startZ + r * info.cellSize;
+            if (this.player.position.distanceTo(new THREE.Vector3(x, 0, z)) < 6) continue;
+            const m = this._tryPlaceEnemy(x, z, { x, z });
+            if (!m) continue;
+            m.userData._isGuardian = true;
+            this.playMode.enemiesGroup.add(m);
+            this.playMode.enemies.push(m);
+        }
+    }
+
+    _placeCampaignKeys(count, info, crateCells) {
+        const maze = info.maze;
+        const startCell = this.levelStartCell ? { r: this.levelStartCell.y, c: this.levelStartCell.x } : null;
+        const endCell = this.levelEndCell ? { r: this.levelEndCell.y, c: this.levelEndCell.x } : null;
+        const open = [];
+        for (let r = 0; r < maze.length; r++) {
+            for (let c = 0; c < maze[0].length; c++) {
+                if (maze[r][c] !== '.') continue;
+                // Avoid crate cells themselves.
+                let onCrate = false;
+                for (const cc of crateCells) {
+                    if (cc.r === r && cc.c === c) { onCrate = true; break; }
+                }
+                if (onCrate) continue;
+                if (startCell && startCell.r === r && startCell.c === c) continue;
+                if (endCell && endCell.r === r && endCell.c === c) continue;
+                open.push({ r, c });
+            }
+        }
+        for (let i = open.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [open[i], open[j]] = [open[j], open[i]];
+        }
+        let placed = 0;
+        for (const cell of open) {
+            if (placed >= count) break;
+            const x = info.startX + cell.c * info.cellSize;
+            const z = info.startZ + cell.r * info.cellSize;
+            // Don't drop keys right under the player's spawn either.
+            if (this.player.position.distanceTo(new THREE.Vector3(x, 0, z)) < 6) continue;
+            const key = this._createKeyMesh(x, z);
+            key.userData = Object.assign(key.userData || {}, {
+                type: 'key',
+                spawnPos: { x, z }
+            });
+            this.playMode.keysGroup.add(key);
+            this.playMode.keys.push(key);
+            placed++;
+        }
+    }
+
+    clearCratesAndKeys() {
+        if (this.playMode.crates) {
+            for (const c of this.playMode.crates) this.playMode.cratesGroup.remove(c);
+            this.playMode.crates = [];
+        }
+        if (this.playMode.keys) {
+            for (const k of this.playMode.keys) this.playMode.keysGroup.remove(k);
+            this.playMode.keys = [];
+        }
+        this.inventory.keys = 0;
+        this._focusedCrate = null;
+        const badge = document.getElementById('key-badge');
+        if (badge) badge.style.display = 'none';
+        const prompt = document.getElementById('crate-prompt');
+        if (prompt) prompt.style.display = 'none';
+    }
+
+    _updateKeyBadgeUI() {
+        let badge = document.getElementById('key-badge');
+        const count = this.inventory.keys || 0;
+        const crateCount = (this.playMode.crates || []).filter(c => !c.userData.opened).length;
+        const shouldShow = this.gameMode === 'play' && (count > 0 || crateCount > 0);
+        if (!shouldShow) {
+            if (badge) badge.style.display = 'none';
+            return;
+        }
+        if (!badge) {
+            badge = document.createElement('div');
+            badge.id = 'key-badge';
+            badge.style.position = 'absolute';
+            badge.style.top = '76px';
+            badge.style.right = '16px';
+            badge.style.display = 'flex';
+            badge.style.alignItems = 'center';
+            badge.style.gap = '6px';
+            badge.style.padding = '6px 12px';
+            badge.style.background = 'linear-gradient(135deg, rgba(60,40,10,0.85), rgba(20,12,2,0.85))';
+            badge.style.border = '2px solid #ffd060';
+            badge.style.borderRadius = '999px';
+            badge.style.color = '#ffe8a0';
+            badge.style.fontFamily = 'Courier New, monospace';
+            badge.style.fontSize = '14px';
+            badge.style.fontWeight = '700';
+            badge.style.letterSpacing = '0.5px';
+            badge.style.boxShadow = '0 4px 14px rgba(255,208,96,0.35)';
+            badge.style.zIndex = '950';
+            badge.style.userSelect = 'none';
+            badge.style.pointerEvents = 'none';
+            document.body.appendChild(badge);
+        }
+        badge.style.display = 'flex';
+        badge.innerHTML = `<span style="font-size:18px;">🗝️</span><span>${count} / ${crateCount} crate${crateCount === 1 ? '' : 's'}</span>`;
+    }
+
+    updateCratesAndKeys(deltaTime) {
+        if (this.gameMode !== 'play') return;
+
+        // Keys: bob/rotate + auto-pickup on proximity. Radius is generous so
+        // you don't have to walk directly over the (tiny) key mesh.
+        if (this.playMode.keys && this.playMode.keys.length) {
+            const pickupR2 = 2.5 * 2.5;
+            for (let i = this.playMode.keys.length - 1; i >= 0; i--) {
+                const k = this.playMode.keys[i];
+                k.userData.t += deltaTime;
+                k.rotation.y += deltaTime * 1.5;
+                k.position.y = 1.0 + Math.sin(k.userData.t * 3) * 0.12;
+                const d2 = k.position.distanceToSquared(this.player.position);
+                if (d2 < pickupR2) {
+                    this.inventory.keys = (this.inventory.keys || 0) + 1;
+                    this.playMode.keysGroup.remove(k);
+                    this.playMode.keys.splice(i, 1);
+                    this.audio && this.audio.play && this.audio.play('pickupPowerup');
+                    this.spawnImpact && this.spawnImpact(k.position.clone(), 0xffe080);
+                    this.showToast && this.showToast(`Picked up a key (${this.inventory.keys})`, 'success');
+                    this.showMessage && this.showMessage('Key collected — find a crate!');
+                    this._qbSig = null;
+                    this.updateInventoryGridUI && this.updateInventoryGridUI();
+                }
+            }
+        }
+
+        this._updateKeyBadgeUI();
+
+        // Crates: lock badge pulse + focus the nearest crate within reach so
+        // the player can press Enter to use a key. Auto-open is intentionally
+        // gone — the prompt replaces it.
+        let focused = null;
+        let focusedD2 = Infinity;
+        if (this.playMode.crates && this.playMode.crates.length) {
+            const focusR2 = 3.6 * 3.6; // generous "you're standing in front of it" radius
+            for (const crate of this.playMode.crates) {
+                crate.userData.t += deltaTime;
+                if (crate.userData.lockBadge) {
+                    const s = 1 + Math.sin(crate.userData.t * 3) * 0.12;
+                    crate.userData.lockBadge.scale.set(s, s, s);
+                    crate.rotation.y = Math.sin(crate.userData.t * 0.8) * 0.12;
+                }
+                if (crate.userData.opened) continue;
+                const d2 = crate.position.distanceToSquared(this.player.position);
+                if (d2 > focusR2) continue;
+                if (d2 < focusedD2) {
+                    focused = crate;
+                    focusedD2 = d2;
+                }
+            }
+        }
+        this._focusedCrate = focused;
+        this._updateCratePromptUI(focused);
+    }
+
+    // Center-screen prompt for crate interaction. Builds the element lazily
+    // so we don't have to touch index.html, and reflects three states:
+    //   1. focused + key in hand → "Press [Enter] to open (N keys)"
+    //   2. focused + no key      → "Locked — find a key"
+    //   3. nothing focused       → hidden
+    _updateCratePromptUI(crate) {
+        let prompt = document.getElementById('crate-prompt');
+        if (!crate) {
+            if (prompt) prompt.style.display = 'none';
+            return;
+        }
+        if (!prompt) {
+            prompt = document.createElement('div');
+            prompt.id = 'crate-prompt';
+            prompt.style.position = 'absolute';
+            prompt.style.top = '50%';
+            prompt.style.left = '50%';
+            prompt.style.transform = 'translate(-50%, calc(-50% + 90px))';
+            prompt.style.padding = '12px 22px';
+            prompt.style.background = 'linear-gradient(135deg, rgba(20,12,2,0.92), rgba(60,40,10,0.92))';
+            prompt.style.border = '2px solid #ffd060';
+            prompt.style.borderRadius = '14px';
+            prompt.style.color = '#ffe8a0';
+            prompt.style.fontFamily = 'Courier New, monospace';
+            prompt.style.fontSize = '16px';
+            prompt.style.fontWeight = '700';
+            prompt.style.letterSpacing = '0.5px';
+            prompt.style.textAlign = 'center';
+            prompt.style.lineHeight = '1.35';
+            prompt.style.boxShadow = '0 6px 22px rgba(255,208,96,0.4)';
+            prompt.style.zIndex = '960';
+            prompt.style.userSelect = 'none';
+            prompt.style.pointerEvents = 'none';
+            document.body.appendChild(prompt);
+        }
+        const keys = this.inventory.keys || 0;
+        const canOpen = keys > 0;
+        prompt.style.display = 'block';
+        // Pulse via opacity tied to the crate's own bob — keeps every prompt
+        // feeling alive without needing a separate animation loop.
+        const pulse = 0.92 + Math.sin((crate.userData.t || 0) * 4) * 0.08;
+        prompt.style.opacity = String(pulse);
+        if (canOpen) {
+            prompt.style.borderColor = '#ffd060';
+            prompt.innerHTML = `
+                <div style="font-size:22px;">🗝️ <span style="color:#fff;">Press <span style="color:#ffd060;">[Enter]</span> to unlock crate</span></div>
+                <div style="font-size:12px;opacity:0.85;margin-top:4px;">${keys} key${keys === 1 ? '' : 's'} in inventory</div>
+            `;
+        } else {
+            prompt.style.borderColor = '#ff6677';
+            prompt.innerHTML = `
+                <div style="font-size:22px;color:#ffb0b8;">🔒 Locked</div>
+                <div style="font-size:12px;opacity:0.85;margin-top:4px;color:#ffd0d4;">Find a key to open this crate</div>
+            `;
+        }
+    }
+
+    // Triggered by the Enter key. Opens the focused crate if the player has
+    // a key; otherwise plays a soft "denied" feedback so the press feels
+    // acknowledged.
+    tryUseFocusedCrate() {
+        const crate = this._focusedCrate;
+        if (!crate || crate.userData.opened) return false;
+        if ((this.inventory.keys || 0) <= 0) {
+            this.audio && this.audio.play && this.audio.play('uiClick');
+            this.showMessage && this.showMessage('No keys — find one in the maze');
+            return false;
+        }
+        this._openCrate(crate);
+        this._focusedCrate = null;
+        this._updateCratePromptUI(null);
+        return true;
+    }
+
+    _openCrate(crate) {
+        if (crate.userData.opened) return;
+        crate.userData.locked = false;
+        crate.userData.opened = true;
+        this.inventory.keys = Math.max(0, (this.inventory.keys || 0) - 1);
+        this._swapCrateToOpenMesh(crate);
+        this.audio && this.audio.play && this.audio.play('pickupPowerup');
+        this.showToast && this.showToast('Crate unlocked!', 'success');
+        this.spawnImpact && this.spawnImpact(crate.position.clone(), 0xffe080);
+
+        // Drop loot in a small ring around the crate so the player can see
+        // each item discretely instead of one stacked mess.
+        const loot = crate.userData.loot || [];
+        const count = loot.length;
+        for (let i = 0; i < count; i++) {
+            const ang = (i / count) * Math.PI * 2 + Math.random() * 0.3;
+            const r = 1.2 + Math.random() * 0.4;
+            const x = crate.position.x + Math.cos(ang) * r;
+            const z = crate.position.z + Math.sin(ang) * r;
+            // Hand-place a single pickup of the loot type without rolling
+            // through the random spawnPickup table.
+            this._spawnPickupOfType(loot[i], x, z);
+        }
+        this._qbSig = null;
+        this.updateInventoryGridUI && this.updateInventoryGridUI();
+    }
+
+    // Force-spawn a pickup of a specific type at (x, z). Used by crates so we
+    // can deliver an explicit loot table instead of weighted-random.
+    _spawnPickupOfType(type, x, z) {
+        const isWeapon = type === 'gun' || type === 'machineGun' || type === 'jetpack';
+        const group = new THREE.Group();
+        group.position.set(x, 0.6, z);
+        let mesh;
+        if (isWeapon) {
+            // Simple shimmer cube for weapon pickups; grantWeapon handles real logic.
+            const color = type === 'gun' ? 0x88ccff
+                        : type === 'machineGun' ? 0xff8866
+                        : 0xa8e8ff;
+            mesh = new THREE.Mesh(
+                new THREE.BoxGeometry(0.7, 0.4, 0.4),
+                new THREE.MeshLambertMaterial({ color, emissive: color, emissiveIntensity: 0.35 })
+            );
+            group.userData.weaponId = type;
+        } else {
+            const def = (this.ITEM_DEFS || {})[type];
+            const color = (def && def.color) || 0xffffff;
+            mesh = new THREE.Mesh(
+                new THREE.SphereGeometry(0.32, 12, 12),
+                new THREE.MeshLambertMaterial({ color, emissive: color, emissiveIntensity: 0.3 })
+            );
+            group.userData.item = { type };
+        }
+        mesh.castShadow = true;
+        group.add(mesh);
+        const halo = new THREE.Mesh(
+            new THREE.SphereGeometry(0.6, 12, 12),
+            new THREE.MeshBasicMaterial({ color: 0xffffaa, transparent: true, opacity: 0.18, blending: THREE.AdditiveBlending, depthWrite: false })
+        );
+        group.add(halo);
+        group.userData.t = 0;
+        this.pickupsGroup.add(group);
+        this.pickups.push(group);
+    }
+
     // ===== Jetpack System =====
     createJetpackParticles() {
         if (!this.isJetpackActive || this.jetpackThrust < 0.1) return;
-        
-        // Create particles below the player
+
         const particleCount = Math.floor(this.jetpackThrust * 8);
         for (let i = 0; i < particleCount; i++) {
             const particle = new THREE.Mesh(
                 new THREE.SphereGeometry(0.1, 4, 4),
-                new THREE.MeshBasicMaterial({ 
+                new THREE.MeshBasicMaterial({
                     color: new THREE.Color().setHSL(0.1 + Math.random() * 0.1, 1, 0.6),
                     transparent: true,
                     opacity: 0.8
                 })
             );
-            
-            // Position below player with some randomness
+
             particle.position.set(
                 this.player.position.x + (Math.random() - 0.5) * 2,
                 this.player.position.y - 1,
                 this.player.position.z + (Math.random() - 0.5) * 2
             );
-            
-            // Add velocity
+
             particle.userData = {
                 velocity: new THREE.Vector3(
                     (Math.random() - 0.5) * 4,
@@ -5314,25 +7597,23 @@ class Game3D {
                 life: 1.0,
                 maxLife: 1.0
             };
-            
+
             this.scene.add(particle);
             this.jetpackParticles.push(particle);
         }
     }
-    
+
     updateJetpackParticles(deltaTime) {
         for (let i = this.jetpackParticles.length - 1; i >= 0; i--) {
             const particle = this.jetpackParticles[i];
             const userData = particle.userData;
-            
-            // Update position
+
             particle.position.add(userData.velocity.clone().multiplyScalar(deltaTime));
-            
-            // Update life
+
             userData.life -= deltaTime * 2;
             particle.material.opacity = userData.life;
-            
-            // Remove dead particles
+
+
             if (userData.life <= 0) {
                 this.scene.remove(particle);
                 this.jetpackParticles.splice(i, 1);
@@ -5341,70 +7622,6 @@ class Game3D {
     }
     
     // ===== Item Activation =====
-    // Create 32-bit style icons for inventory items
-    createItemIcon(type, size = 24) {
-        const canvas = document.createElement('canvas');
-        canvas.width = size;
-        canvas.height = size;
-        const ctx = canvas.getContext('2d');
-        
-        // 32-bit style: pixelated, limited colors
-        ctx.imageSmoothingEnabled = false;
-        
-        switch (type) {
-            case 'health':
-                // Heart icon
-                ctx.fillStyle = '#ff6666';
-                ctx.fillRect(8, 4, 8, 8);
-                ctx.fillRect(6, 6, 12, 8);
-                ctx.fillRect(4, 8, 16, 6);
-                ctx.fillRect(6, 10, 12, 4);
-                ctx.fillRect(8, 12, 8, 2);
-                break;
-                
-            case 'ammo':
-                // Military crosshair/target icon
-                ctx.fillStyle = '#ffff66';
-                ctx.fillRect(10, 2, 4, 20);
-                ctx.fillRect(2, 10, 20, 4);
-                ctx.fillRect(8, 8, 8, 8);
-                ctx.fillStyle = '#000000';
-                ctx.fillRect(10, 10, 4, 4);
-                break;
-                
-            case 'speed':
-                // Arrow up icon
-                ctx.fillStyle = '#66ccff';
-                ctx.fillRect(10, 16, 4, 6);
-                ctx.fillRect(6, 12, 12, 4);
-                ctx.fillRect(8, 8, 8, 4);
-                ctx.fillRect(10, 4, 4, 4);
-                break;
-                
-            case 'jetpack':
-                // Jetpack icon (rocket/arrow up with flames)
-                ctx.fillStyle = '#ffaa66';
-                ctx.fillRect(10, 4, 4, 12);
-                ctx.fillRect(8, 16, 8, 4);
-                ctx.fillStyle = '#ff6666';
-                ctx.fillRect(6, 18, 12, 2);
-                ctx.fillRect(8, 20, 8, 2);
-                break;
-                
-            case 'flag':
-                // Flag icon
-                ctx.fillStyle = '#ff66aa';
-                ctx.fillRect(4, 4, 2, 16);
-                ctx.fillRect(6, 4, 12, 8);
-                ctx.fillStyle = '#ffffff';
-                ctx.fillRect(8, 6, 8, 2);
-                ctx.fillRect(8, 8, 8, 2);
-                break;
-        }
-        
-        return canvas.toDataURL();
-    }
-
     // Consume one stack of `itemId` from the player's inventory and apply it.
     // autoApply pickups (ammo/jetpack/flag) don't sit in items, so we just
     // surface a hint when the player clicks them in the quickbar.
@@ -5426,8 +7643,10 @@ class Game3D {
         }
 
         def.apply();
-        this.showMessage(this.itemLabel(itemId));
-        this.showToast(this.pickupToast(itemId), 'success');
+        if (itemId !== 'speed') {
+            this.showMessage(this.itemLabel(itemId));
+            this.showToast(this.pickupToast(itemId), 'success');
+        }
 
         items.splice(idx, 1);
         this._qbSig = null;
@@ -5684,120 +7903,89 @@ class Game3D {
         // Directional light (desert sun) — warm and bright
         const directionalLight = new THREE.DirectionalLight(t.sun, 2.4);
         directionalLight.position.set(50, 50, 50);
-        directionalLight.castShadow = true;
-        directionalLight.shadow.mapSize.width = 1024;
-        directionalLight.shadow.mapSize.height = 1024;
-        directionalLight.shadow.camera.near = 0.5;
-        directionalLight.shadow.camera.far = 200;
-        directionalLight.shadow.camera.left = -50;
-        directionalLight.shadow.camera.right = 50;
-        directionalLight.shadow.camera.top = 50;
-        directionalLight.shadow.camera.bottom = -50;
+        directionalLight.castShadow = false;
         this.scene.add(directionalLight);
         this.directionalLight = directionalLight;
     }
     
     shouldBlockInput(event) {
-        // Block input when modals/inputs are focused
         if (this.isDrawerOpen) {
-            // Allow drawer-specific keys
             const allowedKeys = ['KeyM', 'Escape', 'Tab', 'Enter', 'ArrowUp', 'ArrowDown', 'KeyV', 'KeyG'];
             return !allowedKeys.includes(event.code);
         }
-        
-        // Block input when settings modal is open
+
         if (this.modalOpen) {
-            // Allow modal-specific keys
             const allowedKeys = ['Escape', 'KeyP', 'KeyV', 'KeyG'];
             return !allowedKeys.includes(event.code);
         }
-        
-        // Block input when toolbox modal is open (create mode)
+
         if (this.gameMode === 'create' && this.toolboxModalOpen) {
-            // Allow modal-specific keys
             const allowedKeys = ['Escape', 'KeyT', 'KeyV', 'KeyG'];
             return !allowedKeys.includes(event.code);
         }
-        
-        // Block weapon switching keys (1-9) when not in play mode
+
+        // Quickbar number keys only fire in play mode
         if (event.code >= 'Digit1' && event.code <= 'Digit9') {
             if (this.gameMode !== 'play') {
                 return true;
             }
         }
-        
-        // Block input when game is not in play mode (except for specific keys)
+
         if (this.gameMode !== 'play') {
             const allowedKeys = [
                 'KeyP', 'Escape', 'ArrowLeft', 'ArrowRight', 'Digit1', 'Digit3', // Settings and maze switching
-                'KeyT', 'KeyQ', 'KeyE', 'ShiftLeft', 'ShiftRight', 'KeyV', 'KeyG' // Create mode tools & view toggles
+                'KeyT', 'KeyQ', 'KeyE', 'ShiftLeft', 'ShiftRight', 'KeyV', 'KeyG' // Create-mode tools & view toggles
             ];
             return !allowedKeys.includes(event.code);
         }
-        
+
         return false;
     }
     
     setupEventListeners() {
-        // Keyboard events
         document.addEventListener('keydown', (event) => {
             this.keys[event.code] = true;
-            
-            // Debug: Log all key presses
-            if (event.code === 'KeyV') {
-            }
-            
-            // Comprehensive input blocking system
+
             if (this.shouldBlockInput(event)) {
                 return;
             }
-            
-            // Track SHIFT key for create mode
+
             if (event.code === 'ShiftLeft' || event.code === 'ShiftRight') {
                 if (this.gameMode === 'create') {
                     this.createMode.isShiftHeld = true;
+                } else {
+                    this.player.ducked = true;
                 }
             }
-            
-            // Control scheme switching — disabled: Digit1/Digit3 are quickbar slots in play mode.
-            // Use the settings modal (P) to change control scheme.
 
-
-            // Maze switching controls
+            // Arrow keys switch maze
             if (event.code === 'ArrowLeft') {
                 this.switchMaze((this.currentMazeIndex - 1 + this.savedMazes.length) % this.savedMazes.length);
             }
             if (event.code === 'ArrowRight') {
                 this.switchMaze((this.currentMazeIndex + 1) % this.savedMazes.length);
             }
-            
-            // Open settings modal with P key
+
             if (event.code === 'KeyP') {
                 this.toggleSettingsModal();
             }
-            
-            // Close drawer with ESC
+
             if (event.code === 'Escape' && this.isDrawerOpen) {
                 this.isDrawerOpen = false;
                 this.hideDrawerCursor();
                 this.updateDrawerUI();
             }
-            
-            // Open drawer with M key
+
             if (event.code === 'KeyM') {
                 this.toggleMoreDrawer();
             }
-            
-            // Open toolbox modal with T key (create mode only)
+
             if (event.code === 'KeyT' && this.gameMode === 'create') {
                 this.toggleToolboxModal();
             }
-            
-            // Weapon switching is now handled by selectGridItemByShortcut()
-            
-            // Q and E for tank controls (scheme 3) or create mode tools
+
+            // Q/E: create-mode tools, OR tank turn (scheme 3)
             if (this.gameMode === 'create' && !this.modalOpen) {
-                // Create mode: Q for wall, E for erase
                 if (event.code === 'KeyQ') {
                     this.setCreateTool('wall');
                 }
@@ -5805,16 +7993,15 @@ class Game3D {
                     this.setCreateTool('erase');
                 }
             } else if (this.controlScheme === 3) {
-                // Tank controls: Q and E for turning
                 if (event.code === 'KeyE') {
-                    this.characterRotation -= Math.PI / 2; // 90 degrees left
+                    this.characterRotation -= Math.PI / 2;
                 }
                 if (event.code === 'KeyQ') {
-                    this.characterRotation += Math.PI / 2; // 90 degrees right
+                    this.characterRotation += Math.PI / 2;
                 }
             }
-            
-            // Command: cycle camera angle (isometric only)
+
+            // Cmd: cycle camera angle (isometric only)
             if (event.code === 'MetaLeft' || event.code === 'MetaRight') {
                 event.preventDefault();
                 if (this.viewMode !== 'fpv') {
@@ -5822,18 +8009,26 @@ class Game3D {
                 }
             }
 
-            // Toggle isometric orbit with O in play mode
+            // O: toggle isometric orbit (not valid in FPV)
             if (event.code === 'KeyO' && this.gameMode === 'play') {
-                // Disable orbit in FPV; only allowed in isometric view
                 if (this.viewMode !== 'fpv') {
                     this.playMode.orbitEnabled = !this.playMode.orbitEnabled;
                     this.playMode.lastMouseX = null;
                 }
             }
 
-            // Toggle between first-person and second-person (iso) only
+            // V: swap FPV / iso
             if (event.code === 'KeyV' && !event.repeat) {
                 this.setViewMode(this.viewMode === 'fpv' ? 'iso' : 'fpv');
+            }
+
+            // Enter: use a key on the crate currently in focus (center-screen
+            // prompt indicates when this is valid).
+            if (event.code === 'Enter' && !event.repeat && this.gameMode === 'play') {
+                if (this._focusedCrate) {
+                    event.preventDefault();
+                    this.tryUseFocusedCrate();
+                }
             }
 
             // Place flag in play mode or fall back to indicator toggle
@@ -5865,33 +8060,22 @@ class Game3D {
                 return;
             }
 
-            // Test crosshair visibility (temporary)
-            if (event.code === 'KeyC') {
-                const testCrosshair = document.getElementById('crosshair');
-                if (testCrosshair) {
-                    testCrosshair.style.display = 'block';
-                }
-            }
-            
-            // Reload weapon
             if (event.code === 'KeyR') {
                 this.reloadWeapon();
             }
-            
-            // Grid item shortcuts (1-9)
+
+            // Quickbar slot shortcuts
             if (event.code >= 'Digit1' && event.code <= 'Digit9') {
                 const shortcut = event.code.replace('Digit', '');
                 this.selectGridItemByShortcut(shortcut);
             }
 
-            // Reset view/spawn if things go off-screen
+            // T: reset view / spawn (escape hatch when something goes off-screen)
             if (event.code === 'KeyT') {
-                // Exit pointer lock for clarity
                 if (document.pointerLockElement) document.exitPointerLock();
                 this.setViewMode('iso');
                 this.currentCameraAngle = 0;
                 this.playMode.mouseNDC.set(0, 0);
-                // Prefer labyrinth start if available
                 const cur = this.savedMazes[this.currentMazeIndex];
                 if (cur && cur.type === 'labyrinth' && this.levelStartWorld) {
                     this.player.position.copy(this.levelStartWorld);
@@ -5899,49 +8083,43 @@ class Game3D {
                     this.player.position.set(0, 0, 0);
                 }
                 this.characterRotation = 0;
-                // Nudge camera immediately
                 this.updateCamera();
             }
 
-            // Runtime model yaw alignment helpers
+            // Y/U: nudge model yaw offset (debug alignment for new character GLTFs)
             if (event.code === 'KeyY') {
-                // Rotate model yaw offset +90°
                 this.modelYawOffset = (this.modelYawOffset + Math.PI / 2) % (Math.PI * 2);
             }
             if (event.code === 'KeyU') {
-                // Rotate model yaw offset -90°
                 this.modelYawOffset = (this.modelYawOffset - Math.PI / 2 + Math.PI * 2) % (Math.PI * 2);
             }
         });
-        
+
         document.addEventListener('keyup', (event) => {
             this.keys[event.code] = false;
-            
-            // Track SHIFT key release for create mode
+
             if (event.code === 'ShiftLeft' || event.code === 'ShiftRight') {
                 if (this.gameMode === 'create') {
                     this.createMode.isShiftHeld = false;
-                    this.createMode.startLinePos = null; // Reset line start
+                    this.createMode.startLinePos = null;
+                } else {
+                    this.player.ducked = false;
                 }
             }
-            
-            // No special handling needed on space release now
         });
-        
-        // Mouse events - behavior depends on control scheme
+
+        // Mouse behavior depends on control scheme + view mode
         document.addEventListener('mousemove', (event) => {
-            // Block mouse input when drawer is open
             if (this.isDrawerOpen) {
                 return;
             }
-            
-            // Handle create mode preview
+
             if (this.gameMode === 'create' && !this.modalOpen) {
                 this.handleCreateModeHover();
-                // Don't process other mouse events in create mode
                 return;
             } else if (this.gameMode === 'play' && !this.modalOpen) {
-                // Track mouse for aim/orbit. Use pointer lock deltas if locked; otherwise client coords.
+                if (this.isGameplayActive && !this.isGameplayActive()) return;
+                // Pointer-lock deltas when locked, client coords otherwise.
                 const canvas = document.getElementById('gameCanvas');
                 const rect = canvas.getBoundingClientRect();
                 if (this.isPointerLocked) {
@@ -5955,27 +8133,22 @@ class Game3D {
                         this.playMode.mouseNDC.y - event.movementY * scaleY,
                         -1, 1
                     );
-                    // In FPV, mouse controls pitch directly
                     if (this.viewMode === 'fpv' && !this.playMode.orbitEnabled) {
                         this.fpvPitch = (this.fpvPitch || 0) - event.movementY * 0.0025;
-                        // Yaw from mouse X
                         this.characterRotation -= event.movementX * this.fpvYawSensitivity;
-                        const limit = Math.PI / 3; // ~60 degrees up/down
+                        const limit = Math.PI / 2 - 0.01; // full up/down, tiny epsilon to avoid lookAt flip
                         this.fpvPitch = Math.max(-limit, Math.min(limit, this.fpvPitch));
                     }
                     if (this.playMode.orbitEnabled && this.viewMode !== 'fpv') {
                         this.currentCameraAngle = (this.currentCameraAngle + event.movementX * 0.2) % 360;
                     }
-                    // Ghost camera mouse look
                     if (this.viewMode === 'ghost') {
-                        // Update yaw (Y rotation) and pitch (X rotation) separately
                         this.ghostCamera.rotation.y -= event.movementX * this.ghostCamera.mouseSensitivity;
                         this.ghostCamera.rotation.x -= event.movementY * this.ghostCamera.mouseSensitivity;
-                        
-                        // Clamp pitch to prevent over-rotation
+
                         this.ghostCamera.rotation.x = Math.max(-Math.PI/2, Math.min(Math.PI/2, this.ghostCamera.rotation.x));
-                        
-                        // Update quaternion from Euler angles (Y first, then X to avoid roll)
+
+                        // Y first then X to avoid roll
                         const quatY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), this.ghostCamera.rotation.y);
                         const quatX = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), this.ghostCamera.rotation.x);
                         this.ghostCamera.quaternion.multiplyQuaternions(quatY, quatX);
@@ -5995,41 +8168,35 @@ class Game3D {
                 return;
             } else if (this.isPointerLocked && !this.modalOpen) {
                 if (this.controlScheme === 1) {
-                    // Scheme 1: Mouse controls character rotation
                     this.characterRotation -= event.movementX * 0.002;
                 } else if (this.controlScheme === 2 && this.cameraMode === 'orbit') {
-                    // Scheme 2: Mouse controls camera orbit only when Space is held
+                    // Mouse orbits camera only while Space is held
                     this.orbitMouseX += event.movementX * 0.002;
                     this.orbitMouseY += event.movementY * 0.002;
                     this.orbitMouseY = Math.max(-Math.PI/2, Math.min(Math.PI/2, this.orbitMouseY));
                 } else if (this.controlScheme === 4) {
-                    // Scheme 4: Mouse controls character facing direction
                     this.mouse.x += event.movementX * 0.002;
                     this.mouse.y += event.movementY * 0.002;
                     this.mouse.y = Math.max(-Math.PI/2, Math.min(Math.PI/2, this.mouse.y));
-                    
-                    // Character faces mouse direction
+
                     this.characterRotation = this.mouse.x;
                 }
-                // Scheme 3: No mouse control (tank controls)
+                // Scheme 3 is tank controls — no mouse contribution.
             }
         });
-        
-        // Mouse down events
+
         document.addEventListener('mousedown', (event) => {
-            // Block mouse input when drawer is open
             if (this.isDrawerOpen) {
                 return;
             }
-            
+
             if (this.gameMode === 'create' && !this.modalOpen) {
                 this.createMode.isMouseDown = true;
                 this.handleCreateModeClick(event);
             } else if (this.gameMode === 'play' && !this.modalOpen) {
-                // Handle press-and-drag continuous move if holding button (optional)
+                if (this.isGameplayActive && !this.isGameplayActive()) return;
                 this.handlePlayClick(event);
-                // Start continuous firing for machine gun
-                if (event.button === 0) { // Left click
+                if (event.button === 0) {
                     const weapon = this.getCurrentWeapon();
                     if (weapon && weapon.isContinuous) {
                         this.isFiring = true;
@@ -6037,41 +8204,37 @@ class Game3D {
                 }
             }
         });
-        
-        // Mouse up events
+
         document.addEventListener('mouseup', (event) => {
-            // Block mouse input when drawer is open
             if (this.isDrawerOpen) {
                 return;
             }
-            
+
             if (this.gameMode === 'create' && !this.modalOpen) {
                 this.createMode.isMouseDown = false;
                 this.createMode.lastGridPos = null;
-                this.createMode.startLinePos = null; // Reset line start
+                this.createMode.startLinePos = null;
             } else if (this.gameMode === 'play' && !this.modalOpen) {
-                // Stop continuous firing
-                if (event.button === 0) { // Left click
+                if (event.button === 0) {
                     this.isFiring = false;
                 }
             }
         });
-        
-        // Click handler
+
         document.addEventListener('click', (event) => {
             // Drawer is a modal-ish overlay — don't grab pointer-lock or fire.
             if (this.isDrawerOpen) return;
             if (this.gameMode === 'create' && !this.modalOpen) {
                 this.handleCreateModeClick(event);
             } else if (this.gameMode === 'play' && !this.modalOpen) {
+                if (this.isGameplayActive && !this.isGameplayActive()) return;
                 // On touch devices, the on-screen Fire button drives shooting — skip pointer lock entirely.
                 if (this.isTouchDevice) return;
-                // Ensure pointer lock; first click acquires lock instead of shooting
+                // First click in play mode acquires pointer lock instead of firing.
                 if (!this.isPointerLocked) {
                     document.body.requestPointerLock();
                     return;
                 }
-                // Left click to shoot toward cursor / enemy
                 this.handlePlayClick(event);
             }
         });
@@ -6081,6 +8244,7 @@ class Game3D {
         document.addEventListener('mousedown', (event) => {
             if (this.isDrawerOpen) return;
             if (this.gameMode === 'play' && !this.modalOpen && event.button === 2) {
+                if (this.isGameplayActive && !this.isGameplayActive()) return;
                 if (this.isTouchDevice) return;
                 if (!this.isPointerLocked) {
                     document.body.requestPointerLock();
@@ -6099,7 +8263,6 @@ class Game3D {
                 document.body.style.cursor = 'default';
                 return;
             }
-            // Cursor visibility based on mode/lock
             if (this.isPointerLocked && this.gameMode === 'play') {
                 document.body.style.cursor = 'none';
             } else if (this.gameMode === 'create') {
@@ -6113,23 +8276,21 @@ class Game3D {
                 ch.style.display = (this.gameMode === 'play' && this.viewMode === 'fpv') ? 'block' : 'none';
             }
         });
-        
-        // Window resize
+
         window.addEventListener('resize', () => {
             this.camera.aspect = window.innerWidth / window.innerHeight;
             this.camera.updateProjectionMatrix();
             this.renderer.setSize(window.innerWidth, window.innerHeight);
         });
-        
-        // Mouse wheel for weapon switching
+
+        // Mouse wheel switches weapon
         document.addEventListener('wheel', (event) => {
-            // Block wheel input when drawer is open
             if (this.isDrawerOpen) {
                 return;
             }
-            
+
             if (this.gameMode === 'play' && !this.modalOpen) {
-                // Weapon switching with mouse wheel
+                if (this.isGameplayActive && !this.isGameplayActive()) return;
                 const direction = event.deltaY > 0 ? 1 : -1;
                 this.switchWeapon(direction);
             }
@@ -6196,6 +8357,7 @@ class Game3D {
         const LOOK_FPV_PITCH = 0.005;
         const applyLookDelta = (dx, dy) => {
             if (this.modalOpen) return;
+            if (this.isGameplayActive && !this.isGameplayActive()) return;
             if (this.gameMode !== 'play') return;
             if (this.viewMode === 'fpv') {
                 this.fpvPitch = (this.fpvPitch || 0) - dy * LOOK_FPV_PITCH;
@@ -6295,6 +8457,7 @@ class Game3D {
         bindButton('touch-btn-fire', {
             onDown: () => {
                 if (this.modalOpen || this.gameMode !== 'play') return;
+                if (this.isGameplayActive && !this.isGameplayActive()) return;
                 this.handlePlayClick(center());
                 const w = this.getCurrentWeapon && this.getCurrentWeapon();
                 if (w && w.isContinuous) this.isFiring = true;
@@ -6308,6 +8471,7 @@ class Game3D {
         bindButton('touch-btn-melee', {
             onDown: () => {
                 if (this.modalOpen || this.gameMode !== 'play') return;
+                if (this.isGameplayActive && !this.isGameplayActive()) return;
                 this.handleMelee({ button: 2 });
             }
         });
@@ -6335,92 +8499,105 @@ class Game3D {
         document.addEventListener('dblclick',     (e) => e.preventDefault());
     }
 
+    applySpeedBoost(seconds) {
+        const add = seconds || this.SPEED_BOOST_PER_PICKUP || 10;
+        const cap = this.SPEED_BOOST_MAX_TIMER || 25;
+        this.powerUps.speedBoostTimer = Math.min(cap, (this.powerUps.speedBoostTimer || 0) + add);
+        this.powerUps._speedBoostBarPeak = this.powerUps.speedBoostTimer;
+        const left = Math.ceil(this.powerUps.speedBoostTimer);
+        this.showToast(`⚡ ${this.t('speedBoost')} — ${left}s`, 'success');
+        this.showMessage(`${this.t('speedBoost')} (${left}s)`);
+        this._qbSig = null;
+        if (this.updateInventoryGridUI) this.updateInventoryGridUI();
+        if (this.updateControlsUI) this.updateControlsUI();
+        if (this.isDrawerOpen && this.updateDrawerUI) this.updateDrawerUI();
+    }
+
+    getSpeedBoostMultiplier() {
+        return (this.powerUps.speedBoostTimer > 0) ? (this.SPEED_BOOST_MOVE_MULT || 1.45) : 1;
+    }
+
+    tickSpeedBoost(deltaTime) {
+        if (!this.powerUps.speedBoostTimer || this.powerUps.speedBoostTimer <= 0) return;
+        const prev = Math.ceil(this.powerUps.speedBoostTimer);
+        this.powerUps.speedBoostTimer = Math.max(0, this.powerUps.speedBoostTimer - deltaTime);
+        const now = Math.ceil(this.powerUps.speedBoostTimer);
+        if (now !== prev) {
+            this._qbSig = null;
+            if (this.updateInventoryGridUI) this.updateInventoryGridUI();
+            if (this.updateControlsUI) this.updateControlsUI();
+        }
+        if (this.powerUps.speedBoostTimer <= 0) {
+            this.powerUps._speedBoostBarPeak = 0;
+            this.showMessage('Speed boost ended');
+        }
+    }
+
     updatePlayer(deltaTime) {
-        // Ghost camera movement
         if (this.viewMode === 'ghost') {
             this.updateGhostCamera(deltaTime);
             this.updateCamera();
             return;
         }
-        
-        // Block player movement when drawer is open
+
         if (this.isDrawerOpen) {
             return;
         }
-        
-        // Apply speed boost
-        const speedMultiplier = 1 + (this.powerUps.speedBoost * 0.3); // 30% per stack
+
+        const speedMultiplier = this.getSpeedBoostMultiplier();
         const speed = 10 * speedMultiplier;
         const jumpForce = 15;
         const gravity = -30;
-        
-        // Build desired movement vector
+
         const direction = new THREE.Vector3();
 
         if (this.gameMode === 'play') {
-            // WASD movement camera-relative; mouse aims character
-            // Compute camera-aligned basis on XZ plane
+            // WASD is camera-relative; mouse aims character.
             const camForward = new THREE.Vector3();
             this.camera.getWorldDirection(camForward);
             camForward.y = 0; camForward.normalize();
-            // Right vector = forward x up (camera-relative)
             const up = new THREE.Vector3(0,1,0);
             const camRight = camForward.clone().cross(up).normalize();
-            // Inputs
             let forwardIn = 0, strafeIn = 0;
             if (this.keys['KeyW']) forwardIn += 1;
             if (this.keys['KeyS']) forwardIn -= 1;
             if (this.keys['KeyD']) strafeIn += 1;
             if (this.keys['KeyA']) strafeIn -= 1;
             if (forwardIn !== 0 || strafeIn !== 0) {
-                // Move in the camera's facing direction for W (away from camera)
                 direction.add(camForward.clone().multiplyScalar(forwardIn));
                 direction.add(camRight.clone().multiplyScalar(strafeIn));
             }
-            // Third-person facing:
-            //   - When moving with WASD, the body turns to face the movement
-            //     direction so the character actually walks where it's looking
-            //     (no more sliding sideways/backwards with the body locked to the
-            //     mouse).
-            //   - When idle, the body re-orients toward the mouse aim point so
-            //     you can still face/aim while standing still.
-            //   - The mouse is also the "forward reference" for WASD (W goes away
-            //     from camera, etc.), so movement-facing is implicitly relative
-            //     to the mouse-driven view.
+            // Iso third-person: body ALWAYS faces the mouse cursor's ground
+            // projection. WASD is camera-relative (still computed above) and
+            // moves independently of facing — so you can strafe around a
+            // target while aiming. Uses scratch raycaster/plane to avoid
+            // per-frame allocations.
             if (this.viewMode !== 'fpv') {
+                _sharedRaycaster.setFromCamera(this.playMode.mouseNDC, this.camera);
+                _scratchPlaneGround.constant = 0; // plane y=0
                 let targetRot = null;
-                const moving = (forwardIn !== 0 || strafeIn !== 0);
-                if (moving) {
-                    // direction is already a camera-relative XZ vector.
-                    targetRot = Math.atan2(direction.x, direction.z);
-                } else {
-                    const ray = new THREE.Raycaster();
-                    ray.setFromCamera(this.playMode.mouseNDC, this.camera);
-                    const ground = new THREE.Plane(new THREE.Vector3(0,1,0), 0);
-                    const hit = new THREE.Vector3();
-                    if (ray.ray.intersectPlane(ground, hit)) {
-                        const aim = new THREE.Vector3(hit.x - this.player.position.x, 0, hit.z - this.player.position.z);
-                        if (aim.lengthSq() > 0.0001) targetRot = Math.atan2(aim.x, aim.z);
+                if (_sharedRaycaster.ray.intersectPlane(_scratchPlaneGround, _scratchV3a)) {
+                    const aimX = _scratchV3a.x - this.player.position.x;
+                    const aimZ = _scratchV3a.z - this.player.position.z;
+                    if (aimX * aimX + aimZ * aimZ > 0.0001) {
+                        targetRot = Math.atan2(aimX, aimZ);
                     }
                 }
                 if (targetRot !== null) {
                     const diff = ((targetRot - this.characterRotation + Math.PI) % (Math.PI*2)) - Math.PI;
-                    // Snappier turn while moving; gentler when re-centering on the mouse.
-                    const lerp = moving ? this.playMode.rotateLerp * 1.6 : this.playMode.rotateLerp;
-                    const maxStep = lerp * deltaTime;
+                    const maxStep = this.playMode.rotateLerp * 1.8 * deltaTime;
                     const step = THREE.MathUtils.clamp(diff, -maxStep, maxStep);
                     this.characterRotation += step;
                 }
             }
-            // Normalize desired move direction
             if (direction.lengthSq() > 0) direction.normalize();
-            // Compute desired horizontal velocity (with sprint)
-            const moveSpeed = this.playMode.moveSpeed * ((this.keys['ShiftLeft'] || this.keys['ShiftRight']) ? 1.8 : 1);
+            const moveSpeed = this.playMode.moveSpeed * speedMultiplier * (this.player.ducked ? 0.45 : 1);
             const desiredVX = direction.x * moveSpeed;
             const desiredVZ = direction.z * moveSpeed;
             const curVX = this.player.velocity.x;
             const curVZ = this.player.velocity.z;
-            const accel = (direction.lengthSq() > 0) ? this.playMode.accel : this.playMode.decel;
+            const accelMult = speedMultiplier > 1 ? 1.25 : 1;
+            const accel = (direction.lengthSq() > 0) ? this.playMode.accel * accelMult : this.playMode.decel;
             const approach = (current, target, maxDelta) => {
                 if (current < target) return Math.min(current + maxDelta, target);
                 if (current > target) return Math.max(current - maxDelta, target);
@@ -6428,68 +8605,54 @@ class Game3D {
             };
             let newVX = approach(curVX, desiredVX, accel * deltaTime);
             let newVZ = approach(curVZ, desiredVZ, accel * deltaTime);
-            
-            // Axis-separated collision and movement for smoother sliding and wall-walking
+
+            // Axis-separated collision so the player slides along walls instead of sticking.
             const pos = this.player.position.clone();
-            
-            // X axis movement
+
             let testPos = pos.clone();
             testPos.x += newVX * deltaTime;
             if (this.checkCollisionAxis(testPos, 'x')) {
-                // X collision - try to slide along wall by checking if we can move in Z
                 const slideTest = this.player.position.clone();
                 slideTest.x = testPos.x;
                 if (!this.checkCollision(slideTest)) {
-                    // Can slide - allow X movement
                     this.player.position.x = testPos.x;
                 } else {
-                    // Cannot slide - stop X movement
                     newVX = 0;
                 }
             } else {
-                // No X collision - allow movement
                 this.player.position.x = testPos.x;
             }
-            
-            // Z axis movement
+
             testPos = this.player.position.clone();
             testPos.z += newVZ * deltaTime;
             if (this.checkCollisionAxis(testPos, 'z')) {
-                // Z collision - try to slide along wall by checking if we can move in X
                 const slideTest = this.player.position.clone();
                 slideTest.z = testPos.z;
                 if (!this.checkCollision(slideTest)) {
-                    // Can slide - allow Z movement
                     this.player.position.z = testPos.z;
                 } else {
-                    // Cannot slide - stop Z movement
                     newVZ = 0;
                 }
             } else {
-                // No Z collision - allow movement
                 this.player.position.z = testPos.z;
             }
-            // Commit horizontal velocities
             this.player.velocity.x = newVX;
             this.player.velocity.z = newVZ;
         } else {
-            // Keyboard schemes only in non-play or as fallback
-            // Scheme 3 (Tank): A/D turn, W/S move forward/back relative to facing. No strafe.
+            // Keyboard schemes for non-play or fallback.
+            // Scheme 3 (Tank): A/D turn, W/S forward/back, no strafe.
             // Scheme 1 (Mouse Turn): A/D strafe, mouse controls facing.
             const isTank = this.controlScheme === 3;
-            const turnSpeed = 2.5; // radians per second for smooth tank turning
-            
+            const turnSpeed = 2.5;
+
             if (isTank) {
-                // Turn with A/D (continuous), optional snap with Q/E handled in keydown
                 const turnLeft = this.keys['KeyA'] ? 1 : 0;
                 const turnRight = this.keys['KeyD'] ? 1 : 0;
                 this.characterRotation += (turnRight - turnLeft) * turnSpeed * deltaTime;
-                
-                // Forward/Backward
+
                 if (this.keys['KeyW']) direction.z -= 1;
                 if (this.keys['KeyS']) direction.z += 1;
             } else {
-                // Mouse-turn scheme: WASD with strafe
                 if (this.keys['KeyW']) direction.z -= 1;
                 if (this.keys['KeyS']) direction.z += 1;
                 if (this.keys['KeyA']) direction.x -= 1;
@@ -6497,58 +8660,46 @@ class Game3D {
             }
         }
 
-        // Apply facing to movement when using keyboard schemes
         if (this.gameMode !== 'play') {
             direction.applyEuler(new THREE.Euler(0, this.characterRotation, 0));
         }
         if (this.gameMode !== 'play' && direction.lengthSq() > 0) direction.normalize();
-        
+
         if (this.gameMode !== 'play') {
-            // Apply movement with collision detection (legacy)
             const newVelocityX = direction.x * speed;
             const newVelocityZ = direction.z * speed;
-            
-            // Axis-separated collision for wall-walking in non-play mode
+
+            // Axis-separated collision so the player slides along walls.
             const pos = this.player.position.clone();
-            
-            // X axis movement
+
             let testPos = pos.clone();
             testPos.x += newVelocityX * deltaTime;
             if (this.checkCollisionAxis(testPos, 'x')) {
-                // X collision - try to slide along wall
                 const slideTest = this.player.position.clone();
                 slideTest.x = testPos.x;
                 if (!this.checkCollision(slideTest)) {
-                    // Can slide - allow X movement
                     this.player.position.x = testPos.x;
                     this.player.velocity.x = newVelocityX;
                 } else {
-                    // Cannot slide - stop X movement
                     this.player.velocity.x = 0;
                 }
             } else {
-                // No X collision - allow movement
                 this.player.position.x = testPos.x;
                 this.player.velocity.x = newVelocityX;
             }
-            
-            // Z axis movement
+
             testPos = this.player.position.clone();
             testPos.z += newVelocityZ * deltaTime;
             if (this.checkCollisionAxis(testPos, 'z')) {
-                // Z collision - try to slide along wall
                 const slideTest = this.player.position.clone();
                 slideTest.z = testPos.z;
                 if (!this.checkCollision(slideTest)) {
-                    // Can slide - allow Z movement
                     this.player.position.z = testPos.z;
                     this.player.velocity.z = newVelocityZ;
                 } else {
-                    // Cannot slide - stop Z movement
                     this.player.velocity.z = 0;
                 }
             } else {
-                // No Z collision - allow movement
                 this.player.position.z = testPos.z;
                 this.player.velocity.z = newVelocityZ;
             }
@@ -6604,90 +8755,112 @@ class Game3D {
             this.jetpackThrust = Math.max(this.jetpackThrust - deltaTime * 2, 0);
         }
         
-        // Update vertical position only here; horizontal was applied above for play mode
+        // Vertical only — horizontal was already applied above for play mode.
         this.player.position.y += this.player.velocity.y * deltaTime;
-        
-        // Update player invulnerability timer
+
         if (this.player.invulnerable) {
             this.player.invulnerabilityTimer -= deltaTime;
             if (this.player.invulnerabilityTimer <= 0) {
                 this.player.invulnerable = false;
             }
         }
-        
-        // Check collision with enemies
+
+        // Enemy attack TELEGRAPH. When an enemy gets within "windup range"
+        // (further out than damage range so you see it coming), they stop
+        // moving, rear back, glow red, growl — then commit a strike step
+        // forward and only damage if you're still inside the smaller hit
+        // range. Giants/slam handle their own windup in _aiSlam.
         if (this.gameMode === 'play' && this.playMode.enemies) {
             for (const enemy of this.playMode.enemies) {
+                const ud = enemy.userData;
+                if (ud.contactCdT > 0) continue;
+                if (ud.aiKind === 'slam') continue;
+                if (ud.attackWindupT > 0) continue; // already winding up
+                if (ud.stunT > 0 || ud.flinchT > 0) continue; // mid-hit reaction
+
                 const distance = this.player.position.distanceTo(enemy.position);
-                if (distance < 1.5) { // Collision radius
-                    this.damagePlayer(10); // 10 damage per hit
-                    break; // Only damage once per frame
+                // Telegraph triggers at a generous range so the rear-back
+                // animation is visible BEFORE the enemy is on top of you.
+                const windupRange = (ud.hitRadius || 0.6) + 1.7;
+                if (distance < windupRange) {
+                    const baseWindup = (ud.aiKind === 'hitAndRun') ? 0.45
+                                     : (ud.aiKind === 'skittish') ? 0.55
+                                     : 0.60;
+                    ud.attackWindupT = baseWindup;
+                    ud.attackWindupMax = baseWindup;
+                    ud.attackPending = true;
+                    ud._struck = false;
+                    // Snap heading toward the player so the strike step lunges
+                    // at them, not into the wall behind.
+                    const dx = this.player.position.x - enemy.position.x;
+                    const dz = this.player.position.z - enemy.position.z;
+                    const dlen = Math.hypot(dx, dz) || 1;
+                    if (ud.dir) {
+                        ud.dir.set(dx / dlen, dz / dlen);
+                        enemy.rotation.y = Math.atan2(ud.dir.x, ud.dir.y);
+                    }
+                    this._tintEnemy(enemy, 0xff3322, baseWindup * 1000);
+                    this.audio && this.audio.play && this.audio.play('enemyGrowl');
+                    break;
                 }
             }
         }
-        
-        // Wall collision for Y-axis (landing on walls)
+
         this.checkWallCollisionY();
-        
-        // Ground collision
+
         if (this.player.position.y <= 0) {
             this.player.position.y = 0;
             this.player.velocity.y = 0;
             this.player.onGround = true;
         }
-        
-        // Update character model position and rotation
+
         if (this.player.model) {
             this.player.model.position.copy(this.player.position);
-            // Character faces aim/move direction + model yaw offset
             this.player.model.rotation.y = this.characterRotation + (this.modelYawOffset || 0);
+            // Keep the drop-shadow disc glued to ground level instead of riding
+            // along with the character (otherwise it floats up during jumps).
+            if (this.player.bodyShadow) {
+                const altitude = Math.max(0, this.player.position.y);
+                this.player.bodyShadow.position.y = 0.02 - this.player.position.y;
+                const shrink = Math.max(0.35, 1 - altitude * 0.12);
+                this.player.bodyShadow.scale.setScalar(shrink);
+                this.player.bodyShadow.material.opacity = 0.45 * shrink;
+            }
         }
-        
-        // Update character animation
+
+        // Iso wall fade: walls between camera and player become translucent
+        // so the body stays visible behind cover. Hidden in FPV.
+        this._updateWallFade();
+
         this.updateCharacterAnimation(deltaTime);
-        
-        // Update direction indicators
+
         this.updateDirectionIndicators();
-        
-        // Update camera position based on mode
+
         this.updateCamera();
     }
-    
-    
-    setControlScheme(scheme) {
-        // Only allow the two classic schemes: 1 (Mouse Turn) and 3 (Tank)
-        if (scheme !== 1 && scheme !== 3) {
-            scheme = 1;
-        }
-        this.controlScheme = scheme;
-        this.cameraMode = 'fixed';
-    }
-    
-    
+
+
     cycleCameraAngle() {
-        // Cycle through fixed camera angles: 0°, 90°, 180°, 270°
+        // 4 fixed quadrants: 0°, 90°, 180°, 270°.
         this.currentCameraAngle = (this.currentCameraAngle + 90) % 360;
     }
-    
+
     updateDirectionIndicators() {
-        // Update UI indicators
         const facingElement = document.getElementById('facing-direction');
         const cameraElement = document.getElementById('camera-angle');
-        
+
         if (facingElement && cameraElement) {
-            // Convert character rotation to degrees and direction
             const facingDegrees = (this.characterRotation * 180 / Math.PI) % 360;
             const facingDirection = this.getDirectionName(facingDegrees);
-            
+
             facingElement.textContent = `Facing: ${facingDirection} (${Math.round(facingDegrees)}°)`;
             cameraElement.textContent = `Camera: ${this.currentCameraAngle}°`;
         }
     }
-    
+
     getDirectionName(degrees) {
-        // Normalize degrees to 0-360
         degrees = ((degrees % 360) + 360) % 360;
-        
+
         if (degrees >= 337.5 || degrees < 22.5) return 'North';
         if (degrees >= 22.5 && degrees < 67.5) return 'Northeast';
         if (degrees >= 67.5 && degrees < 112.5) return 'East';
@@ -6710,8 +8883,6 @@ class Game3D {
             const dz = position.z - e.position.z;
             const d2 = dx * dx + dz * dz;
             if (d2 < r * r) {
-                // Allow movement that increases distance — prevents permastuck if a zombie
-                // wandered into the player.
                 const curDx = cur.x - e.position.x;
                 const curDz = cur.z - e.position.z;
                 if (d2 < curDx * curDx + curDz * curDz) return true;
@@ -6720,162 +8891,144 @@ class Game3D {
         return false;
     }
 
+    // Locked crates block movement just like walls; opened ones don't. Uses
+    // a slightly tighter radius so the player can comfortably stand right
+    // next to a crate without overlap weirdness.
+    checkCrateCollision(position) {
+        const crates = this.playMode && this.playMode.crates;
+        if (!crates || !crates.length) return false;
+        const playerRadius = 0.8;
+        const crateRadius = 0.65; // tuned for the 1.05-scale chest footprint
+        const sumR = playerRadius + crateRadius;
+        for (const c of crates) {
+            if (c.userData.opened) continue;
+            const dx = position.x - c.position.x;
+            const dz = position.z - c.position.z;
+            if (dx * dx + dz * dz < sumR * sumR) return true;
+        }
+        return false;
+    }
+
     checkCollision(position) {
         if (this.checkEnemyCollision(position)) return true;
-        // Player collision box size
+        if (this.checkCrateCollision(position)) return true;
         const playerRadius = 0.8;
         const playerHeight = 2;
 
-        // Check collision with each wall (horizontal only - Y handled separately)
-        for (let wall of this.walls) {
+        // Horizontal only — Y handled by checkWallCollisionY.
+        let collided = false;
+        this._iterWallsNear(position.x, position.z, playerRadius + 1, (wall) => {
             const wallPos = wall.position;
             const wallSize = wall.size;
-            
-            // Check if player is within wall bounds horizontally
             if (position.x + playerRadius > wallPos.x - wallSize.x/2 &&
                 position.x - playerRadius < wallPos.x + wallSize.x/2 &&
                 position.z + playerRadius > wallPos.z - wallSize.z/2 &&
                 position.z - playerRadius < wallPos.z + wallSize.z/2) {
-                
-                // Check if player is at the right height to collide with wall
                 const wallTop = wallPos.y + wallSize.y/2;
                 const wallBottom = wallPos.y - wallSize.y/2;
                 const playerBottom = position.y;
                 const playerTop = position.y + playerHeight;
-                
-                // Only collide if player is at the right height
                 if (playerTop > wallBottom && playerBottom < wallTop) {
-                    return true; // Collision detected
+                    collided = true;
+                    return false;
                 }
             }
-        }
-        
-        return false; // No collision
+        });
+        return collided;
     }
     
     checkCollisionAxis(position, axis) {
         if (this.checkEnemyCollision(position)) return true;
-        // Player collision box size
+        if (this.checkCrateCollision(position)) return true;
         const playerRadius = 0.8;
         const playerHeight = 2;
-        
-        // Check collision with each wall for specific axis (horizontal only)
-        for (let wall of this.walls) {
+
+
+        const qx = axis === 'x' ? position.x : this.player.position.x;
+        const qz = axis === 'z' ? position.z : this.player.position.z;
+        let collided = false;
+        this._iterWallsNear(qx, qz, playerRadius + 1, (wall) => {
             const wallPos = wall.position;
             const wallSize = wall.size;
-            
-            if (axis === 'x') {
-                // Check X-axis collision only
-                if (position.x + playerRadius > wallPos.x - wallSize.x/2 &&
-                    position.x - playerRadius < wallPos.x + wallSize.x/2 &&
-                    this.player.position.z + playerRadius > wallPos.z - wallSize.z/2 &&
-                    this.player.position.z - playerRadius < wallPos.z + wallSize.z/2) {
-                    
-                    // Check if player is at the right height to collide with wall
-                    const wallTop = wallPos.y + wallSize.y/2;
-                    const wallBottom = wallPos.y - wallSize.y/2;
-                    const playerBottom = position.y;
-                    const playerTop = position.y + playerHeight;
-                    
-                    if (playerTop > wallBottom && playerBottom < wallTop) {
-                        return true;
-                    }
-                }
-            } else if (axis === 'z') {
-                // Check Z-axis collision only
-                if (this.player.position.x + playerRadius > wallPos.x - wallSize.x/2 &&
-                    this.player.position.x - playerRadius < wallPos.x + wallSize.x/2 &&
-                    position.z + playerRadius > wallPos.z - wallSize.z/2 &&
-                    position.z - playerRadius < wallPos.z + wallSize.z/2) {
-                    
-                    // Check if player is at the right height to collide with wall
-                    const wallTop = wallPos.y + wallSize.y/2;
-                    const wallBottom = wallPos.y - wallSize.y/2;
-                    const playerBottom = position.y;
-                    const playerTop = position.y + playerHeight;
-                    
-                    if (playerTop > wallBottom && playerBottom < wallTop) {
-                        return true;
-                    }
+            const px = axis === 'x' ? position.x : this.player.position.x;
+            const pz = axis === 'z' ? position.z : this.player.position.z;
+            if (px + playerRadius > wallPos.x - wallSize.x/2 &&
+                px - playerRadius < wallPos.x + wallSize.x/2 &&
+                pz + playerRadius > wallPos.z - wallSize.z/2 &&
+                pz - playerRadius < wallPos.z + wallSize.z/2) {
+                const wallTop = wallPos.y + wallSize.y/2;
+                const wallBottom = wallPos.y - wallSize.y/2;
+                const playerBottom = position.y;
+                const playerTop = position.y + playerHeight;
+                if (playerTop > wallBottom && playerBottom < wallTop) {
+                    collided = true; return false;
                 }
             }
-        }
-        
-        return false;
+        });
+        return collided;
     }
     
     checkWallCollisionY() {
-        // Player collision box size
         const playerRadius = 0.8;
         const playerHeight = 2;
-        
-        // Check collision with each wall for Y-axis
-        for (let wall of this.walls) {
+
+        // Solid crystal ceiling — cap the player below the roof so jumps /
+        // jetpack thrust don't pop through into the sky. Destroyed roof tiles
+        // open holes, so check the tile directly over the player first.
+        if (this.roofY != null) {
+            const ceiling = this.roofY;
+            const tileAbove = this._roofTileAt(this.player.position.x, this.player.position.z);
+            if (tileAbove && this.player.position.y + playerHeight >= ceiling) {
+                this.player.position.y = ceiling - playerHeight;
+                if (this.player.velocity.y > 0) this.player.velocity.y = 0;
+            }
+        }
+
+        // Check collision with each wall for Y-axis (spatial-hash limited).
+        let earlyReturn = false;
+        this._iterWallsNear(this.player.position.x, this.player.position.z, playerRadius + 1, (wall) => {
+            if (earlyReturn) return false;
             const wallPos = wall.position;
             const wallSize = wall.size;
-            
-            // Check if player is horizontally within wall bounds
             if (this.player.position.x + playerRadius > wallPos.x - wallSize.x/2 &&
                 this.player.position.x - playerRadius < wallPos.x + wallSize.x/2 &&
                 this.player.position.z + playerRadius > wallPos.z - wallSize.z/2 &&
                 this.player.position.z - playerRadius < wallPos.z + wallSize.z/2) {
-                
-                // Player is horizontally within wall - check Y collision
                 const wallTop = wallPos.y + wallSize.y/2;
                 const wallBottom = wallPos.y - wallSize.y/2;
                 const playerBottom = this.player.position.y;
                 const playerTop = this.player.position.y + playerHeight;
-                
-                // Check if player is falling and would land on top of wall
-                if (this.player.velocity.y <= 0 && 
-                    playerBottom <= wallTop && 
-                    playerTop > wallTop) {
-                    // Land on top of wall
+                if (this.player.velocity.y <= 0 && playerBottom <= wallTop && playerTop > wallTop) {
                     this.player.position.y = wallTop;
                     this.player.velocity.y = 0;
                     this.player.onGround = true;
-                    return;
+                    earlyReturn = true; return false;
                 }
-                
-                // Check if player is moving up and would hit wall ceiling
-                if (this.player.velocity.y > 0 && 
-                    playerTop >= wallBottom && 
-                    playerBottom < wallBottom) {
-                    // Hit wall ceiling
+                if (this.player.velocity.y > 0 && playerTop >= wallBottom && playerBottom < wallBottom) {
                     this.player.position.y = wallBottom - playerHeight;
                     this.player.velocity.y = 0;
-                    return;
+                    earlyReturn = true; return false;
                 }
-                
-                // Check if player is inside wall horizontally - push out
                 if (playerTop > wallBottom && playerBottom < wallTop) {
-                    // Player is inside wall - determine which side to push out to
-                    const distToLeft = Math.abs(this.player.position.x - (wallPos.x - wallSize.x/2));
+                    const distToLeft  = Math.abs(this.player.position.x - (wallPos.x - wallSize.x/2));
                     const distToRight = Math.abs(this.player.position.x - (wallPos.x + wallSize.x/2));
                     const distToFront = Math.abs(this.player.position.z - (wallPos.z - wallSize.z/2));
-                    const distToBack = Math.abs(this.player.position.z - (wallPos.z + wallSize.z/2));
-                    
+                    const distToBack  = Math.abs(this.player.position.z - (wallPos.z + wallSize.z/2));
                     const minDist = Math.min(distToLeft, distToRight, distToFront, distToBack);
-                    
-                    if (minDist === distToLeft) {
-                        this.player.position.x = wallPos.x - wallSize.x/2 - playerRadius;
-                    } else if (minDist === distToRight) {
-                        this.player.position.x = wallPos.x + wallSize.x/2 + playerRadius;
-                    } else if (minDist === distToFront) {
-                        this.player.position.z = wallPos.z - wallSize.z/2 - playerRadius;
-                    } else {
-                        this.player.position.z = wallPos.z + wallSize.z/2 + playerRadius;
-                    }
+                    if (minDist === distToLeft)       this.player.position.x = wallPos.x - wallSize.x/2 - playerRadius;
+                    else if (minDist === distToRight) this.player.position.x = wallPos.x + wallSize.x/2 + playerRadius;
+                    else if (minDist === distToFront) this.player.position.z = wallPos.z - wallSize.z/2 - playerRadius;
+                    else                              this.player.position.z = wallPos.z + wallSize.z/2 + playerRadius;
                 }
             }
-        }
+        });
     }
     
     updateCamera() {
         // Play-mode camera: Isometric or First-Person
         if (this.gameMode === 'play') {
             if (this.viewMode === 'fpv') {
-                const eyeHeight = 1.6;
+                const eyeHeight = 1.6 - this.player.duckBlend * 0.7;
                 const pitch = this.fpvPitch || 0;
                 const dir = new THREE.Vector3(
                     Math.sin(this.characterRotation) * Math.cos(pitch),
@@ -6885,7 +9038,8 @@ class Game3D {
                 const eye = this.player.position.clone();
                 // Head bob on movement
                 const moving = Math.abs(this.player.velocity.x) + Math.abs(this.player.velocity.z) > 0.1;
-                const bob = moving ? Math.sin(performance.now() / 1000 * this.fpvBobFrequency) * this.fpvBobAmplitude : 0;
+                const bobScale = 1 - this.player.duckBlend * 0.7;
+                const bob = moving ? Math.sin(performance.now() / 1000 * this.fpvBobFrequency) * this.fpvBobAmplitude * bobScale : 0;
                 eye.y += eyeHeight + bob;
                 const target = eye.clone().add(dir);
                 this.camera.position.copy(eye);
@@ -6950,17 +9104,23 @@ class Game3D {
     }
     
     updateCharacterAnimation(deltaTime) {
+        // Smooth duck blend (0 = standing, 1 = fully ducked). 8/sec ≈ ~125ms transition.
+        const duckTarget = this.player.ducked ? 1 : 0;
+        const blendRate = 8 * deltaTime;
+        this.player.duckBlend += THREE.MathUtils.clamp(duckTarget - this.player.duckBlend, -blendRate, blendRate);
+        if (this.player.model) {
+            this.player.model.scale.y = 1 - this.player.duckBlend * 0.45;
+        }
         // Drive skeleton clip selection from movement/jump state before stepping the mixer
         if (this.player.clips) {
             const vx = this.player.velocity ? this.player.velocity.x : 0;
             const vz = this.player.velocity ? this.player.velocity.z : 0;
             const horizSpeed = Math.hypot(vx, vz);
-            const sprinting = !!(this.keys && (this.keys['ShiftLeft'] || this.keys['ShiftRight']));
             let target;
             if (this.player.onGround === false && this.player.clips['Jump']) {
                 target = 'Jump';
             } else if (horizSpeed > 0.5) {
-                target = (sprinting && this.player.clips['Run']) ? 'Run' : 'Walk';
+                target = 'Walk';
             } else {
                 target = 'Idle';
             }
@@ -6976,11 +9136,10 @@ class Game3D {
             const t = Date.now() * 0.008;
             const moving = (this.gameMode === 'play' && (this.keys['KeyW'] || this.keys['KeyS'] || this.keys['KeyA'] || this.keys['KeyD'])) ||
                            this.keys['KeyW'] || this.keys['KeyS'] || this.keys['KeyA'] || this.keys['KeyD'];
-            const sprinting = (this.gameMode === 'play') && (this.keys['ShiftLeft'] || this.keys['ShiftRight']) && moving;
 
             if (moving) {
-                const amp = sprinting ? 0.8 : 0.45;
-                const legAmp = sprinting ? 1.0 : 0.6;
+                const amp = 0.45;
+                const legAmp = 0.6;
                 this.player.leftArm.rotation.x = Math.sin(t) * amp;
                 this.player.rightArm.rotation.x = Math.sin(t + Math.PI) * amp;
                 this.player.leftLeg.rotation.x = Math.sin(t) * legAmp;
@@ -7025,6 +9184,7 @@ class Game3D {
     
     fixedUpdate(deltaTime) {
         // All game logic goes here - runs at fixed 60 FPS
+        this.tickSpeedBoost(deltaTime);
         this.updatePlayer(deltaTime);
         this.updateFootsteps(deltaTime);
         this.updateDamageVignette(deltaTime);
@@ -7044,6 +9204,7 @@ class Game3D {
             // animals are registered into playMode.enemies so these are the same
             // pipes that make them shootable.
             this.updateProjectiles(deltaTime);
+            this.updateEnemyProjectiles(deltaTime);
             this.updateDyingEnemies(deltaTime);
             this.updateMuzzleFlash(deltaTime);
             this.updatePickupCollectFx(deltaTime);
@@ -7058,10 +9219,13 @@ class Game3D {
                 this.updateEnemies(deltaTime);
                 this.updateEnemySpawning(deltaTime);
                 this.updatePickups(deltaTime);
+                this.updateCratesAndKeys(deltaTime);
                 if (this.arena && this.arena.active) this.updateArena(deltaTime);
             }
+            // Camera shake is used outside arena too (melee hits, etc.) — run it every frame.
+            if (this.arena && !this.arena.active) this._updateCameraShake(deltaTime);
         }
-        
+
         // Update facing indicator position/target
         this.updateFacingIndicator();
         // Update objectives (start/end checks)
@@ -7084,73 +9248,113 @@ class Game3D {
     }
     
     render() {
-        // All rendering and UI updates go here - runs at display refresh rate
+        // All rendering and UI updates happen here at display refresh rate.
         this.clearAllUI();
         this.updateControlsUI();
         this.updateHealthUI();
         this.updateCompassUI();
-        // this.updateWeaponPowerUpUI(); // Replaced by new HUD system
         this.updateCrosshairUI();
         this.updateGroundTargetIndicator();
         this.updateInventoryGridUI();
         this.updateToasts();
 
-        // New HUD elements (health bar / vignette / minimap / objective banner)
         this.updateHealthBarUI();
         this.updateDamageVignetteUI();
         this.updateMuzzleFlashUI();
         this.updateObjectiveBannerUI();
+        this.updateSprintBarUI();
         this.updateMinimapUI();
         this._updateArenaCountdownUI();
 
-        // Emit UI update for new HUD system
         this.emit('ui:update', this.buildHUDModel());
 
-        // Render the scene
         this.renderer.render(this.scene, this.camera);
     }
 
-    // ===== HUD: segmented health bar =====
+    // ===== HUD: simple top-right health bar (HP number + thin fill bar) =====
+    _ensureHealthBarEl() {
+        let el = document.getElementById('health-bar');
+        // index.html ships a static #health-bar with the older pip schema
+        // (.hb-pips / .hb-label). updateHealthBarUI writes to the new
+        // .hb-fill / .hb-track schema, so re-stamp the innerHTML if the
+        // JS-owned children aren't there — and apply the inline styles
+        // since the static CSS only knows about the pip schema. Without
+        // this, the first render throws on `fillEl.style.width = ...`
+        // and the 3D scene goes black.
+        if (el) {
+            if (el.querySelector('.hb-fill')) return el;
+            // Stale schema from static HTML — re-stamp and fall through to
+            // apply the inline styles below.
+            el.innerHTML = `
+                <div class="hb-text">100</div>
+                <div class="hb-track"><div class="hb-fill"></div></div>
+            `;
+        } else {
+            el = document.createElement('div');
+            el.id = 'health-bar';
+            el.innerHTML = `
+                <div class="hb-text">100</div>
+                <div class="hb-track"><div class="hb-fill"></div></div>
+            `;
+        }
+        Object.assign(el.style, {
+            position: 'fixed',
+            top: '14px',
+            right: '14px',
+            // Explicitly clear properties that older cached CSS may set,
+            // otherwise top+bottom and left+right both apply and the panel
+            // stretches across the whole viewport.
+            bottom: 'auto',
+            left: 'auto',
+            transform: 'none',
+            width: '160px',
+            height: 'auto',
+            background: 'rgba(0,0,0,0.55)',
+            border: '1px solid rgba(255,118,118,0.6)',
+            borderRadius: '8px',
+            padding: '6px 10px 8px',
+            color: '#fff',
+            fontFamily: 'Courier New, monospace',
+            zIndex: '2000',
+            pointerEvents: 'none',
+            display: 'none',
+            boxShadow: 'none',
+        });
+        const text = el.querySelector('.hb-text');
+        Object.assign(text.style, {
+            fontSize: '14px', fontWeight: '700', textAlign: 'right', lineHeight: '1',
+            color: '#fff', textShadow: '0 0 4px rgba(255,90,90,0.7)', marginBottom: '4px'
+        });
+        const track = el.querySelector('.hb-track');
+        Object.assign(track.style, {
+            height: '6px', width: '100%', background: 'rgba(255,255,255,0.12)', borderRadius: '3px', overflow: 'hidden'
+        });
+        const fill = el.querySelector('.hb-fill');
+        Object.assign(fill.style, {
+            height: '100%', width: '100%', background: '#6dff7a',
+            boxShadow: '0 0 6px rgba(109,255,122,0.6)',
+            transition: 'width 0.15s ease-out, background 0.2s'
+        });
+        if (!el.parentNode) document.body.appendChild(el);
+        return el;
+    }
+
     updateHealthBarUI() {
-        const el = document.getElementById('health-bar');
-        if (!el) return;
+        const el = this._ensureHealthBarEl();
         if (this.gameMode !== 'play') { el.style.display = 'none'; return; }
         el.style.display = 'block';
 
-        const pipsEl = el.querySelector('.hb-pips');
-        const textEl = el.querySelector('.hb-text');
         const hp = Math.max(0, Math.floor(this.player.hp));
         const maxHp = this.player.maxHp || 100;
-        const pipsTotal = 10;
-        const perPip = maxHp / pipsTotal;
-        const filledCount = Math.ceil(hp / perPip);
-        const pct = hp / maxHp;
+        const pct = Math.max(0, Math.min(1, hp / maxHp));
+        const color = pct < 0.3 ? '#ff5a5a' : pct < 0.6 ? '#ffd34a' : '#6dff7a';
 
-        const lastHp = this._lastHpForBar;
-        if (typeof lastHp === 'number' && hp < lastHp) {
-            el.classList.remove('pulse');
-            // force reflow to restart animation
-            void el.offsetWidth;
-            el.classList.add('pulse');
-        }
-        this._lastHpForBar = hp;
-
-        if (!pipsEl.children.length || pipsEl.children.length !== pipsTotal) {
-            pipsEl.innerHTML = '';
-            for (let i = 0; i < pipsTotal; i++) {
-                const p = document.createElement('div');
-                p.className = 'hb-pip';
-                pipsEl.appendChild(p);
-            }
-        }
-        const statusClass = pct < 0.3 ? 'crit' : pct < 0.6 ? 'low' : '';
-        for (let i = 0; i < pipsTotal; i++) {
-            const pip = pipsEl.children[i];
-            pip.classList.remove('low', 'crit', 'lost');
-            if (i >= filledCount) pip.classList.add('lost');
-            else if (statusClass) pip.classList.add(statusClass);
-        }
-        textEl.innerHTML = `<b>${hp}</b> / ${maxHp}`;
+        const textEl = el.querySelector('.hb-text');
+        const fillEl = el.querySelector('.hb-fill');
+        textEl.textContent = `${hp} / ${maxHp}`;
+        fillEl.style.width = `${(pct * 100).toFixed(1)}%`;
+        fillEl.style.background = color;
+        fillEl.style.boxShadow = `0 0 6px ${color}`;
     }
 
     updateDamageVignetteUI() {
@@ -7165,6 +9369,30 @@ class Game3D {
         if (!el) return;
         const t = this._muzzleFlashT || 0;
         el.style.opacity = (t > 0 ? Math.min(1, t / 0.08) * 0.75 : 0).toFixed(3);
+    }
+
+    updateSprintBarUI() {
+        const bar = document.getElementById('sprint-bar');
+        if (!bar) return;
+
+        const timer = this.powerUps && this.powerUps.speedBoostTimer ? this.powerUps.speedBoostTimer : 0;
+        const inPlay = this.gameMode === 'play' && !(this._isPreGameMeta && this._isPreGameMeta());
+
+        if (!inPlay || timer <= 0) {
+            bar.style.display = 'none';
+            bar.setAttribute('aria-hidden', 'true');
+            return;
+        }
+
+        const peak = Math.max(0.001, this.powerUps._speedBoostBarPeak || this.SPEED_BOOST_MAX_TIMER || 25);
+        const ratio = Math.max(0, Math.min(1, timer / peak));
+
+        bar.style.display = 'flex';
+        bar.setAttribute('aria-hidden', 'false');
+        bar.classList.toggle('sb-low', ratio < 0.25);
+
+        const fill = bar.querySelector('.sb-fill');
+        if (fill) fill.style.width = (ratio * 100).toFixed(2) + '%';
     }
 
     updateObjectiveBannerUI() {
@@ -7238,8 +9466,10 @@ class Game3D {
         const wrap = document.getElementById('minimap-wrap');
         const canvas = document.getElementById('minimap');
         if (!wrap || !canvas) return;
-        if (this.gameMode !== 'play') { wrap.style.display = 'none'; return; }
-        wrap.style.display = 'block';
+        // Minimap is intentionally hidden in maze/play mode — the on-screen
+        // direction indicator + objective banner carry navigation by themselves.
+        wrap.style.display = 'none';
+        return;
 
         // Throttle to ~10 fps to save cycles
         this._mmFrame = ((this._mmFrame || 0) + 1) % 6;
@@ -7348,119 +9578,24 @@ class Game3D {
     
     
     clearAllUI() {
-        // Remove ALL possible UI elements (except modals, inventory, and crosshair)
-        // NOTE: do not list 'weapon-hud' here — it's the live ammo readout.
-        const allUIElements = [
-            // Old HUD elements
-            'player-hp-hud', 'top-center-ui',
-            'jetpack-hud', 'enemy-count-hud', 'compass-hud',
-            'player-pos', 'player-facing', 'camera-info',
-            // Any other possible UI elements
-            'objective-msg', 'facing-indicator',
-            'control-ui', 'maze-ui'
-        ];
-        
-        allUIElements.forEach(id => {
-            const el = document.getElementById(id);
-            if (el && id !== 'crosshair' && id !== 'controls-ui' && id !== 'inventory-grid-ui' && id !== 'inventory-drawer') { // Explicitly protect crosshair, controls, inventory grid, and drawer
-                el.remove();
-            }
-        });
-        
-        // Also remove any elements with common UI classes
-        const uiClasses = ['hud-element', 'game-ui', 'ui-panel', 'control-panel'];
-        uiClasses.forEach(className => {
-            const elements = document.querySelectorAll(`.${className}`);
-            elements.forEach(el => el.remove());
-        });
-        
-        // Remove any elements positioned in top-right area that might be interfering
-        const allDivs = document.querySelectorAll('div');
-        allDivs.forEach(div => {
-            // Never touch the drawer or anything inside it — the inv-panel uses
-            // left:50% and would otherwise be nuked every frame.
-            if (div.closest && div.closest('#inventory-drawer')) return;
-            // Also leave anything inside protected wrappers alone.
-            if (div.closest && div.closest('#settings-modal, #toolbox-modal, #inventory-grid-ui')) return;
-
-            const style = window.getComputedStyle(div);
-            if ((style.position === 'absolute' || style.position === 'fixed') &&
-                (style.top === '20px' || style.top === '10px' || style.top === '0px' || style.top === '50%') &&
-                (style.right === '20px' || style.right === '10px' || style.right === '0px' || style.left === '50%')) {
-                if (!div.id || (!div.id.includes('health-ui') &&
-                    !div.id.includes('health-bar') &&
-                    !div.id.includes('compass-ui') &&
-                    !div.id.includes('weapon-powerup-ui') &&
-                    !div.id.includes('settings-modal') &&
-                    !div.id.includes('toolbox-modal') &&
-                    !div.id.includes('inventory-drawer') &&
-                    !div.id.includes('inventory-grid-ui') &&
-                    !div.id.includes('minimap') &&
-                    !div.id.includes('objective-banner') &&
-                    !div.id.includes('damage-vignette') &&
-                    !div.id.includes('muzzle-flash') &&
-                    !div.id.includes('arena-hud') &&
-                    !div.id.includes('arena-countdown') &&
-                    !div.id.includes('lava-vignette') &&
-                    !div.id.includes('crosshair') &&
-                    !div.id.includes('drawer-cursor'))) {
-                    div.remove();
-                }
-            }
-        });
+        // Cheap sweep: only IDs that legacy code might leave behind. The
+        // previous version did a full-document querySelectorAll('div') +
+        // getComputedStyle per frame, which dominated CPU on lower-end
+        // machines. The targeted-ID removal below is O(1) per id and the
+        // div scan is no longer needed — every live HUD element is owned
+        // by the new cached-ref system in mountHUD/updateXxxUI.
+        const stale = STALE_UI_IDS;
+        for (let i = 0; i < stale.length; i++) {
+            const el = document.getElementById(stale[i]);
+            if (el) el.remove();
+        }
     }
 
     updateHealthUI() {
         // Replaced by updateHealthBarUI() — keep stub so other call sites don't break.
         const old = document.getElementById('health-ui');
         if (old) old.remove();
-        return;
-        // eslint-disable-next-line no-unreachable
-        if (this.gameMode !== 'play') {
-            return;
-        }
-        let hud = document.getElementById('health-ui');
-        if (!hud) {
-            hud = document.createElement('div');
-            hud.id = 'health-ui';
-            hud.style.position = 'absolute';
-            hud.style.top = '20px';
-            hud.style.right = '20px';
-            hud.style.background = 'rgba(0,0,0,0.8)';
-            hud.style.border = '2px solid #ff6666';
-            hud.style.borderRadius = '8px';
-            hud.style.padding = '12px 16px';
-            hud.style.color = '#ff6666';
-            hud.style.fontFamily = 'Courier New, monospace';
-            hud.style.fontSize = '16px';
-            hud.style.fontWeight = 'bold';
-            hud.style.zIndex = '1000';
-            document.body.appendChild(hud);
-        }
-        
-        const hpPercent = (this.player.hp / this.player.maxHp) * 100;
-        const hpColor = hpPercent > 60 ? '#ffb347' : hpPercent > 30 ? '#ffff00' : '#ff6666';
-        
-        hud.innerHTML = `
-            <div style="text-align: center; margin-bottom: 8px; font-size: 14px; opacity: 0.8;">${this.t('health').toUpperCase()}</div>
-            <div style="text-align: center; font-size: 20px; color: ${hpColor}; margin-bottom: 8px;">
-                ${Math.floor(this.player.hp)}/${this.player.maxHp}
-            </div>
-            <div style="width: 140px; height: 10px; background: rgba(255,255,255,0.2); border-radius: 5px; overflow: hidden;">
-                <div style="
-                    width: ${hpPercent}%; 
-                    height: 100%; 
-                    background: ${hpColor}; 
-                    transition: width 0.1s;
-                "></div>
-            </div>
-        `;
-        hud.style.display = 'block';
     }
-    
-    // Stub kept because the ammo-pickup apply() calls it; the real HUD is the
-    // event-driven one rendered by renderHUD().
-    updateWeaponPowerUpUI() { /* deprecated — see renderHUD */ }
 
     // ===== New HUD System with Cached DOM References =====
 
@@ -7528,16 +9663,15 @@ class Game3D {
     }
     
     updateControlsUI() {
-        // Controls panel is hidden — kept off by default
+        // Controls panel is hidden — kept off by default. The block below is
+        // retained as a reference implementation if it's brought back later.
         const existing = document.getElementById('controls-ui');
         if (existing) existing.style.display = 'none';
         return;
-        // Only show in play mode
         if (this.gameMode !== 'play') {
             return;
         }
-        
-        // Create or update controls UI (top left)
+
         let hud = document.getElementById('controls-ui');
         if (!hud) {
             hud = document.createElement('div');
@@ -7558,28 +9692,24 @@ class Game3D {
             hud.style.boxShadow = '0 4px 20px rgba(255,179,71,0.3)';
             document.body.appendChild(hud);
         }
-        
-        // Get current view mode and control scheme
+
         const viewMode = this.viewMode;
         const isJetpackActive = this.isJetpackActive;
         const isReloading = this.isReloading;
-        
-        // Basic movement controls
+
         const movementControls = [
             'WASD - Move',
             'Mouse - Look Around',
             this.jetpackArmed ? 'Space - Jetpack (hold)' : 'Space - Jump'
         ];
-        
-        // Weapon controls
+
         const weaponControls = [
             'Left Click - Fire',
             'Mouse Wheel - Switch Weapon',
             'R - Reload',
             '1-2 - Select Weapon'
         ];
-        
-        // View controls
+
         const viewControls = [];
         if (viewMode === 'fpv') {
             viewControls.push('V - Birds-eye View');
@@ -7592,8 +9722,7 @@ class Game3D {
             viewControls.push('V - Switch to FPV');
         }
         viewControls.push('Cmd - Cycle Camera Angle');
-        
-        // Game controls
+
         const gameControls = [
             'P - Settings',
             'T - Toolbox',
@@ -7608,8 +9737,7 @@ class Game3D {
         if (this.inventory.flags > 0) {
             gameControls.unshift(`F - Place Flag (${this.inventory.flags})`);
         }
-        
-        // Special states
+
         const specialStates = [];
         if (isJetpackActive) {
             specialStates.push('🚀 Jetpack thrusting');
@@ -7618,6 +9746,9 @@ class Game3D {
         }
         if (isReloading) {
             specialStates.push('🔄 Reloading...');
+        }
+        if (this.powerUps.speedBoostTimer > 0) {
+            specialStates.push(`⚡ Speed Boost ${Math.ceil(this.powerUps.speedBoostTimer)}s`);
         }
         
         hud.innerHTML = `
@@ -7666,7 +9797,6 @@ class Game3D {
     }
     
     updateInventoryGridUI() {
-        // Only show in play mode
         if (this.gameMode !== 'play') {
             const existing = document.getElementById('inventory-grid-ui');
             if (existing) existing.style.display = 'none';
@@ -7678,7 +9808,11 @@ class Game3D {
         // and rebuilding clobbers in-flight drag operations.
         const layout = this.quickbarLayout || this.defaultQuickbarLayout();
         const activeWeaponId = this.player.weapons[this.player.currentWeaponIndex];
-        const sigParts = [activeWeaponId || '', this.jetpackArmed ? 'J' : '-'];
+        const sigParts = [
+            activeWeaponId || '',
+            this.jetpackArmed ? 'J' : '-',
+            `spd:${this.getSpeedBoostStock()}:${Math.ceil(this.powerUps.speedBoostTimer || 0)}`
+        ];
         for (const id of layout) {
             if (!id) { sigParts.push('_'); continue; }
             sigParts.push(`${id}:${this.getItemCount(id)}:${this.isItemOwned(id) ? 1 : 0}`);
@@ -7687,7 +9821,6 @@ class Game3D {
         if (sig === this._qbSig) return;
         this._qbSig = sig;
 
-        // Create or update inventory grid UI (bottom center)
         let hud = document.getElementById('inventory-grid-ui');
         if (!hud) {
             hud = document.createElement('div');
@@ -7728,9 +9861,13 @@ class Game3D {
             slot.draggable = item.type !== 'empty';
 
             const isOwned = item.type !== 'empty' && this.isItemOwned(item.id);
-            const isSelected = item.type === 'weapon' && item.id === activeWeaponId;
+            const isActiveBlock = !!(this.activeBlockId && this.BLOCK_DEFS && this.BLOCK_DEFS[item.id] && item.id === this.activeBlockId);
+            const isSelected = (item.type === 'weapon' && item.id === activeWeaponId) || isActiveBlock;
             const isArmed = item.id === 'jetpack' && this.jetpackArmed;
             if (isArmed) slot.classList.add('qb-armed');
+            if (item.id === 'speed' && this.powerUps.speedBoostTimer > 0) {
+                slot.classList.add('qb-speed-active');
+            }
 
             if (item.type === 'empty') {
                 slot.classList.add('qb-empty');
@@ -7740,15 +9877,30 @@ class Game3D {
             if (isSelected) slot.classList.add('qb-selected');
 
             const count = item.type === 'empty' ? 0 : this.getItemCount(item.id);
-            const showCount = item.type !== 'weapon' && item.type !== 'empty' && count > 0;
+            let countLabel = '';
+            if (item.id === 'speed') {
+                const stock = this.getSpeedBoostStock();
+                const active = Math.ceil(this.powerUps.speedBoostTimer || 0);
+                if (stock > 0 && active > 0) countLabel = `${stock}·${active}s`;
+                else if (stock > 0) countLabel = String(stock);
+                else if (active > 0) countLabel = `${active}s`;
+            } else if (item.type !== 'weapon' && item.type !== 'empty' && count > 0) {
+                countLabel = String(count);
+            }
 
             slot.innerHTML = `
                 <span class="qb-key">${item.shortcut}</span>
                 <span class="qb-icon">${item.icon || '·'}</span>
-                ${showCount ? `<span class="qb-count">${count}</span>` : ''}
+                ${countLabel ? `<span class="qb-count">${countLabel}</span>` : ''}
             `;
 
             slot.addEventListener('click', () => {
+                if (item.id === 'speed' && this.getSpeedBoostStock() <= 0) {
+                    if (this.powerUps.speedBoostTimer > 0) {
+                        this.showMessage(`Speed boost active — ${Math.ceil(this.powerUps.speedBoostTimer)}s left`);
+                    }
+                    return;
+                }
                 if (isOwned) {
                     this.audio && this.audio.play('uiClick');
                     this.selectGridItem(item);
@@ -7787,6 +9939,17 @@ class Game3D {
             this.toggleJetpackArmed();
             return;
         }
+
+        // Block tool: arm placement mode. Left-click then drops a block.
+        if (this.BLOCK_DEFS && this.BLOCK_DEFS[item.id]) {
+            this.activeBlockId = item.id;
+            this.showMessage(`${item.name} — left-click to place`);
+            this._qbSig = null;
+            this.updateInventoryGridUI && this.updateInventoryGridUI();
+            return;
+        }
+        // Any non-block selection clears placement mode.
+        this.activeBlockId = null;
 
         if (item.type === 'weapon') {
             const weaponIndex = this.player.weapons.indexOf(item.id);
@@ -7831,9 +9994,11 @@ class Game3D {
         const reg = this.getItemRegistry();
         const def = reg.all.find(d => d.id === itemId);
         if (!def) return;
+        const type = def.category === 'weapon' ? 'weapon'
+            : (def.category === 'block' ? 'block' : 'item');
         this.selectGridItem({
             id: def.id,
-            type: def.category === 'weapon' ? 'weapon' : 'item',
+            type,
             name: def.name,
             icon: def.icon
         });
@@ -7880,11 +10045,13 @@ class Game3D {
         const reg = this.getItemRegistry();
         const weaponItems = reg.weapons.map(d => ({ ...d, type: 'weapon' }));
         const consumableItems = reg.consumables.map(d => ({ ...d, type: 'item' }));
+        const blockItems = (reg.blocks || []).map(d => ({ ...d, type: 'block' }));
 
         const ownedOnly = this.drawerFilter === 'owned';
         const filt = (it) => !ownedOnly || this.isItemOwned(it.id);
         const visibleWeapons = weaponItems.filter(filt);
         const visibleConsumables = consumableItems.filter(filt);
+        const visibleBlocks = blockItems.filter(filt);
 
         // Stats header
         const hp = this.player.hp ?? 0;
@@ -7906,6 +10073,7 @@ class Game3D {
                         <span class="ds-chip ds-ammo" title="Ammo"><b>🔸</b> ${ammo}/${ammoMax}</span>
                         <span class="ds-chip ds-fuel" title="Jetpack fuel"><b>🚀</b> ${fuel}</span>
                         <span class="ds-chip ds-flags" title="Flags"><b>🏁</b> ${flags}</span>
+                        <span class="ds-chip ds-keys" title="Crate keys"><b>🗝️</b> ${this.inventory.keys || 0}</span>
                     </div>
                     <div class="drawer-actions">
                         <button class="df-pill ${ownedOnly ? '' : 'df-pill-on'}" data-filter="all">All</button>
@@ -7935,6 +10103,13 @@ class Game3D {
                         <h4>${this.t('consumables')} <span class="ds-count">${visibleConsumables.length}/${consumableItems.length}</span></h4>
                         <div id="consumable-grid" class="drawer-grid">
                             ${visibleConsumables.length ? '' : `<div class="drawer-empty">No consumables${ownedOnly ? ' picked up yet' : ''}.</div>`}
+                        </div>
+                    </div>
+
+                    <div class="drawer-section">
+                        <h4>Blocks <span class="ds-count">${visibleBlocks.length}/${blockItems.length}</span></h4>
+                        <div id="block-grid" class="drawer-grid">
+                            ${visibleBlocks.length ? '' : `<div class="drawer-empty">No blocks${ownedOnly ? ' yet' : ''}.</div>`}
                         </div>
                     </div>
                 </div>
@@ -7978,10 +10153,13 @@ class Game3D {
         const consumableGrid = drawer.querySelector('#consumable-grid');
         visibleConsumables.forEach(item => consumableGrid.appendChild(this.createDrawerItem(item)));
 
+        const blockGrid = drawer.querySelector('#block-grid');
+        if (blockGrid) visibleBlocks.forEach(item => blockGrid.appendChild(this.createDrawerItem(item)));
+
         this.setupDrawerKeyboardNavigation();
     }
 
-    // Short effect blurb for an item card (e.g. "+25 HP", "15 dmg · range 2.5").
+    // Short effect blurb for an item card (e.g. "+25 HP", "15 dmg · range 2.5")
     itemEffectText(item) {
         if (item.type === 'weapon') {
             const w = this.WEAPON_STATS[item.id];
@@ -7990,6 +10168,14 @@ class Game3D {
         }
         const def = this.ITEM_DEFS[item.id];
         if (!def) return '';
+        if (item.id === 'speed') {
+            const stock = this.getSpeedBoostStock();
+            const left = Math.ceil(this.powerUps.speedBoostTimer || 0);
+            if (left > 0 && stock > 0) return `${stock} in bag · ${left}s active (+45% move)`;
+            if (stock > 0) return `×${stock} in bag — click to use (+10s sprint)`;
+            if (left > 0) return `${left}s active (+45% move)`;
+            return '+10s sprint per pickup';
+        }
         const suffix = (def.labelSuffix || '').trim();
         return suffix || (def.autoApply ? 'auto' : '');
     }
@@ -8098,8 +10284,7 @@ class Game3D {
             if (!inBar) return;
             this.clearQuickbarSlot(slotIdx);
         });
-        
-        // Add drag handlers
+
         itemEl.addEventListener('dragstart', (e) => {
             if (isOwned) {
                 this.draggedItem = item.id;
@@ -8212,10 +10397,8 @@ class Game3D {
     }
     
     setupDrawerKeyboardNavigation() {
-        // Remove existing listeners
         document.removeEventListener('keydown', this.drawerKeyHandler);
-        
-        // Create new handler
+
         this.drawerKeyHandler = (e) => {
             if (!this.isDrawerOpen) return;
 
@@ -8265,11 +10448,15 @@ class Game3D {
 
         // Versioned storage key so old saved layouts (with machineGun, etc.)
         // are discarded instead of silently shown.
-        const saved = localStorage.getItem('pjboy_quickbar_layout_v2');
+        const saved = localStorage.getItem('pjboy_quickbar_layout_v3');
         if (saved) {
             try {
                 const parsed = JSON.parse(saved);
-                const valid = new Set([...Object.keys(this.WEAPON_STATS), ...Object.keys(this.ITEM_DEFS)]);
+                const valid = new Set([
+                    ...Object.keys(this.WEAPON_STATS),
+                    ...Object.keys(this.ITEM_DEFS),
+                    ...Object.keys(this.BLOCK_DEFS || {}),
+                ]);
                 this.quickbarLayout = parsed.map(id => (valid.has(id) ? id : null));
                 while (this.quickbarLayout.length < 9) this.quickbarLayout.push(null);
                 this.quickbarLayout = this.quickbarLayout.slice(0, 9);
@@ -8282,29 +10469,32 @@ class Game3D {
     // Curated default. Slot 3 is reserved for jetpack so the fuel stack is
     // always visible at a fixed key when the player is carrying any.
     defaultQuickbarLayout() {
-        const layout = ['diamondSword', 'gun', 'jetpack', 'health', 'ammo', 'speed', 'weaponBuff', 'healthRegen', 'flag'];
-        const valid = new Set([...Object.keys(this.WEAPON_STATS), ...Object.keys(this.ITEM_DEFS)]);
+        const layout = ['diamondSword', 'gun', 'machineGun', 'stone', 'jetpack', 'health', 'ammo', 'speed', 'weaponBuff'];
+        const valid = new Set([
+            ...Object.keys(this.WEAPON_STATS),
+            ...Object.keys(this.ITEM_DEFS),
+            ...Object.keys(this.BLOCK_DEFS || {}),
+        ]);
         return layout.map(id => (valid.has(id) ? id : null));
     }
 
     saveQuickbarLayout() {
-        localStorage.setItem('pjboy_quickbar_layout_v2', JSON.stringify(this.quickbarLayout));
+        localStorage.setItem('pjboy_quickbar_layout_v3', JSON.stringify(this.quickbarLayout));
     }
     
     showToast(message, type = 'info', duration = 3000) {
         const toast = {
             id: this.toastId++,
             message: message,
-            type: type, // 'info', 'success', 'warning', 'error'
+            type: type, // 'info' | 'success' | 'warning' | 'error'
             duration: duration,
             startTime: Date.now(),
             element: null
         };
-        
+
         this.toasts.push(toast);
         this.createToastElement(toast);
-        
-        // Auto-remove after duration
+
         setTimeout(() => {
             this.removeToast(toast.id);
         }, duration);
@@ -8332,8 +10522,7 @@ class Game3D {
         toastEl.style.maxWidth = '400px';
         toastEl.style.textAlign = 'center';
         toastEl.style.wordWrap = 'break-word';
-        
-        // Set type-specific styling
+
         switch (toast.type) {
             case 'success':
                 toastEl.style.border = '2px solid #ffb347';
@@ -8355,39 +10544,37 @@ class Game3D {
         toastEl.innerHTML = toast.message;
         document.body.appendChild(toastEl);
         toast.element = toastEl;
-        
-        // Animate in
+
         setTimeout(() => {
             toastEl.style.opacity = '1';
             toastEl.style.transform = 'translateX(-50%) translateY(0)';
         }, 10);
     }
-    
+
     removeToast(toastId) {
         const toastIndex = this.toasts.findIndex(t => t.id === toastId);
         if (toastIndex === -1) return;
-        
+
         const toast = this.toasts[toastIndex];
         if (toast.element) {
-            // Animate out
             toast.element.style.opacity = '0';
             toast.element.style.transform = 'translateX(-50%) translateY(-20px)';
-            
+
             setTimeout(() => {
                 if (toast.element && toast.element.parentNode) {
                     toast.element.parentNode.removeChild(toast.element);
                 }
             }, 300);
         }
-        
+
         this.toasts.splice(toastIndex, 1);
     }
-    
+
     updateToasts() {
-        // Update toast positions to stack them
+        // Stack toasts vertically at 60px spacing
         this.toasts.forEach((toast, index) => {
             if (toast.element) {
-                const offset = index * 60; // 60px spacing between toasts
+                const offset = index * 60;
                 toast.element.style.top = `${20 + offset}px`;
             }
         });
@@ -8396,9 +10583,7 @@ class Game3D {
     // The drawer used to hide the system cursor and overlay a glowing ring.
     // That made the cursor invisible (and confusing) while interacting with
     // drawer items, so we now keep the OS cursor visible at all times.
-    showDrawerCursor() { document.body.style.cursor = 'default'; }
     hideDrawerCursor() { document.body.style.cursor = ''; }
-    updateDrawerCursorPosition = () => {};
 
     swapQuickbarItems(fromSlot, toSlot) {
         if (fromSlot === toSlot) return;
@@ -8416,12 +10601,10 @@ class Game3D {
     }
     
     updateCompassUI() {
-        // Only show in play mode
         if (this.gameMode !== 'play') {
             return;
         }
-        
-        // Create or update compass UI (bottom right)
+
         let hud = document.getElementById('compass-ui');
         if (!hud) {
             hud = document.createElement('div');
@@ -8445,12 +10628,10 @@ class Game3D {
             hud.style.justifyContent = 'center';
             document.body.appendChild(hud);
         }
-        
-        // Calculate player facing direction
+
         const facingAngle = this.characterRotation * (180 / Math.PI);
         const normalizedAngle = ((facingAngle % 360) + 360) % 360;
-        
-        // Determine cardinal direction
+
         let direction = '';
         let directionSymbol = '';
         if (normalizedAngle >= 337.5 || normalizedAngle < 22.5) {
@@ -8490,7 +10671,6 @@ class Game3D {
     }
     
     updateCrosshairUI() {
-        // Only show crosshair in FPV play mode
         const shouldShow = (this.gameMode === 'play' && this.viewMode === 'fpv');
         const htmlCrosshair = document.getElementById('crosshair');
 
@@ -8520,12 +10700,10 @@ class Game3D {
     }
     
     createGroundTargetIndicator() {
-        // Create a ground target indicator for isometric view
         if (this.groundTargetIndicator) {
             this.scene.remove(this.groundTargetIndicator);
         }
-        
-        // Create outer ring
+
         const outerGeometry = new THREE.RingGeometry(1.2, 1.5, 32);
         const outerMaterial = new THREE.MeshBasicMaterial({
             color: 0xffb347,
@@ -8534,8 +10712,7 @@ class Game3D {
             side: THREE.DoubleSide
         });
         const outerRing = new THREE.Mesh(outerGeometry, outerMaterial);
-        
-        // Create inner ring
+
         const innerGeometry = new THREE.RingGeometry(0.8, 1.0, 32);
         const innerMaterial = new THREE.MeshBasicMaterial({
             color: 0xffb347,
@@ -8544,8 +10721,7 @@ class Game3D {
             side: THREE.DoubleSide
         });
         const innerRing = new THREE.Mesh(innerGeometry, innerMaterial);
-        
-        // Create center dot
+
         const dotGeometry = new THREE.CircleGeometry(0.3, 16);
         const dotMaterial = new THREE.MeshBasicMaterial({
             color: 0xffb347,
@@ -8554,51 +10730,42 @@ class Game3D {
             side: THREE.DoubleSide
         });
         const centerDot = new THREE.Mesh(dotGeometry, dotMaterial);
-        
-        // Group all parts
+
         this.groundTargetIndicator = new THREE.Group();
         this.groundTargetIndicator.add(outerRing);
         this.groundTargetIndicator.add(innerRing);
         this.groundTargetIndicator.add(centerDot);
-        
-        // Position exactly on ground level
+
         this.groundTargetIndicator.position.y = 0;
-        
-        // Rotate to be horizontal (flat on ground)
-        this.groundTargetIndicator.rotation.x = -Math.PI / 2; // Rotate 90 degrees to lay flat
-        
-        // Initially hidden
+        this.groundTargetIndicator.rotation.x = -Math.PI / 2; // lay flat
         this.groundTargetIndicator.visible = false;
-        
+
         this.scene.add(this.groundTargetIndicator);
     }
-    
+
     updateGroundTargetIndicator() {
-        // Only show in isometric, birds-eye, and ghost play modes
+        // Only show in iso/birds-eye/ghost play modes (FPV has a screen-space crosshair instead)
         const shouldShow = (this.gameMode === 'play' && (this.viewMode === 'iso' || this.viewMode === 'birds-eye' || this.viewMode === 'ghost'));
-        
-        
+
+
         if (!this.groundTargetIndicator) {
             this.createGroundTargetIndicator();
         }
-        
+
         if (shouldShow) {
-            // Use raycaster to find ground intersection
             const mouse = new THREE.Vector2();
-            // Use the correct mouse tracking from playMode
             mouse.x = this.playMode.mouseNDC.x;
             mouse.y = this.playMode.mouseNDC.y;
-            
-            
+
+
             const raycaster = new THREE.Raycaster();
             raycaster.setFromCamera(mouse, this.camera);
-            
-            // Create ground plane for intersection
+
             const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
             const intersectionPoint = new THREE.Vector3();
             const intersects = raycaster.ray.intersectPlane(groundPlane, intersectionPoint);
-            
-            
+
+
             if (intersects) {
                 this.groundTargetIndicator.position.x = intersectionPoint.x;
                 this.groundTargetIndicator.position.z = intersectionPoint.z;
@@ -8610,56 +10777,44 @@ class Game3D {
             this.groundTargetIndicator.visible = false;
         }
     }
-    
+
     updateGhostCamera(deltaTime) {
-        // Ghost camera movement controls
         const speed = this.ghostCamera.speed;
         const moveSpeed = speed * deltaTime;
-        
-        // Calculate movement direction based on camera quaternion
+
         const forward = new THREE.Vector3(0, 0, -1);
         const right = new THREE.Vector3(1, 0, 0);
         const up = new THREE.Vector3(0, 1, 0);
-        
-        // Apply camera quaternion to movement vectors
+
         forward.applyQuaternion(this.ghostCamera.quaternion);
         right.applyQuaternion(this.ghostCamera.quaternion);
         up.applyQuaternion(this.ghostCamera.quaternion);
-        
-        // Movement input
+
         const movement = new THREE.Vector3();
-        
+
         if (this.keys['KeyW']) movement.add(forward);
         if (this.keys['KeyS']) movement.sub(forward);
         if (this.keys['KeyA']) movement.sub(right);
         if (this.keys['KeyD']) movement.add(right);
-        if (this.keys['KeyQ']) movement.sub(up); // Q = down
-        if (this.keys['KeyE']) movement.add(up); // E = up
-        if (this.keys['Space']) movement.add(up); // Space = up (height increase)
-        
-        // Apply movement
+        if (this.keys['KeyQ']) movement.sub(up);
+        if (this.keys['KeyE']) movement.add(up);
+        if (this.keys['Space']) movement.add(up);
+
         movement.multiplyScalar(moveSpeed);
         this.ghostCamera.position.add(movement);
-        
-        // Mouse look (only when pointer is locked)
-        if (this.isPointerLocked) {
-            // Mouse look is handled in mousemove event
-        }
+
+        // Mouse look is handled in the mousemove listener.
     }
-    
-    
+
+
     updatePowerUps(deltaTime) {
-        // Health regeneration
         if (this.powerUps.healthRegen > 0) {
-            const regenAmount = this.powerUps.healthRegen * 2 * deltaTime; // 2 HP per second per stack
+            const regenAmount = this.powerUps.healthRegen * 2 * deltaTime; // 2 HP/s per stack
             this.player.hp = Math.min(this.player.maxHp, this.player.hp + regenAmount);
         }
-        
-        // Speed boost (temporary effect)
-        if (this.powerUps.speedBoost > 0) {
-            // Speed boost is handled in movement code
-        }
-        
+
+        // Speed boost is applied directly in the movement code.
+
         // Jetpack fuel consumption
         if (this.isJetpackActive && this.powerUps.jetpackFuel > 0) {
             this.powerUps.jetpackFuel -= 20 * deltaTime; // 20 fuel per second
@@ -8694,21 +10849,25 @@ class Game3D {
     
     handleContinuousFiring(deltaTime) {
         if (!this.isFiring || this.gameMode !== 'play') return;
-        
+
         const weapon = this.getCurrentWeapon();
         if (!weapon || !weapon.isContinuous) return;
-        
-        // Check if we can fire (cooldown and ammo)
+
         const weaponId = this.player.weapons[this.player.currentWeaponIndex];
         if (this.weaponCooldowns[weaponId] && this.weaponCooldowns[weaponId] > 0) return;
-        
+
         if (weapon.ammoCost > 0 && this.inventory.ammo < weapon.ammoCost) {
-            this.isFiring = false; // Stop firing if no ammo
+            this.isFiring = false;
             return;
         }
-        
-        // Fire the weapon
-        this.attackWithWeapon();
+
+        // Route ranged through fireGun so we spawn a projectile from the muzzle
+        // (matches single-click feel); melee falls back to the legacy attack path.
+        if (weapon.type === 'ranged') {
+            this.fireGun();
+        } else {
+            this.attackWithWeapon();
+        }
     }
 
     ensureMessageElement() {
@@ -8743,7 +10902,6 @@ class Game3D {
 
     // ================= ARENA / WAVE MODE =================
     startArenaMode() {
-        // Tear down current maze + reset world
         if (this.clearMaze) this.clearMaze();
         if (this.clearEnemies) this.clearEnemies();
         this._clearArenaObjects();
@@ -8769,7 +10927,6 @@ class Game3D {
         a.shake.duration = 0;
         a.shake.elapsed = 0;
 
-        // Build geometry
         this.buildArena();
 
         // Reset player loadout
@@ -8780,27 +10937,16 @@ class Game3D {
         this.player.invulnerabilityTimer = 0;
         this.characterRotation = 0;
         if (this.player.weapons) {
-            this.player.weapons = ['diamondSword', 'gun'];
+            this.player.weapons = ['diamondSword', 'gun', 'machineGun'];
             this.player.currentWeaponIndex = 0;
         }
         if (this.inventory) this.inventory.ammo = 100;
         this.score = 0;
         this.kills = 0;
 
-        // Make sure we're in play mode controls
         this.gameMode = 'play';
 
-        // The big centered overlay now does the talking — no toast needed here.
         this.audio && this.audio.play('uiClick');
-    }
-
-    exitArenaMode() {
-        if (!this.arena || !this.arena.active) return;
-        this.arena.active = false;
-        this.arena.phase = 'idle';
-        this._clearArenaObjects();
-        if (this.clearEnemies) this.clearEnemies();
-        if (this.rebuildMaze) this.rebuildMaze();
     }
 
     _clearArenaObjects() {
@@ -8864,6 +11010,7 @@ class Game3D {
                 size: { x: spec.sx, y: wallHeight, z: spec.sz }
             };
             this.walls.push(entry);
+            this._addWallToHash(entry);
             a.perimeterWalls.push(entry);
             a.arenaObjects.push(mesh);
         }
@@ -8911,6 +11058,7 @@ class Game3D {
                 size: { x: footprint, y: height, z: footprint }
             };
             this.walls.push(entry);
+            this._addWallToHash(entry);
             a.pillars.push(entry);
             a.arenaObjects.push(group);
         }
@@ -9438,25 +11586,34 @@ class Game3D {
     updateFacingIndicator() {
         const fi = this.facingIndicator;
         if (!fi.light || !fi.lightTarget || !this.player) return;
-        const forward = new THREE.Vector3(Math.sin(this.characterRotation), 0, Math.cos(this.characterRotation));
+        // Bail early when disabled — no point computing positions for hidden
+        // objects (saves the ray/plane intersect in particular).
+        if (!fi.enabled) {
+            fi.light.visible = false;
+            if (fi.groundDot) fi.groundDot.visible = false;
+            return;
+        }
+        const px = this.player.position.x;
+        const py = this.player.position.y;
+        const pz = this.player.position.z;
+        const fx = Math.sin(this.characterRotation);
+        const fz = Math.cos(this.characterRotation);
         // Light at head, slightly forward
-        const headY = this.player.position.y + 1.6;
-        const lightPos = this.player.position.clone().add(new THREE.Vector3(0, headY - this.player.position.y, 0)).add(forward.clone().multiplyScalar(0.25));
-        fi.light.position.copy(lightPos);
+        fi.light.position.set(px + fx * 0.25, py + 1.6, pz + fz * 0.25);
         // Target a few meters forward
-        const tgt = this.player.position.clone().add(forward.clone().multiplyScalar(3));
-        tgt.y = this.groundY + 0.5;
-        fi.lightTarget.position.copy(tgt);
-        fi.light.visible = fi.enabled;
-        
+        fi.lightTarget.position.set(px + fx * 3, this.groundY + 0.5, pz + fz * 3);
+        fi.light.visible = true;
+
         // Ground dot at forward ground intersection from player
         if (fi.groundDot) {
-            const ray = new THREE.Ray(this.player.position.clone().add(new THREE.Vector3(0, 1.0, 0)), forward);
-            const plane = new THREE.Plane(new THREE.Vector3(0,1,0), -this.groundY);
-            const p = new THREE.Vector3();
-            if (ray.intersectPlane(plane, p)) {
-                fi.groundDot.position.set(p.x, this.groundY + 0.02, p.z);
-                fi.groundDot.visible = fi.enabled;
+            _scratchV3a.set(px, py + 1.0, pz);
+            _scratchV3b.set(fx, 0, fz);
+            _scratchRay.origin.copy(_scratchV3a);
+            _scratchRay.direction.copy(_scratchV3b);
+            _scratchPlaneGround.constant = -this.groundY;
+            if (_scratchRay.intersectPlane(_scratchPlaneGround, _scratchV3c)) {
+                fi.groundDot.position.set(_scratchV3c.x, this.groundY + 0.02, _scratchV3c.z);
+                fi.groundDot.visible = true;
             } else {
                 fi.groundDot.visible = false;
             }
@@ -9656,7 +11813,6 @@ class Game3D {
     tickMultiplayer(deltaTime) {
         if (!this.net) return;
 
-        // Send local snapshot at fixed rate
         if (this.net.isConnected && this.player && this.player.position) {
             this._mpSendAccum += deltaTime;
             if (this._mpSendAccum >= this._mpSendInterval) {
@@ -9887,21 +12043,18 @@ class Game3D {
     }
 }
 
-// Start the game
 window.addEventListener('load', () => {
     const game = new Game3D();
-    
-    // Expose game instance globally for easy character loading
-    window.game = game;
-    
-    
-    // Setup modal event listeners
-    game.setupModalListeners();
-    // Render character thumbnails for the settings picker
-    game.generateCharacterPreviews();
-    // Using custom in-code lion archer model (no external GLTF)
 
-    // Ensure crosshair element exists
+    // Exposed globally for the character picker buttons.
+    window.game = game;
+
+    game.setupModalListeners();
+    game.generateCharacterPreviews();
+    if (game.setupMetaUI) game.setupMetaUI();
+    if (game.setAppPhase) game.setAppPhase('title');
+
+    // Inject crosshair element if index.html didn't ship one
     const crosshairCheck = document.getElementById('crosshair');
     if (!crosshairCheck) {
         const crosshair = document.createElement('div');
@@ -9911,7 +12064,5 @@ window.addEventListener('load', () => {
             <div style="position: absolute; top: 50%; left: 50%; width: 8px; height: 8px; background: #ffb347; box-shadow: 0 0 10px #ffb347, 0 0 20px #ffb347; border-radius: 50%; transform: translate(-50%, -50%);"></div>
         `;
         document.body.appendChild(crosshair);
-    } else {
     }
-
 });

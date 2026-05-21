@@ -10,7 +10,8 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>3D Second-Person Game - 128-bit Style</title>
-    <link rel="stylesheet" href="style.css?v=16">
+    <link rel="stylesheet" href="style.css?v=20">
+    <link rel="stylesheet" href="style-meta.css?v=4">
 </head>
 <body>
     <div id="gameContainer">
@@ -56,7 +57,16 @@
                 <span class="ob-sep">·</span>
                 <span class="ob-flags">Flags: 0/0</span>
                 <span class="ob-sep">·</span>
+                <span class="ob-sep campaign-timer-sep">·</span>
+                <span class="ob-timer">TIME --:--</span>
+                <span class="ob-sep">·</span>
                 <span class="ob-score">Score: 0</span>
+            </div>
+
+            <!-- Sprint / speed boost timer (top center, below objective banner) -->
+            <div id="sprint-bar" style="display:none;" aria-hidden="true">
+                <span class="sb-label">SPRINT</span>
+                <div class="sb-track"><div class="sb-fill"></div></div>
             </div>
 
             <!-- Top-right minimap -->
@@ -85,14 +95,10 @@
                 <div class="modal-body">
                     <div class="settings-section">
                         <h3 id="maze-selection-title">Maze Selection</h3>
-                        <div class="maze-buttons">
-                            <button class="maze-btn" data-maze="0">Wide Halls</button>
-                            <button class="maze-btn" data-maze="1">Classic Small</button>
-                            <button class="maze-btn" data-maze="2">Open Arena</button>
-                            <button class="maze-btn" data-maze="3">Spiral</button>
-                            <button class="maze-btn" data-maze="4">Labyrinth</button>
-                            <button class="maze-btn" data-maze="5">ASCII Maze</button>
-                        </div>
+                        <!-- Populated by renderMazeButtons() — kept empty so
+                             adding/removing entries from savedMazes is the
+                             single source of truth. -->
+                        <div class="maze-buttons" id="maze-buttons"></div>
                         <div class="maze-description">
                             <p id="maze-desc">Large maze with wide 5-cell halls</p>
                         </div>
@@ -122,15 +128,6 @@
                         </div>
                     </div>
 
-                    <div class="settings-section">
-                        <h3 id="game-mode-title">Game Mode</h3>
-                        <div class="mode-buttons">
-                            <button class="mode-btn" data-mode="play">Play Mode</button>
-                            <button class="mode-btn" data-mode="create">Create Mode</button>
-                            <button class="mode-btn mode-btn-arena" data-mode="arena">Arena Mode</button>
-                            <button class="mode-btn mode-btn-openworld" data-mode="openworld">Open World</button>
-                        </div>
-                    </div>
 
                     <div class="settings-section">
                         <h3 id="character-title">Character</h3>
@@ -261,7 +258,90 @@
         </div>
 
         <!-- Portal-transition fade overlay (open world) -->
+
+        <!-- Campaign level flow (in-run, below meta menu) -->
+        <div id="campaign-level-intro" class="campaign-intro-strip" hidden>
+            <div class="campaign-level-num" id="campaign-intro-level">LEVEL 1</div>
+            <p class="campaign-intro-hint">Walk into the <strong>gold START</strong> marker to begin</p>
+        </div>
+        <div id="campaign-level-complete" class="campaign-panel" hidden>
+            <div class="campaign-panel-inner">
+                <h2 class="campaign-complete-title" id="campaign-complete-title">Level Complete</h2>
+                <div class="campaign-complete-stats" id="campaign-complete-stats"></div>
+                <button type="button" class="meta-btn meta-btn-primary campaign-continue-btn" id="campaign-continue-btn">Click to continue</button>
+            </div>
+        </div>
+
         <div id="portal-fade"></div>
+
+        <div id="meta-overlay" class="meta-overlay" hidden>
+            <div id="meta-title" class="meta-panel" hidden>
+                <h1 class="meta-logo">PJBoy</h1>
+                <p class="meta-tagline">128-bit maze action</p>
+                <button type="button" class="meta-btn meta-btn-primary" id="meta-start-btn">Press Start</button>
+            </div>
+            <div id="meta-profile" class="meta-panel" hidden>
+                <h2 class="meta-heading">Profile</h2>
+                <p class="meta-tagline">Enter a name for your high scores</p>
+                <input id="meta-profile-input" class="mp-input" type="text" maxlength="16" placeholder="Player" autocomplete="off" spellcheck="false" />
+                <button type="button" class="meta-btn meta-btn-primary" id="meta-profile-save-btn">Continue</button>
+            </div>
+            <div id="meta-mode-select" class="meta-panel" hidden>
+                <div class="meta-profile-strip">
+                    <span class="meta-profile-label">Player:</span>
+                    <span class="meta-profile-name" id="meta-profile-display">Player</span>
+                    <button type="button" class="meta-btn meta-btn-ghost meta-btn-small" id="meta-profile-change-btn">Change</button>
+                </div>
+                <h2 class="meta-heading">Choose Mode</h2>
+                <div class="mode-card-grid">
+                    <button type="button" class="mode-card" data-mode-id="campaign">
+                        <span class="mode-card-title">Campaign</span>
+                        <span class="mode-card-desc">Escape the maze — 10 levels</span>
+                    </button>
+                    <button type="button" class="mode-card" data-mode-id="arena">
+                        <span class="mode-card-title">Arena</span>
+                        <span class="mode-card-desc">Survive endless waves</span>
+                    </button>
+                    <button type="button" class="mode-card" data-mode-id="wide_halls">
+                        <span class="mode-card-title">Wide Halls</span>
+                        <span class="mode-card-desc">Free-roam the 100×100 maze — reach the exit</span>
+                    </button>
+                    <button type="button" class="mode-card" data-mode-id="explorer">
+                        <span class="mode-card-title">Explorer</span>
+                        <span class="mode-card-desc">Open world hub + portals</span>
+                    </button>
+                    <button type="button" class="mode-card" data-mode-id="creator">
+                        <span class="mode-card-title">Creator</span>
+                        <span class="mode-card-desc">Place blocks — mine with pickaxe</span>
+                    </button>
+                </div>
+                <div class="meta-mode-actions">
+                    <button type="button" class="meta-btn" id="meta-settings-btn">Settings</button>
+                    <button type="button" class="meta-btn meta-btn-ghost" id="meta-back-title">Back</button>
+                </div>
+            </div>
+            <div id="meta-campaign-resume" class="meta-panel" hidden>
+                <h2 class="meta-heading">Campaign</h2>
+                <p class="meta-tagline" id="meta-resume-summary">Saved progress found</p>
+                <button type="button" class="meta-btn meta-btn-primary" id="meta-resume-game-btn">Resume Game</button>
+                <button type="button" class="meta-btn" id="meta-new-game-btn">New Game</button>
+                <div id="meta-resume-highscores"></div>
+                <button type="button" class="meta-btn meta-btn-ghost" id="meta-resume-back-btn">Back</button>
+            </div>
+            <div id="meta-custom-cursor" aria-hidden="true"></div>
+            <div id="meta-pause" class="meta-panel" hidden>
+                <h2 class="meta-heading">Paused</h2>
+                <button type="button" class="meta-btn meta-btn-primary" id="meta-resume-btn">Resume</button>
+                <button type="button" class="meta-btn" id="meta-quit-btn">Mode Select</button>
+            </div>
+            <div id="meta-results" class="meta-panel" hidden>
+                <h2 class="meta-heading" id="meta-results-title">Run Over</h2>
+                <div class="meta-results-body" id="meta-results-body"></div>
+                <button type="button" class="meta-btn meta-btn-primary" id="meta-retry-btn">Retry</button>
+                <button type="button" class="meta-btn" id="meta-results-modes-btn">Mode Select</button>
+            </div>
+            <div id="meta-level-banner" class="meta-level-banner" hidden></div>
+        </div>
     </div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -270,6 +350,8 @@
     <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
     <script src="multiplayer.js?v=3"></script>
     <script src="openworld.js?v=2"></script>
-    <script src="game.js?v=47"></script>
+    <script src="modes.js?v=1"></script>
+    <script src="game.js?v=88"></script>
+    <script src="game-modes-impl.js?v=17"></script>
 </body>
 </html>
