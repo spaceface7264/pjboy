@@ -383,6 +383,20 @@ class Game3D {
                 close: 'Luk',
                 diamondSword: 'Diamant Sværd',
                 diamondSwordDesc: 'Et kraftfuldt diamant sværd med høj skade',
+                swordGold: 'Guldsværd',
+                swordGoldDesc: 'Hurtigt og elegant — let, men skarpere end diamant',
+                swordStone: 'Stensværd',
+                swordStoneDesc: 'Grundlæggende sværd til begyndere',
+                skeletonAxe: 'Skelet Økse',
+                skeletonAxeDesc: 'Tung økse — langsom, men hårdtslående',
+                axeDiamond: 'Diamantøkse',
+                axeDiamondDesc: 'Den hårdeste slag, men langsom at svinge',
+                axeGold: 'Guldøkse',
+                axeGoldDesc: 'Hurtigere økse med solid skade',
+                skeletonBlade: 'Skelet Klinge',
+                skeletonBladeDesc: 'Lille klinge — hurtige stik, lav skade',
+                skeletonStaff: 'Skelet Stav',
+                skeletonStaffDesc: 'Lang rækkevidde, moderat skade',
                 gun: 'Pistol',
                 gunDesc: 'En præcis pistol med høj skade',
                 machineGun: 'Maskingevær',
@@ -516,6 +530,20 @@ class Game3D {
                 close: 'Close',
                 diamondSword: 'Diamond Sword',
                 diamondSwordDesc: 'A powerful diamond sword with high damage',
+                swordGold: 'Gold Sword',
+                swordGoldDesc: 'Fast and elegant — light, but sharper than diamond',
+                swordStone: 'Stone Sword',
+                swordStoneDesc: 'A basic starter sword',
+                skeletonAxe: 'Skeleton Axe',
+                skeletonAxeDesc: 'Heavy axe — slower, but hits hard',
+                axeDiamond: 'Diamond Axe',
+                axeDiamondDesc: 'Heaviest hit, but slow to swing',
+                axeGold: 'Gold Axe',
+                axeGoldDesc: 'Faster axe with solid damage',
+                skeletonBlade: 'Skeleton Blade',
+                skeletonBladeDesc: 'A small blade — fast jabs, low damage',
+                skeletonStaff: 'Skeleton Staff',
+                skeletonStaffDesc: 'Long reach, moderate damage',
                 gun: 'Pistol',
                 gunDesc: 'A precise pistol with high damage',
                 machineGun: 'Machine Gun',
@@ -779,17 +807,35 @@ class Game3D {
         }
     }
 
-    // One-off offscreen render of a block GLTF into a small dataURL. We
-    // dispose the renderer so we don't keep a second WebGL context around.
+    // Shared offscreen renderer for all thumbnail bakes. Browsers cap WebGL
+    // contexts at ~16; creating one renderer per thumbnail (we have many
+    // melee weapons + blocks) blows past that and evicts the main game
+    // context, producing a white screen. One context, reused.
+    _getThumbnailRenderer(size) {
+        if (!this._thumbRenderer) {
+            const canvas = document.createElement('canvas');
+            canvas.width = size; canvas.height = size;
+            const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true, preserveDrawingBuffer: true });
+            renderer.setPixelRatio(1);
+            renderer.setClearColor(0x000000, 0);
+            this._thumbRenderer = renderer;
+        }
+        const r = this._thumbRenderer;
+        // setSize with updateStyle=false avoids any DOM layout side effects on
+        // the detached canvas; we resize per-call because block (64) and
+        // character preview (192) share this renderer.
+        if (r.domElement.width !== size || r.domElement.height !== size) {
+            r.setSize(size, size, false);
+        }
+        return r;
+    }
+
+    // One-off offscreen render of a block GLTF into a small dataURL using the
+    // shared thumbnail renderer.
     _renderBlockThumbnail(sceneRoot, fallbackColor) {
         try {
             const size = 64;
-            const canvas = document.createElement('canvas');
-            canvas.width = size; canvas.height = size;
-            const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
-            renderer.setPixelRatio(1);
-            renderer.setSize(size, size, false);
-            renderer.setClearColor(0x000000, 0);
+            const renderer = this._getThumbnailRenderer(size);
 
             const scene = new THREE.Scene();
             const clone = sceneRoot.clone(true);
@@ -814,8 +860,7 @@ class Game3D {
             cam.lookAt(0, 0, 0);
 
             renderer.render(scene, cam);
-            const dataURL = canvas.toDataURL('image/png');
-            renderer.dispose();
+            const dataURL = renderer.domElement.toDataURL('image/png');
             return `<img src="${dataURL}" class="block-thumb" alt="" draggable="false">`;
         } catch (e) {
             console.warn('block thumbnail render failed', e);
@@ -829,12 +874,7 @@ class Game3D {
     _renderWeaponThumbnail(template) {
         try {
             const size = 64;
-            const canvas = document.createElement('canvas');
-            canvas.width = size; canvas.height = size;
-            const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
-            renderer.setPixelRatio(1);
-            renderer.setSize(size, size, false);
-            renderer.setClearColor(0x000000, 0);
+            const renderer = this._getThumbnailRenderer(size);
 
             const scene = new THREE.Scene();
             const clone = template.clone(true);
@@ -867,8 +907,7 @@ class Game3D {
             cam.lookAt(0, 0, 0);
 
             renderer.render(scene, cam);
-            const dataURL = canvas.toDataURL('image/png');
-            renderer.dispose();
+            const dataURL = renderer.domElement.toDataURL('image/png');
             return `<img src="${dataURL}" class="weapon-thumb" alt="" draggable="false">`;
         } catch (e) {
             console.warn('weapon thumbnail render failed', e);
@@ -904,36 +943,288 @@ class Game3D {
         return new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), mat);
     }
 
+    // Minecraft-style placement targeting:
+    //   1. Raycast from the camera against every wall AABB (placed blocks &
+    //      maze walls), find the closest hit within MAX_REACH.
+    //   2. If we hit something, snap to the cell adjacent to the hit face —
+    //      i.e. place ON the face the player is looking at. Stacking becomes
+    //      "aim at the top of a block, click."
+    //   3. If we miss everything, raycast to the ground plane and place there.
+    //
+    // Returns { pos, valid }. `valid` is false when the resulting cell is
+    // already occupied or would land on the player.
+    _resolveBlockPlacementTarget() {
+        const dir = new THREE.Vector3();
+        if (this.camera) {
+            this.camera.getWorldDirection(dir);
+        } else {
+            dir.set(Math.sin(this.characterRotation), 0, Math.cos(this.characterRotation));
+        }
+        // Origin is the camera world position so the ray matches the crosshair.
+        const origin = this.camera
+            ? this.camera.getWorldPosition(new THREE.Vector3())
+            : this.player.position.clone().setY(this.player.position.y + 1.4);
+
+        const MAX_REACH = 6.0;
+
+        // 1. Scan walls within reach for the closest ray-AABB intersection.
+        let bestT = Infinity;
+        let bestWall = null;
+        let bestNormal = new THREE.Vector3();
+        // Local scratch for the slab test to avoid per-iteration allocation.
+        const halfX = 0, halfY = 0, halfZ = 0; // reassigned below
+        for (let i = 0; i < this.walls.length; i++) {
+            const w = this.walls[i];
+            if (!w || !w.position || !w.size) continue;
+            // Cheap horizontal cull — walls past reach can't be hit.
+            const dx0 = w.position.x - origin.x;
+            const dz0 = w.position.z - origin.z;
+            if (dx0 * dx0 + dz0 * dz0 > (MAX_REACH + 4) * (MAX_REACH + 4)) continue;
+
+            const hx = w.size.x / 2, hy = w.size.y / 2, hz = w.size.z / 2;
+            // Slab method: per-axis interval of t-values where the ray is
+            // inside the box. Hit exists if the intervals overlap and tMin >= 0.
+            const invDx = dir.x !== 0 ? 1 / dir.x : 1e30;
+            const invDy = dir.y !== 0 ? 1 / dir.y : 1e30;
+            const invDz = dir.z !== 0 ? 1 / dir.z : 1e30;
+            let t1x = (w.position.x - hx - origin.x) * invDx;
+            let t2x = (w.position.x + hx - origin.x) * invDx;
+            if (t1x > t2x) { const t = t1x; t1x = t2x; t2x = t; }
+            let t1y = (w.position.y - hy - origin.y) * invDy;
+            let t2y = (w.position.y + hy - origin.y) * invDy;
+            if (t1y > t2y) { const t = t1y; t1y = t2y; t2y = t; }
+            let t1z = (w.position.z - hz - origin.z) * invDz;
+            let t2z = (w.position.z + hz - origin.z) * invDz;
+            if (t1z > t2z) { const t = t1z; t1z = t2z; t2z = t; }
+            const tEnter = Math.max(t1x, t1y, t1z);
+            const tExit  = Math.min(t2x, t2y, t2z);
+            if (tEnter > tExit || tExit < 0 || tEnter > MAX_REACH) continue;
+            // Skip cases where the camera starts inside this wall.
+            const tHit = tEnter >= 0 ? tEnter : -1;
+            if (tHit < 0 || tHit >= bestT) continue;
+
+            // Which slab limited the entry? That axis is the face normal.
+            let nx = 0, ny = 0, nz = 0;
+            if (tEnter === t1x)      nx = dir.x > 0 ? -1 : 1;
+            else if (tEnter === t1y) ny = dir.y > 0 ? -1 : 1;
+            else                     nz = dir.z > 0 ? -1 : 1;
+
+            bestT = tHit;
+            bestWall = w;
+            bestNormal.set(nx, ny, nz);
+        }
+
+        let pos;
+        if (bestWall) {
+            // Step a tiny epsilon past the hit point so floor() lands on the
+            // wall's cell, then back off by one cell along the face normal —
+            // that's the empty neighbour we want to fill.
+            const hit = origin.clone().addScaledVector(dir, bestT);
+            // Stacking aid: when the player aims at the UPPER half of a side
+            // face (within the unit cell), bias toward stacking on top of the
+            // hit cell. Looking at the side of a column from the ground —
+            // crosshair on the upper portion → block lands on top. Lower
+            // portion keeps the literal side-adjacent placement.
+            if (bestNormal.y === 0) {
+                const cellLocalY = hit.y - Math.floor(hit.y);
+                if (cellLocalY > 0.5) {
+                    bestNormal.set(0, 1, 0);
+                }
+            }
+            // Nudge slightly into the wall to be confident about which cell
+            // the hit point belongs to, then step one cell out along normal.
+            hit.x -= bestNormal.x * 0.001;
+            hit.y -= bestNormal.y * 0.001;
+            hit.z -= bestNormal.z * 0.001;
+            const cellX = Math.floor(hit.x) + bestNormal.x;
+            const cellY = Math.floor(hit.y) + bestNormal.y;
+            const cellZ = Math.floor(hit.z) + bestNormal.z;
+            pos = new THREE.Vector3(cellX + 0.5, cellY + 0.5, cellZ + 0.5);
+        } else {
+            // No solid hit — fall back to the ground plane (y=0). If the ray
+            // points up or flat, snap a short distance forward at ground level
+            // so the ghost still appears somewhere reasonable.
+            let gx, gz;
+            if (dir.y < -0.05) {
+                const t = Math.min(MAX_REACH, origin.y / -dir.y);
+                gx = origin.x + dir.x * t;
+                gz = origin.z + dir.z * t;
+            } else {
+                const flat = new THREE.Vector3(dir.x, 0, dir.z);
+                if (flat.lengthSq() < 1e-6) flat.set(Math.sin(this.characterRotation), 0, Math.cos(this.characterRotation));
+                flat.normalize().multiplyScalar(2.5);
+                gx = this.player.position.x + flat.x;
+                gz = this.player.position.z + flat.z;
+            }
+            pos = new THREE.Vector3(Math.floor(gx) + 0.5, 0.5, Math.floor(gz) + 0.5);
+        }
+
+        // Validate: cell must be empty (not already occupied) and not where
+        // the player is standing.
+        let valid = pos.y >= 0.5;
+        if (valid) {
+            for (let i = 0; i < this.walls.length; i++) {
+                const w = this.walls[i];
+                if (!w || !w.position || !w.size) continue;
+                if (Math.abs(w.position.x - pos.x) > w.size.x / 2 + 0.01) continue;
+                if (Math.abs(w.position.z - pos.z) > w.size.z / 2 + 0.01) continue;
+                if (Math.abs(w.position.y - pos.y) > w.size.y / 2 + 0.01) continue;
+                valid = false;
+                break;
+            }
+        }
+        if (valid) {
+            const px = this.player.position.x, py = this.player.position.y, pz = this.player.position.z;
+            const distXZ = Math.hypot(px - pos.x, pz - pos.z);
+            if (distXZ < 0.55 && Math.abs(py + 1.0 - pos.y) < 1.0) valid = false;
+        }
+
+        return { pos, valid };
+    }
+
+    // Wireframe preview cube. Attached as a CHILD OF THE CAMERA so it always
+    // renders regardless of scene state. Camera-attached pivot is moved each
+    // frame so it lines up with the world-space placement target via inverse
+    // camera transform.
+    //
+    // Two passes draw the cage:
+    //   FRONT — normal depth test, full opacity, crisp colored edges
+    //   BACK  — inverted depth test (only fragments occluded by world geom),
+    //           low opacity, dim — so you can see the cube even when a wall
+    //           is between you and it.
+    _ensurePlacementGhost() {
+        if (this.placementGhost && this.placementGhost.parent) {
+            return this.placementGhost;
+        }
+        const group = new THREE.Group();
+        group.name = 'placementGhost';
+        group.frustumCulled = false;
+
+        const frontMat = new THREE.MeshBasicMaterial({
+            color: 0x66ff88,
+            transparent: true,
+            opacity: 0.85,
+            depthTest: true,
+            depthWrite: false,
+            depthFunc: THREE.LessEqualDepth,
+            toneMapped: false,
+            fog: false
+        });
+        const backMat = new THREE.MeshBasicMaterial({
+            color: 0x66ff88,
+            transparent: true,
+            opacity: 0.18,
+            depthTest: true,
+            depthWrite: false,
+            depthFunc: THREE.GreaterDepth,
+            toneMapped: false,
+            fog: false
+        });
+
+        const S = 1.0;             // exactly block-sized so edges sit on cell faces
+        const T = 0.022;           // slim rod radius — subtle
+        const half = S / 2;
+        const rodGeom = new THREE.CylinderGeometry(T, T, S, 6, 1);
+        const addRodPair = (px, py, pz, axis) => {
+            // One mesh per material; identical geometry & transform.
+            for (const mat of [frontMat, backMat]) {
+                const rod = new THREE.Mesh(rodGeom, mat);
+                rod.position.set(px, py, pz);
+                if (axis === 'x') rod.rotation.z = Math.PI / 2;
+                else if (axis === 'z') rod.rotation.x = Math.PI / 2;
+                rod.renderOrder = mat === frontMat ? 9999 : 9998;
+                rod.frustumCulled = false;
+                group.add(rod);
+            }
+        };
+        addRodPair(-half, 0, -half, 'y'); addRodPair( half, 0, -half, 'y');
+        addRodPair(-half, 0,  half, 'y'); addRodPair( half, 0,  half, 'y');
+        addRodPair(0, -half, -half, 'x'); addRodPair(0,  half, -half, 'x');
+        addRodPair(0, -half,  half, 'x'); addRodPair(0,  half,  half, 'x');
+        addRodPair(-half, -half, 0, 'z'); addRodPair( half, -half, 0, 'z');
+        addRodPair(-half,  half, 0, 'z'); addRodPair( half,  half, 0, 'z');
+
+        group.userData.frontMat = frontMat;
+        group.userData.backMat = backMat;
+        group.visible = false;
+        // Attach to the camera — anything parented to the camera always renders
+        // in view. We'll still position the ghost at a world-space target each
+        // frame by setting its local position via inverse camera transform.
+        if (this.camera) {
+            this.camera.add(group);
+        } else {
+            this.scene.add(group);
+        }
+        this.placementGhost = group;
+        return group;
+    }
+
+    _setGhostColor(col) {
+        const g = this.placementGhost;
+        if (!g) return;
+        if (g.userData.frontMat) g.userData.frontMat.color.setHex(col);
+        if (g.userData.backMat) g.userData.backMat.color.setHex(col);
+    }
+
+    updatePlacementGhost() {
+        const id = this.activeBlockId;
+        const showGhost = !!id && this.gameMode === 'play' && !this.isDrawerOpen
+            && this.player && this.player.position && this.camera;
+        if (!showGhost) {
+            if (this.placementGhost) this.placementGhost.visible = false;
+            return;
+        }
+        const ghost = this._ensurePlacementGhost();
+        const { pos, valid } = this._resolveBlockPlacementTarget();
+        if (!Number.isFinite(pos.x) || !Number.isFinite(pos.y) || !Number.isFinite(pos.z)) {
+            ghost.visible = false;
+            return;
+        }
+        // Ghost is parented to the camera, so set its position in camera-local
+        // space. worldToLocal mutates the vector — clone first.
+        this.camera.updateMatrixWorld(true);
+        ghost.position.copy(this.camera.worldToLocal(pos.clone()));
+        // Counter-rotate so the cube edges stay axis-aligned in world space
+        // (otherwise it'd tilt with the camera).
+        ghost.quaternion.copy(this.camera.quaternion).invert();
+        ghost.visible = true;
+        this._setGhostColor(valid ? 0x66ff88 : 0xff5566);
+    }
+
     // Place a block on the cell directly in front of the player, snapped to
-    // a 1-unit integer grid. Costs one from the player's stock; if the cell
-    // is occupied or out of stock, no-op (with a tiny toast hint).
+    // a 1-unit integer grid. Supply is infinite — placement only fails if the
+    // cell is occupied or would land on top of the player.
     placeActiveBlock() {
         const id = this.activeBlockId;
         if (!id) return false;
-        const stock = (this.inventory.blocks && this.inventory.blocks[id]) || 0;
-        if (stock <= 0) {
-            this.showMessage && this.showMessage(`Out of ${this.BLOCK_DEFS[id]?.name || id}`);
-            return false;
-        }
-        const forward = new THREE.Vector3(
-            Math.sin(this.characterRotation), 0,
-            Math.cos(this.characterRotation)
-        ).normalize();
-        const target = this.player.position.clone().add(forward.multiplyScalar(1.6));
-        const gx = Math.floor(target.x) + 0.5;
-        const gz = Math.floor(target.z) + 0.5;
-        const gy = 0.5; // ground-level block, top at y=1
-        // Reject if a wall already occupies this cell, or if the placement
-        // would land on top of the player (small safety margin).
-        if (!this.isPositionFree(gx, gz, 0.45)) {
+        // Debounce: browsers fire both `mousedown` and `click` for a single
+        // tap, and both handlers route here. Without this guard, every click
+        // would place two blocks back-to-back.
+        const now = performance.now();
+        if (this._lastBlockPlaceTime && (now - this._lastBlockPlaceTime) < 150) return false;
+        this._lastBlockPlaceTime = now;
+        const { pos, valid } = this._resolveBlockPlacementTarget();
+        if (!valid) {
             this.showMessage && this.showMessage('Blocked');
             return false;
         }
-        const distToPlayer = Math.hypot(this.player.position.x - gx, this.player.position.z - gz);
-        if (distToPlayer < 0.9) return false;
 
+        this._spawnPlacedBlock(id, pos);
+
+        // Infinite supply: stock is left untouched.
+        this.audio && this.audio.play && this.audio.play('uiClick');
+        this._qbSig = null;
+        this.updateInventoryGridUI && this.updateInventoryGridUI();
+        if (this.isDrawerOpen) this.updateDrawerUI();
+        this._scheduleSaveBuilds();
+        return true;
+    }
+
+    // Adds a unit block to the world at `pos`. Factored out so placement
+    // (player click) and restore-from-save share the same setup.
+    _spawnPlacedBlock(id, pos) {
         const mesh = this._createBlockMesh(id);
-        mesh.position.set(gx, gy, gz);
+        mesh.position.copy(pos);
         this.scene.add(mesh);
         const entry = {
             mesh,
@@ -945,13 +1236,105 @@ class Game3D {
         };
         this.walls.push(entry);
         this._addWallToHash(entry);
+        return entry;
+    }
 
-        this.inventory.blocks[id] = stock - 1;
-        this.audio && this.audio.play && this.audio.play('uiClick');
-        this._qbSig = null;
-        this.updateInventoryGridUI && this.updateInventoryGridUI();
-        if (this.isDrawerOpen) this.updateDrawerUI();
-        return true;
+    // Per-mode localStorage key. Wide Halls runs share builds across attempts
+    // of the same maze (currentMazeIndex), while modes without a maze index
+    // bucket together. v1 namespace lets us evolve the schema later.
+    _buildsSaveKey() {
+        const mode = this.activeModeId || 'free';
+        const mazeIdx = (this.currentMazeIndex != null ? this.currentMazeIndex : 0);
+        return `pjboy_builds_v1:${mode}:${mazeIdx}`;
+    }
+
+    // Debounced save so rapid stacking doesn't hammer localStorage.
+    _scheduleSaveBuilds() {
+        if (this._buildSaveTimer) clearTimeout(this._buildSaveTimer);
+        this._buildSaveTimer = setTimeout(() => {
+            this._buildSaveTimer = null;
+            this._saveBuilds();
+        }, 400);
+    }
+
+    _saveBuilds() {
+        try {
+            const list = [];
+            for (const w of this.walls) {
+                if (!w || !w.placed || !w.position) continue;
+                list.push({
+                    id: w.blockId,
+                    x: w.position.x, y: w.position.y, z: w.position.z,
+                });
+            }
+            localStorage.setItem(this._buildsSaveKey(), JSON.stringify(list));
+        } catch (e) {
+            console.warn('[builds] save failed', e);
+        }
+    }
+
+    _placedBlockCount() {
+        let n = 0;
+        for (const w of this.walls) { if (w && w.placed) n++; }
+        return n;
+    }
+
+    // Drop every player-placed block from the live scene AND wipe the save
+    // for the current mode. Maze walls and other world geometry stay.
+    _clearAllPlacedBlocks() {
+        const survivors = [];
+        for (const w of this.walls) {
+            if (w && w.placed) {
+                if (w.mesh) this.scene.remove(w.mesh);
+                this._removeWallFromHash(w);
+            } else {
+                survivors.push(w);
+            }
+        }
+        this.walls = survivors;
+        try {
+            localStorage.removeItem(this._buildsSaveKey());
+        } catch (e) {
+            console.warn('[builds] clear failed', e);
+        }
+        // Hide the ghost so it doesn't sit on a now-empty cell with stale state.
+        if (this.placementGhost) this.placementGhost.visible = false;
+    }
+
+    // Restore blocks placed earlier in this maze. Skips cells that the maze
+    // generator already occupies (so destroying a maze wall then reloading
+    // doesn't try to fight over the cell) and unknown block IDs.
+    _loadBuilds() {
+        try {
+            const raw = localStorage.getItem(this._buildsSaveKey());
+            if (!raw) return 0;
+            const arr = JSON.parse(raw);
+            if (!Array.isArray(arr)) return 0;
+            let count = 0;
+            for (const b of arr) {
+                if (!b || !b.id) continue;
+                if (this.BLOCK_DEFS && !this.BLOCK_DEFS[b.id]) continue;
+                const pos = new THREE.Vector3(b.x, b.y, b.z);
+                // Drop entries whose cell is already filled (e.g., by maze
+                // geometry generated this run).
+                let blocked = false;
+                for (const w of this.walls) {
+                    if (!w || !w.position || !w.size) continue;
+                    if (Math.abs(w.position.x - pos.x) > w.size.x / 2 + 0.01) continue;
+                    if (Math.abs(w.position.z - pos.z) > w.size.z / 2 + 0.01) continue;
+                    if (Math.abs(w.position.y - pos.y) > w.size.y / 2 + 0.01) continue;
+                    blocked = true; break;
+                }
+                if (blocked) continue;
+                this._spawnPlacedBlock(b.id, pos);
+                count++;
+            }
+            if (count) console.log(`[builds] restored ${count} block(s)`);
+            return count;
+        } catch (e) {
+            console.warn('[builds] load failed', e);
+            return 0;
+        }
     }
 
     // Display label that respects current language
@@ -1011,6 +1394,8 @@ class Game3D {
         if (id === 'speed') {
             return this.getSpeedBoostStock() > 0 || (this.powerUps.speedBoostTimer || 0) > 0;
         }
+        // Placeable blocks have an infinite supply — always available in the drawer.
+        if (this.BLOCK_DEFS && this.BLOCK_DEFS[id]) return true;
         return this.getItemCount(id) > 0;
     }
 
@@ -1018,7 +1403,14 @@ class Game3D {
         // Static weapon stats — single source of truth for tuning.
         // Names/descriptions are filled in by `weaponDefinitions` getter so language switches update them.
         this.WEAPON_STATS = {
-            diamondSword: { damage: 15, range: 3.5, cooldown: 0.25, type: 'melee',  icon: '⚔️', color: 0x00aaff, ammoCost: 0 },
+            diamondSword:  { damage: 15, range: 3.5, cooldown: 0.25, type: 'melee', icon: '⚔️', color: 0x00aaff, ammoCost: 0 },
+            swordGold:     { damage: 18, range: 3.5, cooldown: 0.22, type: 'melee', icon: '⚔️', color: 0xffcc44, ammoCost: 0 },
+            swordStone:    { damage: 10, range: 3.2, cooldown: 0.28, type: 'melee', icon: '⚔️', color: 0x999999, ammoCost: 0 },
+            skeletonAxe:   { damage: 28, range: 3.8, cooldown: 0.55, type: 'melee', icon: '🪓', color: 0xb38a55, ammoCost: 0 },
+            axeDiamond:    { damage: 32, range: 3.9, cooldown: 0.60, type: 'melee', icon: '🪓', color: 0x66ddff, ammoCost: 0 },
+            axeGold:       { damage: 24, range: 3.7, cooldown: 0.45, type: 'melee', icon: '🪓', color: 0xffcc44, ammoCost: 0 },
+            skeletonBlade: { damage: 12, range: 3.0, cooldown: 0.18, type: 'melee', icon: '🗡️', color: 0xcccccc, ammoCost: 0 },
+            skeletonStaff: { damage: 14, range: 4.2, cooldown: 0.40, type: 'melee', icon: '🪄', color: 0x8a6a3a, ammoCost: 0 },
             // ammoCost = 0 means free-fire (canFire/fireGun skip ammo checks).
             gun:          { damage: 25, range: 15,  cooldown: 0.30, type: 'ranged', icon: '🔫', color: 0x8B4513, ammoCost: 0 },
             // Machine gun: rapid fire, lower per-shot damage, slightly longer range. Auto-fire on mouse hold.
@@ -1032,7 +1424,7 @@ class Game3D {
         this.WEAPON_BUFF_PER_STACK = 0.2;
 
         // Player loadout
-        this.player.weapons = ['diamondSword', 'gun', 'machineGun'];
+        this.player.weapons = ['diamondSword', 'swordGold', 'swordStone', 'skeletonAxe', 'axeDiamond', 'axeGold', 'skeletonBlade', 'skeletonStaff', 'gun', 'machineGun'];
         this.player.currentWeaponIndex = 0;
         this.inventory.ammo = 12;      // starting clip
 
@@ -1211,22 +1603,37 @@ class Game3D {
         }
     }
     
-    buildSwordMesh() {
-        // Wrapper Group that holds either the loaded sword GLTF or a procedural placeholder.
-        // Wrappers are tracked so they can be re-populated once the GLTF arrives.
+    // Data-driven melee weapon meshes. Adding a new melee weapon = WEAPON_STATS entry
+    // + an asset path here + optional grip tuning in createWeaponModel.
+    static MELEE_ASSETS = {
+        diamondSword:  'assets/Blocks/tools/Sword_Diamond.gltf',
+        swordGold:     'assets/Blocks/tools/Sword_Gold.gltf',
+        swordStone:    'assets/Blocks/tools/Sword_Stone.gltf',
+        skeletonAxe:   'assets/Blocks/pixel blocks/Skeleton_Axe.gltf',
+        axeDiamond:    'assets/Blocks/tools/Axe_Diamond.gltf',
+        axeGold:       'assets/Blocks/tools/Axe_Gold.gltf',
+        skeletonBlade: 'assets/Blocks/pixel blocks/Skeleton_Blade.gltf',
+        skeletonStaff: 'assets/Blocks/pixel blocks/Skeleton_Staff.gltf'
+    };
+
+    buildMeleeMesh(weaponId) {
+        // Wrapper Group that holds either the loaded GLTF or a procedural placeholder.
+        // Wrappers are tracked per-weapon so they can be re-populated once the GLTF arrives.
         const wrapper = new THREE.Group();
-        wrapper.userData.isSwordWrapper = true;
-        this._swordWrappers = this._swordWrappers || [];
-        this._swordWrappers.push(wrapper);
-        this.populateSwordWrapper(wrapper);
-        if (!this.swordTemplate && !this._swordTemplateLoading) this.loadSwordTemplate();
+        wrapper.userData.meleeId = weaponId;
+        this._meleeWrappers = this._meleeWrappers || {};
+        (this._meleeWrappers[weaponId] = this._meleeWrappers[weaponId] || []).push(wrapper);
+        this.populateMeleeWrapper(wrapper, weaponId);
+        if (!this.meleeTemplates?.[weaponId] && !this._meleeLoading?.[weaponId]) {
+            this.loadMeleeTemplate(weaponId);
+        }
         return wrapper;
     }
 
-    populateSwordWrapper(wrapper) {
+    populateMeleeWrapper(wrapper, weaponId) {
         while (wrapper.children.length) wrapper.remove(wrapper.children[0]);
-        if (this.swordTemplate) {
-            const t = this.swordTemplate;
+        const t = this.meleeTemplates?.[weaponId];
+        if (t) {
             const clone = t.clone(true);
             const o = t.userData.orient;
             clone.rotation.set(o.rot.x, o.rot.y, o.rot.z);
@@ -1235,41 +1642,25 @@ class Game3D {
             wrapper.add(clone);
             return;
         }
-        // Procedural fallback while the GLTF loads
-        const blade = new THREE.Mesh(
-            new THREE.BoxGeometry(0.1, 1.2, 0.05),
-            new THREE.MeshLambertMaterial({ color: 0x9fdcff, emissive: 0x002244 })
+        // Generic placeholder while the GLTF loads — short stick so the silhouette
+        // doesn't pop in violently when the real mesh appears.
+        const stub = new THREE.Mesh(
+            new THREE.BoxGeometry(0.12, 1.4, 0.12),
+            new THREE.MeshLambertMaterial({ color: 0x888888 })
         );
-        blade.position.set(0, 0.6, 0);
-        blade.castShadow = true;
-        wrapper.add(blade);
-        const guard = new THREE.Mesh(
-            new THREE.BoxGeometry(0.3, 0.1, 0.1),
-            new THREE.MeshLambertMaterial({ color: 0xffaa00 })
-        );
-        guard.position.set(0, 0.1, 0);
-        guard.castShadow = true;
-        wrapper.add(guard);
-        const handle = new THREE.Mesh(
-            new THREE.BoxGeometry(0.15, 0.8, 0.15),
-            new THREE.MeshLambertMaterial({ color: 0x8B4513 })
-        );
-        handle.position.set(0, -0.3, 0);
-        handle.castShadow = true;
-        wrapper.add(handle);
-        const pommel = new THREE.Mesh(
-            new THREE.SphereGeometry(0.1, 8, 8),
-            new THREE.MeshLambertMaterial({ color: 0xffaa00 })
-        );
-        pommel.position.set(0, -0.7, 0);
-        pommel.castShadow = true;
-        wrapper.add(pommel);
+        stub.position.set(0, 0.5, 0);
+        stub.castShadow = true;
+        wrapper.add(stub);
     }
 
-    loadSwordTemplate() {
-        this._swordTemplateLoading = true;
+    loadMeleeTemplate(weaponId) {
+        const path = Game3D.MELEE_ASSETS[weaponId];
+        if (!path) return;
+        this.meleeTemplates = this.meleeTemplates || {};
+        this._meleeLoading = this._meleeLoading || {};
+        this._meleeLoading[weaponId] = true;
         const loader = new THREE.GLTFLoader();
-        loader.load('assets/Blocks/tools/Sword_Diamond.gltf', (gltf) => {
+        loader.load(path, (gltf) => {
             const template = gltf.scene;
             template.traverse((child) => {
                 if (child.isMesh) {
@@ -1283,43 +1674,43 @@ class Game3D {
                     child.receiveShadow = true;
                 }
             });
-            // Orient the asset so its blade points along +Y like the old procedural sword,
-            // and scale so total length ≈ 1.8 units (matches the box-sword the gameplay was tuned for).
-            // Discover the longest axis on the *un-rotated* mesh to pick the right correction.
+            // Normalize: longest axis points along +Y, total length ≈ 1.8u — matches
+            // the original sword convention so per-weapon grip transforms compose predictably.
             const box0 = new THREE.Box3().setFromObject(template);
             const sz = box0.getSize(new THREE.Vector3());
             let rx = 0, rz = 0;
-            if (sz.x >= sz.y && sz.x >= sz.z) rz = Math.PI / 2;       // longest along X → tilt to Y
-            else if (sz.z >= sz.y && sz.z >= sz.x) rx = Math.PI / 2;  // longest along Z → tilt to Y
+            if (sz.x >= sz.y && sz.x >= sz.z) rz = Math.PI / 2;
+            else if (sz.z >= sz.y && sz.z >= sz.x) rx = Math.PI / 2;
             template.rotation.set(rx, 0, rz);
             template.updateMatrixWorld(true);
             const box1 = new THREE.Box3().setFromObject(template);
             const sz1 = box1.getSize(new THREE.Vector3());
             const scale = sz1.y > 0 ? 1.8 / sz1.y : 1;
-            // Reset rotation; we'll re-apply on each clone via userData.orient so cloning starts clean.
             template.rotation.set(0, 0, 0);
-            // After scaling, the box.min.y in cloned-space will be box1.min.y * scale.
             const posY = -box1.min.y * scale;
             template.userData.orient = { rot: { x: rx, y: 0, z: rz }, scale, posY };
-            this.swordTemplate = template;
-            this._swordTemplateLoading = false;
-            if (this._swordWrappers) this._swordWrappers.forEach((w) => this.populateSwordWrapper(w));
+            this.meleeTemplates[weaponId] = template;
+            this._meleeLoading[weaponId] = false;
+            const wrappers = this._meleeWrappers?.[weaponId];
+            if (wrappers) wrappers.forEach((w) => this.populateMeleeWrapper(w, weaponId));
 
-            // Render a thumbnail from the GLTF so the inventory drawer / quickbar
-            // can show the real sword art instead of the ⚔️ emoji fallback.
             this.weaponThumbs = this.weaponThumbs || {};
             const thumb = this._renderWeaponThumbnail(template);
             if (thumb) {
-                this.weaponThumbs.diamondSword = thumb;
+                this.weaponThumbs[weaponId] = thumb;
                 this._qbSig = null;
                 if (this.isDrawerOpen) this.updateDrawerUI();
                 this.updateInventoryGridUI && this.updateInventoryGridUI();
             }
         }, undefined, (error) => {
-            console.error('Error loading Sword_Diamond.gltf:', error);
-            this._swordTemplateLoading = false;
+            console.error(`Error loading melee template ${weaponId} (${path}):`, error);
+            this._meleeLoading[weaponId] = false;
         });
     }
+
+    // Legacy shims — callers outside this file may still reference these.
+    buildSwordMesh() { return this.buildMeleeMesh('diamondSword'); }
+    buildAxeMesh()   { return this.buildMeleeMesh('skeletonAxe'); }
 
     createWeaponModel() {
         // ===== Third-person hand-held weapons =====
@@ -1328,16 +1719,57 @@ class Game3D {
         // The pivot's transform is the "grip" — when attached to a hand bone the
         // weapon emerges from the fist with a natural orientation.
 
-        this.player.swordPivot = new THREE.Group();
-        const heldSword = this.buildSwordMesh();
-        // Template blade ≈ 1.8u; scale to a proportional one-handed weapon for a ~1.8u character.
-        heldSword.scale.setScalar(0.35);
-        // The sword's local +Y is the blade. Rotate so the blade points along +Z
-        // (forward of the fist), and shift down so the grip — not the blade base —
-        // sits at the hand origin (otherwise the whole blade floats above the fist).
-        heldSword.rotation.set(-Math.PI / 2, 0, 0);
-        heldSword.position.set(0, 0, -0.25);
-        this.player.swordPivot.add(heldSword);
+        // Per-weapon grip + FPV tuning. Defaults match the original sword's pose;
+        // weapons with wider/longer silhouettes override the FPV slot so they
+        // don't dominate the viewport.
+        const MELEE_DEFAULT_HELD = { scale: 0.35, rot: [-Math.PI / 2, 0, 0], pos: [0, 0, -0.25] };
+        const MELEE_DEFAULT_FPV  = { pos: [0.5, -0.55, -0.7], rot: [-0.35, 0.3, 0.55], scale: 0.45 };
+        const MELEE_TUNING = {
+            skeletonAxe:   { held: { scale: 0.4 }, fpv: { pos: [0.55, -0.7, -0.75], rot: [-0.5, 0.35, 0.7],  scale: 0.25 } },
+            axeDiamond:    { held: { scale: 0.4 }, fpv: { pos: [0.55, -0.7, -0.75], rot: [-0.5, 0.35, 0.7],  scale: 0.30 } },
+            axeGold:       { held: { scale: 0.4 }, fpv: { pos: [0.55, -0.7, -0.75], rot: [-0.5, 0.35, 0.7],  scale: 0.30 } },
+            skeletonStaff: { fpv: { scale: 0.35 } },
+            skeletonBlade: { fpv: { scale: 0.40 } }
+        };
+
+        this.player.meleePivots = {};
+        this.fpvMelees = {};
+        for (const id of Object.keys(Game3D.MELEE_ASSETS)) {
+            const tuning = MELEE_TUNING[id] || {};
+            const heldT = { ...MELEE_DEFAULT_HELD, ...(tuning.held || {}) };
+            const fpvT  = { ...MELEE_DEFAULT_FPV,  ...(tuning.fpv  || {}) };
+
+            // 3rd-person pivot — attached to hand socket by attachActiveWeaponToHand.
+            const pivot = new THREE.Group();
+            const held = this.buildMeleeMesh(id);
+            held.scale.setScalar(heldT.scale);
+            held.rotation.set(heldT.rot[0], heldT.rot[1], heldT.rot[2]);
+            held.position.set(heldT.pos[0], heldT.pos[1], heldT.pos[2]);
+            pivot.add(held);
+            this.player.meleePivots[id] = pivot;
+
+            // FPV pivot — sits on the camera, visible only when this weapon is active.
+            const fpvMesh = this.buildMeleeMesh(id);
+            const fpvPivot = new THREE.Group();
+            fpvPivot.position.set(fpvT.pos[0], fpvT.pos[1], fpvT.pos[2]);
+            fpvMesh.rotation.set(fpvT.rot[0], fpvT.rot[1], fpvT.rot[2]);
+            fpvMesh.scale.setScalar(fpvT.scale);
+            fpvPivot.add(fpvMesh);
+            this.camera.add(fpvPivot);
+            fpvPivot.visible = false;
+            this.fpvMelees[id] = {
+                pivot: fpvPivot,
+                rest: { pos: fpvPivot.position.clone(), rot: { x: 0, y: 0, z: 0 } }
+            };
+        }
+
+        // Back-compat aliases — older code references these names directly.
+        this.player.swordPivot = this.player.meleePivots.diamondSword;
+        this.player.axePivot   = this.player.meleePivots.skeletonAxe;
+        this.fpvSword          = this.fpvMelees.diamondSword?.pivot;
+        this._fpvSwordRest     = this.fpvMelees.diamondSword?.rest;
+        this.fpvAxe            = this.fpvMelees.skeletonAxe?.pivot;
+        this._fpvAxeRest       = this.fpvMelees.skeletonAxe?.rest;
 
         this.player.gunPivot = new THREE.Group();
         const heldGun = this._buildGunMesh();
@@ -1359,23 +1791,6 @@ class Game3D {
 
         // Active 3rd-person weapon model — populated by attachActiveWeaponToHand
         this.player.weaponModel = null;
-
-        // ===== FPV viewmodels =====
-        // Classic right-hand grip: blade points up-and-forward, handle sits near
-        // the lower-right corner of the viewport so it reads as held by an unseen fist.
-        const fpvSword = this.buildSwordMesh();
-        const fpvPivot = new THREE.Group();
-        fpvPivot.position.set(0.5, -0.55, -0.7);
-        fpvSword.rotation.set(-0.35, 0.3, 0.55);
-        fpvSword.scale.setScalar(0.45);
-        fpvPivot.add(fpvSword);
-        this.camera.add(fpvPivot);
-        this.fpvSword = fpvPivot;
-        this.fpvSword.visible = false;
-        this._fpvSwordRest = {
-            pos: fpvPivot.position.clone(),
-            rot: { x: 0, y: 0, z: 0 } // pivot's own rotation is rest; sword tilt lives on the inner mesh
-        };
 
         // Swing animation state. Total swing duration covers three phases:
         // anticipation (wind-back) → strike (fast committed swing past rest)
@@ -1427,11 +1842,22 @@ class Game3D {
         if (!bone) return;
         const socket = new THREE.Object3D();
         socket.name = 'WeaponSocket';
-        // Per-character grip tuning. Bones in these GLTFs were built with hands at
-        // the model's sides in T-pose, so an empty fist origin works as a reasonable
-        // default. Tweak here if a specific character grips weapons oddly.
-        socket.position.set(0, 0, 0);
-        socket.rotation.set(0, 0, 0);
+        // Per-character grip tuning. By default the socket sits at the bone's local origin —
+        // that's the bone HEAD, which for these models is roughly the wrist joint and works as
+        // a reasonable default. Characters whose Hand_R bone head sits noticeably off the
+        // visual fist can override this in `this.characters[key].grip`.
+        const grip = this.characters
+            && this.characters[this.currentCharacterKey]
+            && this.characters[this.currentCharacterKey].grip;
+        if (grip) {
+            const p = grip.position || [0, 0, 0];
+            const r = grip.rotation || [0, 0, 0];
+            socket.position.set(p[0] || 0, p[1] || 0, p[2] || 0);
+            socket.rotation.set(r[0] || 0, r[1] || 0, r[2] || 0);
+        } else {
+            socket.position.set(0, 0, 0);
+            socket.rotation.set(0, 0, 0);
+        }
         bone.add(socket);
         this.player.handSocket = socket;
         this.attachActiveWeaponToHand();
@@ -1441,18 +1867,34 @@ class Game3D {
     // re-parents it to the hand socket. Falls back to the player.model root if
     // no socket is available yet.
     attachActiveWeaponToHand() {
-        if (!this.player || !this.player.swordPivot || !this.player.gunPivot) return;
+        if (!this.player || !this.player.gunPivot) return;
+        const allPivots = [
+            ...Object.values(this.player.meleePivots || {}),
+            this.player.gunPivot,
+            this.player.machineGunPivot
+        ];
+        // While a block is armed, no weapon should be visible on the hand.
+        if (this.activeBlockId) {
+            for (const p of allPivots) {
+                if (p && p.parent) p.parent.remove(p);
+            }
+            this.player.weaponModel = null;
+            return;
+        }
+
         const weaponId = this.player.weapons[this.player.currentWeaponIndex];
-        let active;
+        let active = null;
         if (weaponId === 'machineGun' && this.player.machineGunPivot) {
             active = this.player.machineGunPivot;
         } else if (weaponId === 'gun') {
             active = this.player.gunPivot;
+        } else if (this.player.meleePivots && this.player.meleePivots[weaponId]) {
+            active = this.player.meleePivots[weaponId];
         } else {
+            // Fallback to the sword if the id isn't recognized.
             active = this.player.swordPivot;
         }
-        // Remove all pivots that aren't the active one from the scene graph.
-        const allPivots = [this.player.swordPivot, this.player.gunPivot, this.player.machineGunPivot];
+        if (!active) return;
         for (const p of allPivots) {
             if (p && p !== active && p.parent) p.parent.remove(p);
         }
@@ -1675,53 +2117,51 @@ class Game3D {
         const cur = this.getCurrentWeapon();
         const inFPV = this.viewMode === 'fpv';
         const inPlay = this.gameMode === 'play';
+        // Block placement mode hides all weapon viewmodels — the ghost cube is the
+        // active "weapon" while armed.
+        const blockArmed = !!this.activeBlockId;
 
-        // ---- Sword viewmodel ----
-        if (this.fpvSword) {
-            const wieldingSword = cur && cur.type === 'melee';
-            this.fpvSword.visible = wieldingSword && inFPV && inPlay;
-            const rest = this._fpvSwordRest;
+        // ---- Melee viewmodels (all melee weapons share the swing animation; only the active one is visible) ----
+        const meleeWeaponId = this.player.weapons[this.player.currentWeaponIndex];
+        if (this.swingTimer > 0) this.swingTimer = Math.max(0, this.swingTimer - deltaTime);
+
+        for (const id in (this.fpvMelees || {})) {
+            const m = this.fpvMelees[id];
+            if (!m || !m.pivot) continue;
+            const isActive = cur && cur.type === 'melee' && meleeWeaponId === id;
+            m.pivot.visible = isActive && inFPV && inPlay && !blockArmed;
+            if (!isActive) continue;
+            const rest = m.rest;
             if (this.swingTimer > 0) {
-                this.swingTimer = Math.max(0, this.swingTimer - deltaTime);
                 const t = 1 - (this.swingTimer / this.swingDuration); // 0 → 1
                 const dir = this.swingDir || 1;
-                // Phase splits: 20% anticipation, 35% strike, 45% recovery.
-                // The strike phase carries the visual punch; recovery is the
-                // longest so the blade settles smoothly instead of snapping back.
-                const A = 0.20, S = 0.55; // anticipation ends, strike ends
+                const A = 0.20, S = 0.55;
                 let antic = 0, strike = 0, recover = 0;
                 if (t < A) {
-                    // ease-out wind-back
                     const u = t / A;
                     antic = Math.sin(u * Math.PI / 2);
                 } else if (t < S) {
-                    // ease-in strike past rest (overshoot factor 1.15)
                     const u = (t - A) / (S - A);
                     strike = (u * u) * 1.15;
-                    antic = 1 - u; // bleed wind-back out as strike ramps in
+                    antic = 1 - u;
                 } else {
-                    // smooth ease-out recovery back to rest
                     const u = (t - S) / (1 - S);
                     recover = 1 - (1 - u) * (1 - u);
                     strike = (1 - recover) * 1.15;
                 }
-                // Compose: anticipation pulls blade up-and-back, strike drives
-                // it diagonally across the view, recovery interpolates to rest.
-                const swingZ = strike * 1.35;   // diagonal cut
-                const swingX = strike * 0.55;   // forward chop
-                const anticZ = antic * 0.30;    // raise blade before swing
+                const swingZ = strike * 1.35;
+                const swingX = strike * 0.55;
+                const anticZ = antic * 0.30;
                 const anticX = -antic * 0.25;
-                this.fpvSword.rotation.z = (-swingZ - anticZ) * dir;
-                this.fpvSword.rotation.x = swingX + anticX;
-                // Subtle yaw kick at the strike apex sells the follow-through.
-                this.fpvSword.rotation.y = strike * 0.25 * dir;
-                // Thrust forward on strike, slight pull-back on anticipation.
-                this.fpvSword.position.z = rest.pos.z - strike * 0.28 + antic * 0.08;
-                this.fpvSword.position.y = rest.pos.y + antic * 0.12 - strike * 0.08;
-                this.fpvSword.position.x = rest.pos.x + (strike * 0.18 - antic * 0.06) * dir;
+                m.pivot.rotation.z = (-swingZ - anticZ) * dir;
+                m.pivot.rotation.x = swingX + anticX;
+                m.pivot.rotation.y = strike * 0.25 * dir;
+                m.pivot.position.z = rest.pos.z - strike * 0.28 + antic * 0.08;
+                m.pivot.position.y = rest.pos.y + antic * 0.12 - strike * 0.08;
+                m.pivot.position.x = rest.pos.x + (strike * 0.18 - antic * 0.06) * dir;
             } else {
-                this.fpvSword.rotation.set(0, 0, 0);
-                this.fpvSword.position.copy(rest.pos);
+                m.pivot.rotation.set(0, 0, 0);
+                m.pivot.position.copy(rest.pos);
             }
         }
 
@@ -1734,7 +2174,7 @@ class Game3D {
         for (const r of rangedModels) {
             if (!r.pivot) continue;
             const isActive = cur && cur.type === 'ranged' && weaponId === r.id;
-            r.pivot.visible = isActive && inFPV && inPlay;
+            r.pivot.visible = isActive && inFPV && inPlay && !blockArmed;
 
             if (this._gunRecoilT > 0 && isActive) {
                 const k = this._gunRecoilT / this._gunRecoilDur;
@@ -2059,6 +2499,7 @@ class Game3D {
             if (i !== -1) this.walls.splice(i, 1);
             this._removeWallFromHash(wall);
             if (wall.mesh) this.scene.remove(wall.mesh);
+            if (wall.placed) this._scheduleSaveBuilds();
             return;
         }
         this.audio && this.audio.play && this.audio.play('wallChip');
@@ -2559,15 +3000,21 @@ class Game3D {
             duckBlend: 0
         };
         
-        // Registry of swappable player characters (key matches data-character on the UI buttons)
+        // Registry of swappable player characters (key matches data-character on the UI buttons).
+        // `grip` (optional) tunes how weapons attach to the right-hand bone — `position` is in
+        // bone-local space (same units as the bone), `rotation` is Euler XYZ in radians. Use this
+        // when a model's Hand_R bone head sits away from the visual fist (PJBoy's bone head is at
+        // the wrist; weapons need to slide along the bone toward the fingertips to look held).
         this.characters = {
+            pjboy:    { label: 'PJBoy',    path: 'assets/Blocks/Characters/Character_PJBoy.glb',
+                        grip: { position: [0, 0.06, 0], rotation: [0, 0, 0] } },
             skeleton: { label: 'Skeleton', path: 'assets/Blocks/enemies/Skeleton_Armor.gltf' },
             female1:  { label: 'Female 1', path: 'assets/Blocks/Characters/Character_Female_1.gltf' },
             female2:  { label: 'Female 2', path: 'assets/Blocks/Characters/Character_Female_2.gltf' },
             male1:    { label: 'Male 1',   path: 'assets/Blocks/Characters/Character_Male_1.gltf' },
             male2:    { label: 'Male 2',   path: 'assets/Blocks/Characters/Character_Male_2.gltf' }
         };
-        this.currentCharacterKey = this.currentCharacterKey || 'skeleton';
+        this.currentCharacterKey = this.currentCharacterKey || 'pjboy';
 
         // Build the temporary lion archer model so the player has *something* visible while async-loading the character.
         this.createLionArcherModel();
@@ -2581,9 +3028,10 @@ class Game3D {
         if (!this.characters || this._previewsStarted) return;
         this._previewsStarted = true;
         const size = 192; // render at 2x display size for crispness
-        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
-        renderer.setSize(size, size);
-        renderer.setClearColor(0x000000, 0);
+        // Reuse the shared thumbnail renderer — a fresh WebGLRenderer per call
+        // pushes the browser past its WebGL context cap (≈16), evicting the
+        // main game renderer and producing a white screen.
+        const renderer = this._getThumbnailRenderer(size);
         renderer.outputEncoding = THREE.sRGBEncoding || renderer.outputEncoding;
 
         const loader = new THREE.GLTFLoader();
@@ -2668,15 +3116,22 @@ class Game3D {
             const character = gltf.scene;
             // Convert PBR materials → Lambert (preserve textures) so it shades like the rest of the scene.
             // SkinnedMesh requires `skinning: true` on the material in r128 — without it the mesh renders in bind pose.
+            const toLambert = (src, isSkinned) => new THREE.MeshLambertMaterial({
+                map: (src && src.map) || null,
+                color: (src && src.color) ? src.color.clone() : new THREE.Color(0xffffff),
+                side: src ? src.side : THREE.FrontSide,
+                skinning: isSkinned === true
+            });
             character.traverse((child) => {
                 if (child.isMesh) {
-                    const src = child.material;
-                    child.material = new THREE.MeshLambertMaterial({
-                        map: src.map || null,
-                        color: src.color ? src.color.clone() : new THREE.Color(0xffffff),
-                        side: src.side,
-                        skinning: child.isSkinnedMesh === true
-                    });
+                    const isSkinned = child.isSkinnedMesh === true;
+                    // glTF meshes with multiple primitives can occasionally arrive as a single
+                    // mesh with an array of materials; handle both array and scalar shapes.
+                    if (Array.isArray(child.material)) {
+                        child.material = child.material.map((m) => toLambert(m, isSkinned));
+                    } else {
+                        child.material = toLambert(child.material, isSkinned);
+                    }
                     child.castShadow = true;
                     child.receiveShadow = true;
                 }
@@ -2696,7 +3151,9 @@ class Game3D {
             character.position.z = 0;
 
             // Detach both 3rd-person weapon pivots so they can be re-attached to the new character's hand socket
-            if (this.player.swordPivot && this.player.swordPivot.parent) this.player.swordPivot.parent.remove(this.player.swordPivot);
+            for (const p of Object.values(this.player.meleePivots || {})) {
+                if (p && p.parent) p.parent.remove(p);
+            }
             if (this.player.gunPivot && this.player.gunPivot.parent) this.player.gunPivot.parent.remove(this.player.gunPivot);
             this.player.handSocket = null;
             if (this.player.model) this.scene.remove(this.player.model);
@@ -4943,6 +5400,9 @@ class Game3D {
         this.playMode.clickTarget = null;
         this.respawnEnemies();
         this.enemySpawnTimer = 0;
+        // Restore the player's placed blocks for this mode/maze. Runs after
+        // clearMaze + createLabyrinth so the maze is already in place.
+        this._loadBuilds && this._loadBuilds();
     }
 
     // Attempt to place an enemy at (x, z), then verify with the enemy's
@@ -7829,6 +8289,7 @@ class Game3D {
 
     updateFlagHighlights() {
         if (!this.placedFlags || this.placedFlags.length === 0) {
+            this._updateFlagPromptUI(false);
             return;
         }
 
@@ -7853,6 +8314,35 @@ class Game3D {
             const shouldHighlight = withinRange && flag === nearest;
             this.setFlagHighlight(flag, shouldHighlight);
         });
+
+        this._updateFlagPromptUI(withinRange);
+    }
+
+    // Center-screen "Press [G] to remove flag" prompt. Mirrors the crate
+    // prompt's lifecycle: lazy-built, shown only when the player is within
+    // `flagRemoveRadiusSq` of a placed flag, hidden otherwise.
+    _updateFlagPromptUI(visible) {
+        let prompt = document.getElementById('flag-prompt');
+        if (!visible) {
+            if (prompt) prompt.style.display = 'none';
+            return;
+        }
+        if (!prompt) {
+            prompt = document.createElement('div');
+            prompt.id = 'flag-prompt';
+            prompt.style.cssText =
+                'position:absolute;top:50%;left:50%;transform:translate(-50%, calc(-50% + 130px));' +
+                'padding:10px 18px;background:linear-gradient(135deg, rgba(40,8,20,0.92), rgba(90,30,60,0.92));' +
+                'border:2px solid #ff66aa;border-radius:14px;color:#ffd6e8;' +
+                'font:700 15px "Courier New", monospace;letter-spacing:0.5px;text-align:center;' +
+                'line-height:1.35;box-shadow:0 6px 18px rgba(255,102,170,0.35);z-index:960;' +
+                'user-select:none;pointer-events:none;';
+            document.body.appendChild(prompt);
+            prompt.innerHTML = '🏳️ <span style="color:#fff;">Press <span style="color:#ff66aa;">[G]</span> to remove flag</span>';
+        }
+        prompt.style.display = 'block';
+        // Soft pulse so it reads as live UI, not stuck text.
+        prompt.style.opacity = String(0.88 + Math.sin(performance.now() / 220) * 0.1);
     }
 
     getCreateModePerimeterSpawn() {
@@ -8196,7 +8686,7 @@ class Game3D {
             } else if (this.gameMode === 'play' && !this.modalOpen) {
                 if (this.isGameplayActive && !this.isGameplayActive()) return;
                 this.handlePlayClick(event);
-                if (event.button === 0) {
+                if (event.button === 0 && !this.activeBlockId) {
                     const weapon = this.getCurrentWeapon();
                     if (weapon && weapon.isContinuous) {
                         this.isFiring = true;
@@ -8459,6 +8949,7 @@ class Game3D {
                 if (this.modalOpen || this.gameMode !== 'play') return;
                 if (this.isGameplayActive && !this.isGameplayActive()) return;
                 this.handlePlayClick(center());
+                if (this.activeBlockId) return;
                 const w = this.getCurrentWeapon && this.getCurrentWeapon();
                 if (w && w.isContinuous) this.isFiring = true;
             },
@@ -9175,6 +9666,7 @@ class Game3D {
 
         // Per-frame visual updates that should run at display rate (smooth animation).
         this.updateSwordViewmodel(clampedDeltaTime);
+        this.updatePlacementGhost();
 
         // Multiplayer: send our state at ~15 Hz, interpolate remote players each frame
         this.tickMultiplayer(clampedDeltaTime);
@@ -9841,9 +10333,15 @@ class Game3D {
         const quickbarLayout = this.quickbarLayout || this.defaultQuickbarLayout();
         const gridItems = quickbarLayout.map((itemId, index) => {
             const def = byId[itemId];
+            let type = 'empty';
+            if (def) {
+                if (def.category === 'weapon') type = 'weapon';
+                else if (def.category === 'block') type = 'block';
+                else type = 'item';
+            }
             return {
                 id: itemId,
-                type: def ? (def.category === 'weapon' ? 'weapon' : 'item') : 'empty',
+                type,
                 shortcut: (index + 1).toString(),
                 icon: def ? def.icon : '',
                 name: def ? def.name : ''
@@ -9884,6 +10382,8 @@ class Game3D {
                 if (stock > 0 && active > 0) countLabel = `${stock}·${active}s`;
                 else if (stock > 0) countLabel = String(stock);
                 else if (active > 0) countLabel = `${active}s`;
+            } else if (item.type === 'block') {
+                countLabel = '∞';
             } else if (item.type !== 'weapon' && item.type !== 'empty' && count > 0) {
                 countLabel = String(count);
             }
@@ -9945,10 +10445,14 @@ class Game3D {
             this.activeBlockId = item.id;
             this.showMessage(`${item.name} — left-click to place`);
             this._qbSig = null;
+            // Detach the weapon from the hand and hide the FPV viewmodel so it's
+            // clear the player is in placement mode, not weapon mode.
+            this.attachActiveWeaponToHand();
             this.updateInventoryGridUI && this.updateInventoryGridUI();
             return;
         }
         // Any non-block selection clears placement mode.
+        const wasArmed = !!this.activeBlockId;
         this.activeBlockId = null;
 
         if (item.type === 'weapon') {
@@ -9961,6 +10465,8 @@ class Game3D {
                 this.updateInventoryGridUI && this.updateInventoryGridUI();
             }
         } else {
+            // Disarming a block (selecting a consumable) — re-attach the current weapon.
+            if (wasArmed) this.attachActiveWeaponToHand();
             this.activateSelectedItem(item.id);
             this.updateInventoryGridUI && this.updateInventoryGridUI();
         }
@@ -10079,6 +10585,7 @@ class Game3D {
                         <button class="df-pill ${ownedOnly ? '' : 'df-pill-on'}" data-filter="all">All</button>
                         <button class="df-pill ${ownedOnly ? 'df-pill-on' : ''}" data-filter="owned">Owned</button>
                         <button class="df-btn" id="reset-quickbar" title="Restore default loadout">↺ Reset</button>
+                        <button class="df-btn" id="clear-builds" title="Delete every block you've placed in this mode">🧹 Clear builds${this._placedBlockCount() ? ` (${this._placedBlockCount()})` : ''}</button>
                         <button class="df-btn df-btn-close" id="close-drawer">${this.t('close')} (Esc)</button>
                     </div>
                 </div>
@@ -10135,6 +10642,17 @@ class Game3D {
             this.updateInventoryGridUI();
             this.updateDrawerUI();
             this.showMessage('Quickbar reset to default');
+        });
+
+        const clearBtn = drawer.querySelector('#clear-builds');
+        if (clearBtn) clearBtn.addEventListener('click', () => {
+            const n = this._placedBlockCount();
+            if (n === 0) { this.showMessage('No placed blocks to clear.'); return; }
+            if (!confirm(`Delete all ${n} placed block${n === 1 ? '' : 's'} in this mode? This can't be undone.`)) return;
+            this.audio && this.audio.play('uiClick');
+            this._clearAllPlacedBlocks();
+            this.updateDrawerUI();
+            this.showMessage(`Cleared ${n} placed block${n === 1 ? '' : 's'}.`);
         });
 
         drawer.querySelectorAll('.df-pill').forEach(btn => {
@@ -10255,14 +10773,16 @@ class Game3D {
         if (inBar) itemEl.classList.add('drawer-item-assigned');
         if (item.type === 'weapon') itemEl.classList.add('drawer-item-weapon');
 
+        const isBlock = item.type === 'block' || item.category === 'block';
         const showCount = item.type !== 'weapon' && count > 0;
+        const countLabel = isBlock ? '∞' : `×${count}`;
         const slotLabel = slotIdx >= 0 ? `slot ${slotIdx + 1}` : '';
-        itemEl.title = `${item.name}${effect ? ` — ${effect}` : ''}${showCount ? ` (${count})` : ''}${inBar ? ` · in ${slotLabel}` : ''}${!isOwned ? ' · not picked up' : ''}`;
+        itemEl.title = `${item.name}${effect ? ` — ${effect}` : ''}${showCount ? ` (${isBlock ? '∞' : count})` : ''}${inBar ? ` · in ${slotLabel}` : ''}${!isOwned ? ' · not picked up' : ''}`;
 
         itemEl.innerHTML = `
             <div class="di-row">
                 <div class="di-icon">${item.icon}</div>
-                ${showCount ? `<div class="di-count">×${count}</div>` : ''}
+                ${showCount ? `<div class="di-count">${countLabel}</div>` : ''}
                 ${inBar ? `<div class="di-pin" title="In quickbar ${slotLabel}">${slotIdx + 1}</div>` : ''}
             </div>
             <div class="di-name">${item.name}</div>
@@ -10849,6 +11369,8 @@ class Game3D {
     
     handleContinuousFiring(deltaTime) {
         if (!this.isFiring || this.gameMode !== 'play') return;
+        // Block placement mode disables weapon use entirely.
+        if (this.activeBlockId) return;
 
         const weapon = this.getCurrentWeapon();
         if (!weapon || !weapon.isContinuous) return;
@@ -10937,7 +11459,7 @@ class Game3D {
         this.player.invulnerabilityTimer = 0;
         this.characterRotation = 0;
         if (this.player.weapons) {
-            this.player.weapons = ['diamondSword', 'gun', 'machineGun'];
+            this.player.weapons = ['diamondSword', 'swordGold', 'swordStone', 'skeletonAxe', 'axeDiamond', 'axeGold', 'skeletonBlade', 'skeletonStaff', 'gun', 'machineGun'];
             this.player.currentWeaponIndex = 0;
         }
         if (this.inventory) this.inventory.ammo = 100;
