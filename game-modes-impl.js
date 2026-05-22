@@ -1335,6 +1335,7 @@
 
         if (!this._isPreGameMeta || !this._isPreGameMeta()) {
             this.updateSwordViewmodel(clampedDeltaTime);
+            this.updatePlacementGhost();
         }
         this.tickMultiplayer(clampedDeltaTime);
         this.render();
@@ -1433,12 +1434,6 @@
         if (!atStart) this.hasLeftStartOnce = true;
     };
 
-    const _placeActiveBlock = Game3D.prototype.placeActiveBlock;
-    Game3D.prototype.placeActiveBlock = function () {
-        if (this.gameMode !== 'creator') return false;
-        return _placeActiveBlock.call(this);
-    };
-
     const _handlePlayClick = Game3D.prototype.handlePlayClick;
     Game3D.prototype.handlePlayClick = function (event) {
         if (this.gameMode === 'creator') {
@@ -1447,7 +1442,8 @@
             return;
         }
         if (!this.isGameplayActive()) return;
-        if (this.activeBlockId) this.activeBlockId = null;
+        // Forward to the base handler — which routes to placeActiveBlock when
+        // a block is armed, or to the weapon attack path otherwise.
         _handlePlayClick.call(this, event);
     };
 
@@ -1468,10 +1464,6 @@
 
     const _selectGridItem = Game3D.prototype.selectGridItem;
     Game3D.prototype.selectGridItem = function (item) {
-        if (this.BLOCK_DEFS && this.BLOCK_DEFS[item.id] && this.gameMode !== 'creator') {
-            this.showMessage('Blocks are only available in Creator mode');
-            return;
-        }
         if (this.gameMode === 'creator' && item.id === 'pickaxe') {
             this.creatorMode.pickaxeActive = true;
             this.activeBlockId = null;
@@ -1488,17 +1480,7 @@
 
     const _updateInventoryGridUI = Game3D.prototype.updateInventoryGridUI;
     Game3D.prototype.updateInventoryGridUI = function () {
-        if (this.gameMode === 'play' && this.quickbarLayout && this.BLOCK_DEFS) {
-            let dirty = false;
-            this.quickbarLayout = this.quickbarLayout.map((id) => {
-                if (id && this.BLOCK_DEFS[id]) { dirty = true; return null; }
-                return id;
-            });
-            if (dirty) {
-                this.activeBlockId = null;
-                this._qbSig = null;
-            }
-        }
+        // Blocks are usable in any play mode now — no more stripping from the quickbar.
         if (this.gameMode === 'creator') {
             /* allow quickbar in creator */
         } else if (this.gameMode !== 'play') {
@@ -1564,8 +1546,8 @@
         return {
             weapons: reg.weapons,
             consumables: reg.consumables,
-            blocks: [],
-            all: [...reg.weapons, ...reg.consumables]
+            blocks: reg.blocks,
+            all: [...reg.weapons, ...reg.consumables, ...reg.blocks]
         };
     };
 
