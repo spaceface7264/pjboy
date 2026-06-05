@@ -62,6 +62,40 @@
                 return (g.run && g.run.lives <= 0) ? 'out_of_lives' : null;
             }
         },
+        open_world: {
+            id: 'open_world',
+            gameMode: 'play',
+            enter(g) {
+                g._teardownSpecialModes && g._teardownSpecialModes();
+                g.gameMode = 'play';
+                g.activeModeId = 'open_world';
+                g.run = { startTime: performance.now() };
+                g.score = 0;
+                g.kills = 0;
+                g.flyMode = false;
+                g.exploreSpeedMult = 1;
+                g.clearMaze && g.clearMaze();
+                if (!g.worldStream && typeof WorldStream !== 'undefined') {
+                    g.worldStream = new WorldStream(g);
+                }
+                g.setupPlayMode && g.setupPlayMode();
+                g.worldStream && g.worldStream.enter();
+                g.setViewMode && g.setViewMode('fpv');
+            },
+            exit(g) {
+                g.flyMode = false;
+                g.exploreSpeedMult = 1;
+                if (g._worldMapOpen) {
+                    g._worldMapOpen = false;
+                    g.modalOpen = false;
+                    const mm = document.getElementById('world-map-modal');
+                    if (mm) mm.style.display = 'none';
+                }
+                g.worldStream && g.worldStream.exit();
+                g.clearEnemies && g.clearEnemies();
+                g.clearMaze && g.clearMaze();
+            }
+        },
         arena: {
             id: 'arena',
             gameMode: 'play',

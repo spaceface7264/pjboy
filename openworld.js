@@ -77,6 +77,7 @@
             this.active = true;
             this.transitionTo('hub', true);
             this._ensureLabel();
+            this._ensureRadar();
         }
 
         exit() {
@@ -86,6 +87,7 @@
             this.rootGroup.visible = false;
             this._restoreGameState();
             if (this.labelEl) this.labelEl.style.display = 'none';
+            if (this.radarEl) this.radarEl.style.display = 'none';
         }
 
         _saveGameState() {
@@ -146,6 +148,7 @@
                 'environment/Plant_2.gltf', 'environment/Plant_3.gltf',
                 'environment/Rock1.gltf', 'environment/Rock2.gltf',
                 'environment/Tree_1.gltf', 'environment/Tree_2.gltf', 'environment/Tree_3.gltf',
+                'environment/Nether_Portal.glb',
                 // Blocks
                 'Block_Brick.gltf', 'Block_Coal.gltf', 'Block_Crate.gltf',
                 'Block_GreyBricks.gltf', 'Block_Grass.gltf', 'Block_Ice.gltf',
@@ -336,6 +339,110 @@
             return portal;
         }
 
+        // A "real" Minecraft Nether Portal: the converted GLB model is used as the
+        // obsidian frame, recolored to dark obsidian, with our animated swirl shader
+        // overlaid on the flat portal pane (the model's `Plane002` mesh). Falls back
+        // to a plain addPortal() if the model failed to load.
+        addNetherPortal(world, position, targetWorldId, opts) {
+            opts = opts || {};
+            const model = this.cloneAsset(ROOT + 'environment/Nether_Portal.glb');
+            if (!model) {
+                return this.addPortal(world, position, targetWorldId, 0x9b30ff);
+            }
+
+            // Scale to a doorway height and drop the base onto the ground.
+            const targetHeight = opts.height || 7;
+            let box = new THREE.Box3().setFromObject(model);
+            let size = box.getSize(new THREE.Vector3());
+            const scale = targetHeight / (size.y || 1);
+            model.scale.setScalar(scale);
+            box = new THREE.Box3().setFromObject(model);
+            size = box.getSize(new THREE.Vector3());
+            const center = box.getCenter(new THREE.Vector3());
+            // Center horizontally and sit on y=0 (all in the group's local space).
+            model.position.x -= center.x;
+            model.position.z -= center.z;
+            model.position.y -= box.min.y;
+
+            // Locate the flat portal pane and recolor the obsidian frame.
+            let pane = null;
+            model.traverse((o) => {
+                if (!o.isMesh) return;
+                if (/Plane002/i.test(o.name || '')) {
+                    pane = o;
+                    o.visible = false; // our swirl replaces the flat blue pane
+                    return;
+                }
+                o.material = new THREE.MeshStandardMaterial({
+                    color: 0x14101c, roughness: 0.75, metalness: 0.15, emissive: 0x10001a
+                });
+                o.castShadow = true;
+                o.receiveShadow = true;
+            });
+
+            const group = new THREE.Group();
+            group.add(model);
+
+            // Find the pane's center/size in group-local space (group not yet placed).
+            group.updateMatrixWorld(true);
+            let openCenter, openW, openH;
+            if (pane) {
+                const pbox = new THREE.Box3().setFromObject(pane);
+                openCenter = pbox.getCenter(new THREE.Vector3());
+                const psize = pbox.getSize(new THREE.Vector3());
+                openW = Math.max(psize.z, psize.x) * 0.92;
+                openH = psize.y * 0.92;
+            } else {
+                openCenter = new THREE.Vector3(0, targetHeight * 0.45, 0);
+                openW = targetHeight * 0.42;
+                openH = targetHeight * 0.55;
+            }
+
+            // Animated swirl pane (faces +X locally, matching the model's opening normal).
+            const colorObj = new THREE.Color(opts.color != null ? opts.color : 0x9b30ff);
+            const mat = new THREE.ShaderMaterial({
+                uniforms: { uTime: { value: 0 }, uColor: { value: colorObj } },
+                vertexShader: PORTAL_VS,
+                fragmentShader: PORTAL_FS,
+                transparent: true,
+                side: THREE.DoubleSide,
+                depthWrite: false
+            });
+            const disc = new THREE.Mesh(new THREE.PlaneGeometry(openW, openH), mat);
+            disc.position.copy(openCenter);
+            disc.rotation.y = Math.PI / 2;
+            group.add(disc);
+
+            const light = new THREE.PointLight(colorObj, 1.8, 12);
+            light.position.copy(openCenter);
+            group.add(light);
+
+            // Orient the whole portal so its opening faces the world origin (where the
+            // player tends to spawn), unless an explicit yaw is supplied.
+            const yaw = opts.yaw != null
+                ? opts.yaw
+                : Math.atan2(position.z, -position.x);
+            group.position.copy(position);
+            group.rotation.y = yaw;
+            world.group.add(group);
+
+            // Resolve the swirl's final world position for the trigger volume.
+            group.updateMatrixWorld(true);
+            const worldPos = disc.getWorldPosition(new THREE.Vector3());
+
+            const portal = {
+                disc, torus: null, light, material: mat,
+                position: worldPos,
+                targetWorldId,
+                color: colorObj,
+                noSpin: true,
+                isNether: true,
+                label: opts.label || 'NETHER'
+            };
+            world.portals.push(portal);
+            return portal;
+        }
+
         // ---------- world layouts ----------
 
         buildAllWorlds() {
@@ -344,6 +451,7 @@
             this._buildDogFarm();
             this._buildIceCaverns();
             this._buildDemonCrypt();
+            this._buildNether();
         }
 
         _buildHub() {
@@ -399,6 +507,9 @@
             this.addPortal(w, new THREE.Vector3(18, 0, 0),   'dogFarm',     0xf2c84c);
             this.addPortal(w, new THREE.Vector3(0, 0, 18),   'iceCaverns',  0x4cd9f2);
             this.addPortal(w, new THREE.Vector3(-18, 0, 0),  'demonCrypt',  0xf24c7a);
+
+            // Centerpiece Nether Portal (custom GLB frame) → The Nether
+            this.addNetherPortal(w, new THREE.Vector3(0, 0, -32), 'nether', { color: 0x9b30ff });
         }
 
         _buildBambooGrove() {
@@ -771,6 +882,87 @@
             this.addPortal(w, new THREE.Vector3(20, 0, 0), 'hub', 0xb6a4ff);
         }
 
+        _buildNether() {
+            const w = this._makeWorld('nether', {
+                displayName: 'The Nether',
+                spawn: new THREE.Vector3(0, 0, 16),
+                bg: 0x2a0805,
+                fog: new THREE.Fog(0x3a0d08, 20, 120),
+                ambientColor: 0xff6a3a, ambientIntensity: 0.5,
+                dirColor: 0xff8040, dirIntensity: 0.4,
+                combat: true
+            });
+            this._addGround(w, 0x4a1410, 60); // netherrack red
+
+            // Central lava pool (emissive disc + warm light)
+            const lava = new THREE.Mesh(
+                new THREE.CircleGeometry(11, 40),
+                new THREE.MeshBasicMaterial({ color: 0xff5a1e })
+            );
+            lava.rotation.x = -Math.PI / 2;
+            lava.position.y = 0.06;
+            w.group.add(lava);
+            const lavaLight = new THREE.PointLight(0xff5520, 2.2, 50);
+            lavaLight.position.set(0, 4, 0);
+            w.group.add(lavaLight);
+
+            // Obsidian / coal pillars ringing the lava
+            for (let i = 0; i < 8; i++) {
+                const a = (i / 8) * Math.PI * 2;
+                const r = 15;
+                const x = Math.cos(a) * r, z = Math.sin(a) * r;
+                const h = 3 + (i % 3);
+                for (let y = 0; y < h; y++) {
+                    const key = y === h - 1 ? 'Block_Coal' : 'Block_Stone';
+                    const blk = this.cloneAsset(ROOT + key + '.gltf') || this._fallbackCube(0x1a1a1a);
+                    blk.position.set(x, 0.5 + y, z);
+                    this.addStaticProp(w, blk, { center: { x, y: 0.5 + y, z }, size: { x: 1, y: 1, z: 1 } });
+                }
+            }
+
+            // Scattered netherrack mounds (brick blocks)
+            for (let i = 0; i < 14; i++) {
+                const a = Math.random() * Math.PI * 2;
+                const r = 22 + Math.random() * 22;
+                const x = Math.cos(a) * r, z = Math.sin(a) * r;
+                const blk = this.cloneAsset(ROOT + 'Block_Brick.gltf') || this._fallbackCube(0x6a2a1a);
+                blk.position.set(x, 0.5, z);
+                blk.scale.setScalar(1 + Math.random() * 0.6);
+                this.addStaticProp(w, blk, { center: { x, y: 0.5, z }, size: { x: 1, y: 1, z: 1 } });
+            }
+
+            // Glowstone clusters — emissive blocks with a soft light each
+            for (let i = 0; i < 4; i++) {
+                const a = (i / 4) * Math.PI * 2 + 0.4;
+                const r = 26;
+                const x = Math.cos(a) * r, z = Math.sin(a) * r;
+                const glow = new THREE.Mesh(
+                    new THREE.BoxGeometry(1.4, 1.4, 1.4),
+                    new THREE.MeshBasicMaterial({ color: 0xffd27a })
+                );
+                glow.position.set(x, 5 + Math.random() * 2, z);
+                w.group.add(glow);
+                const gl = new THREE.PointLight(0xffc066, 1.2, 22);
+                gl.position.copy(glow.position);
+                w.group.add(gl);
+            }
+
+            // Hostile mobs (combat-enabled, reusing crypt enemy models)
+            const keys = ['Demon', 'Skeleton', 'Skeleton_Armor', 'Goblin', 'Wizard'];
+            for (let i = 0; i < 8; i++) {
+                const k = keys[i % keys.length];
+                const e = this.cloneAsset(ROOT + 'enemies/' + k + '.gltf');
+                if (!e) continue;
+                const a = Math.random() * Math.PI * 2;
+                const r = 16 + Math.random() * 18;
+                e.position.set(Math.cos(a) * r, 0, Math.sin(a) * r);
+                this.addAnimal(w, e, { behavior: 'wander', radius: 10, speed: 1.7, hp: 4 });
+            }
+
+            // Return Nether Portal → hub (clear of the pillar ring at r=15)
+            this.addNetherPortal(w, new THREE.Vector3(0, 0, -26), 'hub', { color: 0x9b30ff });
+        }
+
         // ---------- per-frame update ----------
 
         update(dt) {
@@ -782,7 +974,7 @@
             // Portal shader + spin
             for (const p of w.portals) {
                 p.material.uniforms.uTime.value = this.t;
-                p.disc.rotation.z += dt * 0.45;
+                if (!p.noSpin) p.disc.rotation.z += dt * 0.45;
                 const pulse = 1 + Math.sin(this.t * 4) * 0.15;
                 p.light.intensity = 1.4 * pulse;
             }
@@ -801,6 +993,10 @@
                 this._updateAnimal(a, dt);
                 if (a.mixer) a.mixer.update(dt);
             }
+
+            // Portal radar — refresh at ~8fps
+            this._radarFrame = ((this._radarFrame || 0) + 1) % 8;
+            if (this._radarFrame === 0) this._drawRadar(w);
 
             // Portal trigger
             if (!this.transitioning) {
@@ -967,6 +1163,100 @@
             const done = this._explorerZonesDone();
             const obj = done >= 4 ? '   ★ all zones visited' : `   ◆ zones ${done}/4`;
             this.labelEl.textContent = world.displayName + (world.combat ? '   ⚔  combat' : '   ✦  peaceful') + obj;
+        }
+
+        // ---------- portal radar (the Open World's map) ----------
+
+        _ensureRadar() {
+            if (this.radarEl) { this.radarEl.style.display = ''; return; }
+            const wrap = document.createElement('div');
+            wrap.id = 'openworld-radar';
+            wrap.style.cssText =
+                'position:fixed;right:14px;bottom:14px;width:154px;height:172px;' +
+                'background:rgba(0,0,0,0.42);border:1px solid rgba(255,255,255,0.22);' +
+                'border-radius:8px;z-index:99998;pointer-events:none;' +
+                'font-family:monospace;color:#fff;';
+            const title = document.createElement('div');
+            title.style.cssText =
+                'text-align:center;font-size:10px;letter-spacing:2px;padding:4px 0 2px;' +
+                'opacity:0.8;text-transform:uppercase;';
+            title.textContent = 'Portal Map';
+            const canvas = document.createElement('canvas');
+            canvas.width = 150; canvas.height = 150;
+            canvas.style.cssText = 'display:block;margin:0 auto;';
+            wrap.appendChild(title);
+            wrap.appendChild(canvas);
+            document.body.appendChild(wrap);
+            this.radarEl = wrap;
+            this.radarCanvas = canvas;
+        }
+
+        _drawRadar(world) {
+            if (!this.radarCanvas || !world) return;
+            const ctx = this.radarCanvas.getContext('2d');
+            const W = 150, cx = 75, cy = 75, R = 66;
+            const half = 46;                 // world half-extent the radar covers
+            const scale = R / half;
+            const clampToDisc = (sx, sy) => {
+                const dx = sx - cx, dy = sy - cy;
+                const d = Math.hypot(dx, dy);
+                if (d <= R - 4) return [sx, sy];
+                const k = (R - 4) / d;
+                return [cx + dx * k, cy + dy * k];
+            };
+
+            ctx.clearRect(0, 0, W, W);
+            // Disc backdrop + crosshair
+            ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(20,24,32,0.6)'; ctx.fill();
+            ctx.strokeStyle = 'rgba(255,255,255,0.18)'; ctx.lineWidth = 1; ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(cx - R, cy); ctx.lineTo(cx + R, cy);
+            ctx.moveTo(cx, cy - R); ctx.lineTo(cx, cy + R);
+            ctx.strokeStyle = 'rgba(255,255,255,0.08)'; ctx.stroke();
+            // North marker
+            ctx.fillStyle = 'rgba(255,255,255,0.5)'; ctx.font = '9px monospace';
+            ctx.textAlign = 'center'; ctx.fillText('N', cx, cy - R + 9);
+
+            // Portals
+            for (const p of world.portals) {
+                let [sx, sy] = clampToDisc(cx + p.position.x * scale, cy + p.position.z * scale);
+                const col = '#' + p.color.getHexString();
+                if (p.isNether) {
+                    // Highlighted diamond + glow ring + label
+                    ctx.save();
+                    ctx.shadowColor = col; ctx.shadowBlur = 8;
+                    ctx.translate(sx, sy); ctx.rotate(Math.PI / 4);
+                    ctx.fillStyle = col;
+                    ctx.fillRect(-5, -5, 10, 10);
+                    ctx.restore();
+                    ctx.beginPath(); ctx.arc(sx, sy, 8, 0, Math.PI * 2);
+                    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
+                    ctx.fillStyle = '#fff'; ctx.font = 'bold 8px monospace';
+                    ctx.textAlign = 'center';
+                    ctx.fillText(p.label || 'NETHER', sx, sy + 17);
+                } else {
+                    ctx.beginPath(); ctx.arc(sx, sy, 4, 0, Math.PI * 2);
+                    ctx.fillStyle = col; ctx.fill();
+                    ctx.strokeStyle = 'rgba(255,255,255,0.6)'; ctx.lineWidth = 1; ctx.stroke();
+                }
+            }
+
+            // Player arrow (forward = sin(yaw), cos(yaw); world z → screen +y)
+            const pp = this.game.player.position;
+            const yaw = this.game.player.rotation.y;
+            let [px, py] = clampToDisc(cx + pp.x * scale, cy + pp.z * scale);
+            const fx = Math.sin(yaw), fz = Math.cos(yaw);
+            const ang = Math.atan2(fx, fz); // screen angle from +y axis
+            ctx.save();
+            ctx.translate(px, py); ctx.rotate(ang);
+            ctx.beginPath();
+            ctx.moveTo(0, -6); ctx.lineTo(4, 5); ctx.lineTo(0, 2); ctx.lineTo(-4, 5);
+            ctx.closePath();
+            ctx.fillStyle = '#ffe24a';
+            ctx.strokeStyle = 'rgba(0,0,0,0.6)'; ctx.lineWidth = 1;
+            ctx.fill(); ctx.stroke();
+            ctx.restore();
         }
 
         _explorerZonesDone() {

@@ -1351,6 +1351,9 @@
     Game3D.prototype.fixedUpdate = function (deltaTime) {
         if (this.simPaused) return;
         _fixedUpdate.call(this, deltaTime);
+        if (this.activeModeId === 'open_world' && this.worldStream) {
+            this.worldStream.update(deltaTime);
+        }
         if (this.gameMode === 'creator') {
             this.updateCreatorMode(deltaTime);
         }
@@ -1543,11 +1546,14 @@
                 all: [...tools, ...reg.blocks]
             };
         }
+        // The open world surfaces the pickaxe tool; other play modes don't.
+        const tools = (this.activeModeId === 'open_world') ? (reg.tools || []) : [];
         return {
             weapons: reg.weapons,
             consumables: reg.consumables,
             blocks: reg.blocks,
-            all: [...reg.weapons, ...reg.consumables, ...reg.blocks]
+            tools,
+            all: [...reg.weapons, ...reg.consumables, ...reg.blocks, ...tools]
         };
     };
 

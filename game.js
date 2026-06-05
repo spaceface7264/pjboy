@@ -674,6 +674,18 @@ class Game3D {
         this.isJetpackActive = false;
         this.jetpackThrust = 0;
         this.jetpackParticles = [];
+
+        // Creative flight (open world). Toggled with F; Space ascends,
+        // Shift/Ctrl descends, no gravity. Wall collision still applies.
+        this.flyMode = false;
+        // Explore-speed multiplier (open world). Cycled with B: 1× → 2× → 4×.
+        // Scales both walking and flying for fast traversal.
+        this.exploreSpeedMult = 1;
+        // Open-world pickaxe tool. Toggled with C; when equipped, click mines
+        // the targeted tree/rock/placed block. Viewmodel managed by WorldStream.
+        this.owPickaxeEquipped = false;
+        this.owPickaxeSwing = 0; // 1 → 0 swing animation phase (read by WorldStream)
+        this._worldMapOpen = false; // full-screen world map (K)
         
         // Gameplay tuning
         this.wallDensity = 0.3; // 0..1 fraction of interior walls to keep
@@ -953,6 +965,38 @@ class Game3D {
     //
     // Returns { pos, valid }. `valid` is false when the resulting cell is
     // already occupied or would land on the player.
+    // True when the player is submerged in an open-world water body.
+    _inWater() {
+        if (this.activeModeId !== 'open_world' || this.flyMode) return false;
+        const ws = this.worldStream;
+        if (!ws || !ws.seaLevel || !ws.heightAt) return false;
+        const sea = ws.seaLevel();
+        const p = this.player.position;
+        return p.y < sea && ws.heightAt(p.x, p.z) < sea;
+    }
+
+    // Ground height under (x,z): the streamed terrain in the open world,
+    // otherwise the flat y=0 floor.
+    _groundHeightAt(x, z) {
+        if (this.activeModeId === 'open_world' && this.worldStream && this.worldStream.heightAt) {
+            return this.worldStream.heightAt(x, z);
+        }
+        return 0;
+    }
+
+    // March a ray forward until it drops to/below the ground surface; returns
+    // {x, z} of the hit or null. Used so block placement lands on terrain.
+    _marchRayToGround(origin, dir, maxDist) {
+        const step = 0.2;
+        for (let t = step; t <= maxDist; t += step) {
+            const x = origin.x + dir.x * t;
+            const y = origin.y + dir.y * t;
+            const z = origin.z + dir.z * t;
+            if (y <= this._groundHeightAt(x, z)) return { x, z };
+        }
+        return null;
+    }
+
     _resolveBlockPlacementTarget() {
         const dir = new THREE.Vector3();
         if (this.camera) {
@@ -1041,11 +1085,16 @@ class Game3D {
             const cellZ = Math.floor(hit.z) + bestNormal.z;
             pos = new THREE.Vector3(cellX + 0.5, cellY + 0.5, cellZ + 0.5);
         } else {
-            // No solid hit — fall back to the ground plane (y=0). If the ray
-            // points up or flat, snap a short distance forward at ground level
-            // so the ghost still appears somewhere reasonable.
+            // No solid hit — fall back to the ground. In the open world the
+            // ground follows the terrain, so march the ray onto the surface and
+            // snap the block to rest on top (kept on the integer grid so it
+            // still stacks cleanly). Flat/upward rays drop a block just ahead.
             let gx, gz;
-            if (dir.y < -0.05) {
+            const marched = (dir.y < -0.05) ? this._marchRayToGround(origin, dir, MAX_REACH) : null;
+            if (marched) {
+                gx = marched.x;
+                gz = marched.z;
+            } else if (dir.y < -0.05) {
                 const t = Math.min(MAX_REACH, origin.y / -dir.y);
                 gx = origin.x + dir.x * t;
                 gz = origin.z + dir.z * t;
@@ -1056,7 +1105,9 @@ class Game3D {
                 gx = this.player.position.x + flat.x;
                 gz = this.player.position.z + flat.z;
             }
-            pos = new THREE.Vector3(Math.floor(gx) + 0.5, 0.5, Math.floor(gz) + 0.5);
+            const groundH = this._groundHeightAt(gx, gz);
+            const cellY = Math.round(groundH) + 0.5; // sit on the surface, grid-aligned
+            pos = new THREE.Vector3(Math.floor(gx) + 0.5, cellY, Math.floor(gz) + 0.5);
         }
 
         // Validate: cell must be empty (not already occupied) and not where
@@ -1220,6 +1271,257 @@ class Game3D {
         return true;
     }
 
+    // Open-world pickaxe: swing and remove the nearest harvestable in front
+    // (trees/rocks/placed blocks are all `walls` entries; terrain tiles and
+    // animals are not, so they're unaffected). Debounced like placement.
+    mineTarget() {
+        const now = performance.now();
+        if (this._lastMineTime && (now - this._lastMineTime) < 300) return;
+        this._lastMineTime = now;
+        this.owPickaxeSwing = 1; // triggers the viewmodel swing
+        // (no click sound on swing — the dig sound below plays only on a hit)
+
+        const dir = new THREE.Vector3();
+        this.camera.getWorldDirection(dir);
+        const origin = this.camera.getWorldPosition(new THREE.Vector3());
+        const MAX_REACH = 6.0;
+
+        let bestT = Infinity, best = null;
+        for (let i = 0; i < this.walls.length; i++) {
+            const w = this.walls[i];
+            if (!w || !w.position || !w.size) continue;
+            if (w.station) continue; // the space station isn't mineable
+            const dx0 = w.position.x - origin.x, dz0 = w.position.z - origin.z;
+            if (dx0 * dx0 + dz0 * dz0 > (MAX_REACH + 4) * (MAX_REACH + 4)) continue;
+            const hx = w.size.x / 2, hy = w.size.y / 2, hz = w.size.z / 2;
+            const invDx = dir.x !== 0 ? 1 / dir.x : 1e30;
+            const invDy = dir.y !== 0 ? 1 / dir.y : 1e30;
+            const invDz = dir.z !== 0 ? 1 / dir.z : 1e30;
+            let t1x = (w.position.x - hx - origin.x) * invDx, t2x = (w.position.x + hx - origin.x) * invDx;
+            if (t1x > t2x) { const t = t1x; t1x = t2x; t2x = t; }
+            let t1y = (w.position.y - hy - origin.y) * invDy, t2y = (w.position.y + hy - origin.y) * invDy;
+            if (t1y > t2y) { const t = t1y; t1y = t2y; t2y = t; }
+            let t1z = (w.position.z - hz - origin.z) * invDz, t2z = (w.position.z + hz - origin.z) * invDz;
+            if (t1z > t2z) { const t = t1z; t1z = t2z; t2z = t; }
+            const tEnter = Math.max(t1x, t1y, t1z), tExit = Math.min(t2x, t2y, t2z);
+            if (tEnter > tExit || tExit < 0 || tEnter > MAX_REACH) continue;
+            const tHit = tEnter >= 0 ? tEnter : 0;
+            if (tHit < bestT) { bestT = tHit; best = w; }
+        }
+        // Also consider the terrain surface; mine whichever is closer.
+        const ground = (this.worldStream && this.worldStream.raycastGround)
+            ? this.worldStream.raycastGround(origin, dir, MAX_REACH) : null;
+        if (best && (!ground || bestT <= ground.dist)) {
+            const pt = origin.clone().addScaledVector(dir, bestT);
+            if (best.voxelTree) {
+                // Spawn tree: mine one block (hide its instance) at a time.
+                this.worldStream.mineTreeCube(best);
+                this.spawnImpact && this.spawnImpact(pt, 0x6fae3a);
+                this.audio && this.audio.play && this.audio.play('swordHit');
+            } else {
+                this._removeWallEntry(best);
+                this.spawnImpact && this.spawnImpact(pt, 0xffe08a);
+                this.audio && this.audio.play && this.audio.play('swordHit');
+            }
+        } else if (ground && this.worldStream.digCell(ground.cellX, ground.cellZ)) {
+            const pt = new THREE.Vector3(ground.x, this.worldStream.heightAt(ground.x, ground.z), ground.z);
+            this.spawnImpact && this.spawnImpact(pt, 0xbfae86);
+            this.audio && this.audio.play && this.audio.play('swordHit');
+        }
+    }
+
+    // Remove a wall entry from the scene, collision hash, and walls list.
+    _removeWallEntry(w) {
+        const mesh = w.mesh || w;
+        if (mesh) { if (mesh.parent) mesh.parent.remove(mesh); else this.scene.remove(mesh); }
+        this._removeWallFromHash(w);
+        const i = this.walls.indexOf(w);
+        if (i !== -1) this.walls.splice(i, 1);
+        if (w.placed) this._scheduleSaveBuilds && this._scheduleSaveBuilds();
+    }
+
+    // ===== Full-screen world map (open world, toggled with K) =====
+    _buildWorldMapModal() {
+        const el = document.createElement('div');
+        el.id = 'world-map-modal';
+        el.style.cssText = 'position:fixed;inset:0;z-index:3000;display:none;align-items:center;justify-content:center;flex-direction:column;background:rgba(4,8,10,0.88);font-family:\'Courier New\',monospace;';
+        el.innerHTML = `
+            <div style="color:#9fe0ff;letter-spacing:3px;font-size:16px;margin-bottom:8px;">WORLD MAP</div>
+            <canvas id="world-map-canvas" width="760" height="760" style="border:2px solid #5fd0ff;border-radius:10px;max-width:86vmin;max-height:86vmin;background:#0a141a;box-shadow:0 0 30px rgba(95,208,255,0.25);cursor:crosshair;"></canvas>
+            <div id="world-map-info" style="color:#cfe6f2;font-size:12px;margin-top:8px;opacity:0.85;"></div>
+            <div style="color:#7f97a5;font-size:11px;margin-top:4px;">Click to teleport · K or Esc to close</div>
+        `;
+        el.addEventListener('click', (e) => { if (e.target === el) this.toggleWorldMap(); });
+        const cv = el.querySelector('#world-map-canvas');
+        if (cv) cv.addEventListener('click', (e) => { e.stopPropagation(); this._worldMapClick(e); });
+        document.body.appendChild(el);
+        return el;
+    }
+
+    toggleWorldMap() {
+        if (this.activeModeId !== 'open_world') return;
+        this._worldMapOpen = !this._worldMapOpen;
+        const el = document.getElementById('world-map-modal') || this._buildWorldMapModal();
+        el.style.display = this._worldMapOpen ? 'flex' : 'none';
+        this.modalOpen = this._worldMapOpen; // freeze gameplay input behind the map
+        this.audio && this.audio.play && this.audio.play('uiClick');
+        if (this._worldMapOpen) {
+            if (document.pointerLockElement) document.exitPointerLock();
+            document.body.style.cursor = 'default';
+            this.renderWorldMap();
+        } else {
+            document.body.style.cursor = '';
+        }
+    }
+
+    // Paint the biome field (relief-shaded) across the explored region, then
+    // overlay the player's structures and position. The biome/terrain functions
+    // are deterministic, so any coordinate can be sampled.
+    // Purple diamond marker for the Nether Portal, shared by both maps.
+    _drawNetherMarker(ctx, x, y, r, withLabel) {
+        ctx.save();
+        ctx.shadowColor = '#b052ff';
+        ctx.shadowBlur = 8;
+        ctx.translate(x, y);
+        ctx.rotate(Math.PI / 4);
+        ctx.fillStyle = '#9b30ff';
+        ctx.fillRect(-r, -r, r * 2, r * 2);
+        ctx.restore();
+        ctx.beginPath();
+        ctx.arc(x, y, r + 3, 0, Math.PI * 2);
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        if (withLabel) {
+            ctx.fillStyle = '#e8c8ff';
+            ctx.font = 'bold 12px "Courier New", monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText('NETHER', x, y + r + 16);
+        }
+    }
+
+    renderWorldMap() {
+        const canvas = document.getElementById('world-map-canvas');
+        const ws = this.worldStream;
+        if (!canvas || !ws || !ws.biomeColorAt) return;
+        const ctx = canvas.getContext('2d');
+        const W = canvas.width, H = canvas.height;
+        ctx.clearRect(0, 0, W, H);
+
+        const px = this.player.position.x, pz = this.player.position.z;
+        const placed = [];
+        let minX = px, maxX = px, minZ = pz, maxZ = pz;
+        for (const wl of this.walls) {
+            if (wl && wl.placed && wl.position) {
+                placed.push(wl);
+                if (wl.position.x < minX) minX = wl.position.x;
+                if (wl.position.x > maxX) maxX = wl.position.x;
+                if (wl.position.z < minZ) minZ = wl.position.z;
+                if (wl.position.z > maxZ) maxZ = wl.position.z;
+            }
+        }
+        const cx = (minX + maxX) / 2, cz = (minZ + maxZ) / 2;
+        let half = Math.max(350, Math.max(maxX - minX, maxZ - minZ) / 2 + 60);
+        half = Math.max(half, Math.abs(px - cx) + 40, Math.abs(pz - cz) + 40);
+        const scale = Math.min(W, H) / (half * 2);
+        const toX = (x) => W / 2 + (x - cx) * scale;
+        const toY = (z) => H / 2 + (z - cz) * scale;
+        // Stash the transform so map clicks can be inverted to world coords.
+        this._worldMapView = { cx, cz, scale };
+
+        // Land/water background with light relief shading on land.
+        const sea = ws.seaLevel ? ws.seaLevel() : 0;
+        const CELL = 6;
+        for (let sy = 0; sy < H; sy += CELL) {
+            for (let sx = 0; sx < W; sx += CELL) {
+                const wx = cx + (sx + CELL / 2 - W / 2) / scale;
+                const wz = cz + (sy + CELL / 2 - H / 2) / scale;
+                const col = ws.mapColorAt(wx, wz);
+                let r = (col >> 16) & 255, g = (col >> 8) & 255, b = col & 255;
+                const s = ws.heightAt(wx, wz);
+                if (s >= sea) { // brighten higher land for relief
+                    const sh = 0.82 + 0.18 * Math.max(0, Math.min(1, s / 24));
+                    r *= sh; g *= sh; b *= sh;
+                }
+                ctx.fillStyle = `rgb(${r | 0},${g | 0},${b | 0})`;
+                ctx.fillRect(sx, sy, CELL, CELL);
+            }
+        }
+
+        // Coordinate grid every 100 units.
+        ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+        ctx.lineWidth = 1;
+        const step = 100;
+        for (let gx = Math.ceil((cx - half) / step) * step; gx <= cx + half; gx += step) {
+            const X = toX(gx); ctx.beginPath(); ctx.moveTo(X, 0); ctx.lineTo(X, H); ctx.stroke();
+        }
+        for (let gz = Math.ceil((cz - half) / step) * step; gz <= cz + half; gz += step) {
+            const Y = toY(gz); ctx.beginPath(); ctx.moveTo(0, Y); ctx.lineTo(W, Y); ctx.stroke();
+        }
+
+        // Structures.
+        ctx.fillStyle = '#5fd0ff';
+        ctx.shadowColor = '#5fd0ff';
+        ctx.shadowBlur = 6;
+        for (const wl of placed) {
+            const s = Math.max(3, (wl.size ? wl.size.x : 1) * scale);
+            ctx.fillRect(toX(wl.position.x) - s / 2, toY(wl.position.z) - s / 2, s, s);
+        }
+        ctx.shadowBlur = 0;
+
+        // Nether Portal landmark.
+        if (ws.netherPortal) {
+            this._drawNetherMarker(ctx, toX(ws.netherPortal.x), toY(ws.netherPortal.z), 7, true);
+        }
+
+        // Player arrow (local +x aligned to world forward).
+        const rot = this.characterRotation || 0;
+        ctx.save();
+        ctx.translate(toX(px), toY(pz));
+        ctx.rotate(Math.atan2(Math.cos(rot), Math.sin(rot)));
+        ctx.fillStyle = '#ffd28a';
+        ctx.beginPath();
+        ctx.moveTo(10, 0); ctx.lineTo(-7, 7); ctx.lineTo(-7, -7); ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
+        ctx.restore();
+
+        // North marker.
+        ctx.fillStyle = 'rgba(255,255,255,0.7)';
+        ctx.font = '14px "Courier New", monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('N', W / 2, 16);
+
+        const info = document.getElementById('world-map-info');
+        if (info) info.textContent = `Pos ${px.toFixed(0)}, ${pz.toFixed(0)}  ·  Structures: ${placed.length}  ·  Span ~${Math.round(half * 2)}u`;
+    }
+
+    // Invert a map-canvas click to world coords and teleport there.
+    _worldMapClick(e) {
+        const view = this._worldMapView;
+        const canvas = document.getElementById('world-map-canvas');
+        if (!view || !canvas) return;
+        const rect = canvas.getBoundingClientRect();
+        const sx = (e.clientX - rect.left) * (canvas.width / rect.width);
+        const sy = (e.clientY - rect.top) * (canvas.height / rect.height);
+        const worldX = view.cx + (sx - canvas.width / 2) / view.scale;
+        const worldZ = view.cz + (sy - canvas.height / 2) / view.scale;
+        this._teleportTo(worldX, worldZ);
+        this.toggleWorldMap(); // close after warping
+    }
+
+    // Warp the player to a world position, resting on the terrain, and stream
+    // the new surroundings immediately.
+    _teleportTo(x, z) {
+        const y = (this.worldStream && this.worldStream.heightAt) ? this.worldStream.heightAt(x, z) : 0;
+        this.player.position.set(x, y + 1, z);
+        if (this.player.velocity) this.player.velocity.y = 0;
+        if (this.worldStream && this.worldStream.update) this.worldStream.update(0); // build chunks around the new spot
+        if (this.updateCamera) this.updateCamera();
+        this.showMessage(`Teleported to ${x.toFixed(0)}, ${z.toFixed(0)}`);
+        this.audio && this.audio.play && this.audio.play('uiClick');
+    }
+
     // Adds a unit block to the world at `pos`. Factored out so placement
     // (player click) and restore-from-save share the same setup.
     _spawnPlacedBlock(id, pos) {
@@ -1365,7 +1667,9 @@ class Game3D {
         const blocks = Object.entries(this.BLOCK_DEFS || {}).map(([id, b]) => ({
             id, category: 'block', icon: (this.blockThumbs && this.blockThumbs[id]) || '🧱', name: b.name
         }));
-        return { weapons, consumables, blocks, all: [...weapons, ...consumables, ...blocks] };
+        // Tools are utility "modes" (like the jetpack) rather than weapons/drops.
+        const tools = [{ id: 'pickaxe', category: 'tool', icon: '⛏️', name: 'Pickaxe' }];
+        return { weapons, consumables, blocks, tools, all: [...weapons, ...consumables, ...blocks, ...tools] };
     }
 
     getSpeedBoostStock() {
@@ -1374,6 +1678,7 @@ class Game3D {
 
     // How many of `id` does the player currently own/have stocked?
     getItemCount(id) {
+        if (id === 'pickaxe') return this.activeModeId === 'open_world' ? 1 : 0;
         if (this.WEAPON_STATS[id]) return this.player.weapons.includes(id) ? 1 : 0;
         if (this.BLOCK_DEFS && this.BLOCK_DEFS[id]) {
             return (this.inventory.blocks && this.inventory.blocks[id]) || 0;
@@ -1391,6 +1696,7 @@ class Game3D {
     }
 
     isItemOwned(id) {
+        if (id === 'pickaxe') return this.activeModeId === 'open_world';
         if (id === 'speed') {
             return this.getSpeedBoostStock() > 0 || (this.powerUps.speedBoostTimer || 0) > 0;
         }
@@ -2118,8 +2424,10 @@ class Game3D {
         const inFPV = this.viewMode === 'fpv';
         const inPlay = this.gameMode === 'play';
         // Block placement mode hides all weapon viewmodels — the ghost cube is the
-        // active "weapon" while armed.
-        const blockArmed = !!this.activeBlockId;
+        // active "weapon" while armed. The open-world pickaxe likewise replaces
+        // the held weapon with its own viewmodel (managed by WorldStream).
+        const blockArmed = !!this.activeBlockId
+            || (this.activeModeId === 'open_world' && this.owPickaxeEquipped);
 
         // ---- Melee viewmodels (all melee weapons share the swing animation; only the active one is visible) ----
         const meleeWeaponId = this.player.weapons[this.player.currentWeaponIndex];
@@ -6161,6 +6469,9 @@ class Game3D {
         for (let i = this.playMode.enemies.length - 1; i >= 0; i--) {
             const e = this.playMode.enemies[i];
             const ud = e.userData;
+            // Open-world animals are passive mobs driven by WorldStream — they
+            // collide and can be hit/killed, but run no chase/attack AI here.
+            if (ud.isAnimal) continue;
             const posX0 = e.position.x;
             const posZ0 = e.position.z;
             // Tick contact damage cooldown so goblins can read "i hit them" once per encounter.
@@ -6340,10 +6651,12 @@ class Game3D {
         // Enemy ↔ enemy: split overlap, weighted by mass; never nudge into walls.
         for (let i = 0; i < n; i++) {
             const a = list[i];
+            if (a.userData.isAnimal) continue; // WorldStream owns animal movement
             const ar = (a.userData.hitRadius || 0.6);
             const am = Math.max(0.5, (a.userData.hpMax || 50) / 80);
             for (let j = i + 1; j < n; j++) {
                 const b = list[j];
+                if (b.userData.isAnimal) continue;
                 const br = (b.userData.hitRadius || 0.6);
                 const r = ar + br;
                 const dx = b.position.x - a.position.x;
@@ -6704,6 +7017,12 @@ class Game3D {
     }
 
     handlePlayClick(event) {
+        if (this._worldMapOpen) return;
+        // Open-world pickaxe mines instead of attacking/placing.
+        if (this.activeModeId === 'open_world' && this.owPickaxeEquipped) {
+            this.mineTarget();
+            return;
+        }
         // Block placement takes precedence over weapon use when armed.
         if (this.activeBlockId) {
             this.placeActiveBlock();
@@ -8436,6 +8755,18 @@ class Game3D {
         document.addEventListener('keydown', (event) => {
             this.keys[event.code] = true;
 
+            // World map (K) — handled before shouldBlockInput so it can also
+            // close itself while the modal is up. Esc closes it too.
+            if (event.code === 'KeyK' && !event.repeat && this.activeModeId === 'open_world'
+                && (this._worldMapOpen || !this.modalOpen) && !this.isDrawerOpen) {
+                this.toggleWorldMap();
+                return;
+            }
+            if (event.code === 'Escape' && this._worldMapOpen) {
+                this.toggleWorldMap();
+                return;
+            }
+
             if (this.shouldBlockInput(event)) {
                 return;
             }
@@ -8519,6 +8850,36 @@ class Game3D {
                     event.preventDefault();
                     this.tryUseFocusedCrate();
                 }
+            }
+
+            // F: toggle creative flight (open world only — flags aren't used
+            // there). Returns before the flag handler so there's no conflict.
+            if (event.code === 'KeyF' && !event.repeat && this.activeModeId === 'open_world'
+                && !this.modalOpen && !this.isDrawerOpen) {
+                this.flyMode = !this.flyMode;
+                this.player.velocity.y = 0;
+                if (this.flyMode) this.player.onGround = false;
+                this.showMessage(this.flyMode ? 'Fly mode ON — Space up, Shift down' : 'Fly mode OFF');
+                this.audio && this.audio.play && this.audio.play('uiClick');
+                return;
+            }
+
+            // B: cycle explore speed (open world only) — 1× → 2× → 4×.
+            if (event.code === 'KeyB' && !event.repeat && this.activeModeId === 'open_world'
+                && !this.modalOpen && !this.isDrawerOpen) {
+                const steps = [1, 2, 4];
+                const next = steps[(steps.indexOf(this.exploreSpeedMult) + 1) % steps.length];
+                this.exploreSpeedMult = next;
+                this.showMessage(`Explore speed ${next}×`);
+                this.audio && this.audio.play && this.audio.play('uiClick');
+                return;
+            }
+
+            // C: toggle the pickaxe (open world only). When equipped, click mines.
+            if (event.code === 'KeyC' && !event.repeat && this.activeModeId === 'open_world'
+                && !this.modalOpen && !this.isDrawerOpen) {
+                this.toggleOwPickaxe();
+                return;
             }
 
             // Place flag in play mode or fall back to indicator toggle
@@ -9005,7 +9366,10 @@ class Game3D {
     }
 
     getSpeedBoostMultiplier() {
-        return (this.powerUps.speedBoostTimer > 0) ? (this.SPEED_BOOST_MOVE_MULT || 1.45) : 1;
+        const boost = (this.powerUps.speedBoostTimer > 0) ? (this.SPEED_BOOST_MOVE_MULT || 1.45) : 1;
+        // Open-world explore speed stacks on top of any power-up boost.
+        const explore = (this.activeModeId === 'open_world') ? (this.exploreSpeedMult || 1) : 1;
+        return boost * explore;
     }
 
     tickSpeedBoost(deltaTime) {
@@ -9036,7 +9400,9 @@ class Game3D {
         }
 
         const speedMultiplier = this.getSpeedBoostMultiplier();
-        const speed = 10 * speedMultiplier;
+        const inWater = this._inWater();
+        const waterScale = inWater ? 0.55 : 1; // slower swimming
+        const speed = 10 * speedMultiplier * waterScale;
         const jumpForce = 15;
         const gravity = -30;
 
@@ -9082,7 +9448,7 @@ class Game3D {
                 }
             }
             if (direction.lengthSq() > 0) direction.normalize();
-            const moveSpeed = this.playMode.moveSpeed * speedMultiplier * (this.player.ducked ? 0.45 : 1);
+            const moveSpeed = this.playMode.moveSpeed * speedMultiplier * waterScale * (this.player.ducked ? 0.45 : 1);
             const desiredVX = direction.x * moveSpeed;
             const desiredVZ = direction.z * moveSpeed;
             const curVX = this.player.velocity.x;
@@ -9199,6 +9565,28 @@ class Game3D {
         // Space behaves like a jump unless the jetpack is explicitly armed AND
         // has fuel. This keeps weapons firable mid-flight (mouse only) and lets
         // the player jump normally when they're not in jetpack mode.
+        if (this.flyMode) {
+            // Creative flight: Space ascends, Shift/Ctrl descends, hover when
+            // neither is held. No gravity — but checkWallCollisionY / horizontal
+            // collision below still keep walls solid.
+            const flySpeed = 14 * (this.exploreSpeedMult || 1);
+            let vy = 0;
+            if (this.keys['Space']) vy += 1;
+            if (this.keys['ShiftLeft'] || this.keys['ShiftRight'] || this.keys['ControlLeft']) vy -= 1;
+            this.player.velocity.y = vy * flySpeed;
+            this.player.ducked = false; // Shift means "descend" while flying
+            this.player.onGround = false;
+            this.isJetpackActive = false;
+        } else if (inWater) {
+            // Swimming: buoyant. Space rises, Shift/Ctrl dives, slow sink otherwise.
+            let vy = -1.2;
+            if (this.keys['Space']) vy = 7;
+            else if (this.keys['ShiftLeft'] || this.keys['ShiftRight'] || this.keys['ControlLeft']) vy = -7;
+            this.player.velocity.y = vy;
+            this.player.ducked = false;
+            this.player.onGround = false;
+            this.isJetpackActive = false;
+        } else {
         const jetpackReady = this.jetpackArmed && this.powerUps.jetpackFuel > 0;
 
         if (this.keys['Space'] && this.player.onGround && !jetpackReady) {
@@ -9245,7 +9633,8 @@ class Game3D {
             // (e.g., just disarmed) so particle generation stops cleanly.
             this.jetpackThrust = Math.max(this.jetpackThrust - deltaTime * 2, 0);
         }
-        
+        } // end !flyMode
+
         // Vertical only — horizontal was already applied above for play mode.
         this.player.position.y += this.player.velocity.y * deltaTime;
 
@@ -9264,6 +9653,7 @@ class Game3D {
         if (this.gameMode === 'play' && this.playMode.enemies) {
             for (const enemy of this.playMode.enemies) {
                 const ud = enemy.userData;
+                if (ud.isAnimal) continue; // passive — never attacks the player
                 if (ud.contactCdT > 0) continue;
                 if (ud.aiKind === 'slam') continue;
                 if (ud.attackWindupT > 0) continue; // already winding up
@@ -9299,8 +9689,11 @@ class Game3D {
 
         this.checkWallCollisionY();
 
-        if (this.player.position.y <= 0) {
-            this.player.position.y = 0;
+        // Floor is y=0 everywhere except the open world, where it follows the
+        // streamed terrain height under the player (rolling hills).
+        const floorY = this._groundHeightAt(this.player.position.x, this.player.position.z);
+        if (this.player.position.y <= floorY) {
+            this.player.position.y = floorY;
             this.player.velocity.y = 0;
             this.player.onGround = true;
         }
@@ -9958,12 +10351,18 @@ class Game3D {
         const wrap = document.getElementById('minimap-wrap');
         const canvas = document.getElementById('minimap');
         if (!wrap || !canvas) return;
-        // Minimap is intentionally hidden in maze/play mode — the on-screen
-        // direction indicator + objective banner carry navigation by themselves.
-        wrap.style.display = 'none';
-        return;
+        // The map is only used in the open world (infinite → auto-fit to the
+        // player + their structures). Other modes keep it hidden.
+        if (this.activeModeId !== 'open_world') { wrap.style.display = 'none'; return; }
+        wrap.style.display = 'block';
 
-        // Throttle to ~10 fps to save cycles
+        // Keep the open full-screen map current (throttled).
+        if (this._worldMapOpen) {
+            this._wmFrame = ((this._wmFrame || 0) + 1) % 12;
+            if (this._wmFrame === 0) this.renderWorldMap();
+        }
+
+        // Throttle to ~10 fps to save cycles.
         this._mmFrame = ((this._mmFrame || 0) + 1) % 6;
         if (this._mmFrame !== 0 && this._mmDrawn) return;
         this._mmDrawn = true;
@@ -9971,78 +10370,106 @@ class Game3D {
         const ctx = canvas.getContext('2d');
         const w = canvas.width, h = canvas.height;
         ctx.clearRect(0, 0, w, h);
-        ctx.fillStyle = 'rgba(0,0,0,0.55)';
+        ctx.fillStyle = 'rgba(8,18,12,0.62)';
         ctx.fillRect(0, 0, w, h);
 
-        const bounds = this.getMazeBounds ? this.getMazeBounds() : { minX:-50, maxX:50, minZ:-50, maxZ:50 };
-        const bw = bounds.maxX - bounds.minX;
-        const bh = bounds.maxZ - bounds.minZ;
-        const pad = 4;
-        const sx = (w - pad*2) / Math.max(1, bw);
-        const sz = (h - pad*2) / Math.max(1, bh);
-        const toX = (x) => pad + (x - bounds.minX) * sx;
-        const toY = (z) => pad + (z - bounds.minZ) * sz;
+        const px = this.player.position.x, pz = this.player.position.z;
 
-        // Walls
-        ctx.fillStyle = 'rgba(255,179,71,0.45)';
-        if (this.walls && this.walls.length) {
-            for (const w0 of this.walls) {
-                const wx = toX(w0.position.x - w0.size.x/2);
-                const wy = toY(w0.position.z - w0.size.z/2);
-                const ww = Math.max(1, w0.size.x * sx);
-                const wh = Math.max(1, w0.size.z * sz);
-                ctx.fillRect(wx, wy, ww, wh);
+        // Collect placed structures and compute a view box that holds them all
+        // plus the player, with padding and a minimum radius so it isn't over-
+        // zoomed when you've built little.
+        const placed = [];
+        let minX = px, maxX = px, minZ = pz, maxZ = pz;
+        for (const wl of this.walls) {
+            if (wl && wl.placed && wl.position) {
+                placed.push(wl);
+                if (wl.position.x < minX) minX = wl.position.x;
+                if (wl.position.x > maxX) maxX = wl.position.x;
+                if (wl.position.z < minZ) minZ = wl.position.z;
+                if (wl.position.z > maxZ) maxZ = wl.position.z;
+            }
+        }
+        const cx = (minX + maxX) / 2, cz = (minZ + maxZ) / 2;
+        let half = Math.max(60, Math.max(maxX - minX, maxZ - minZ) / 2 + 12);
+        half = Math.max(half, Math.abs(px - cx) + 8, Math.abs(pz - cz) + 8);
+        const pad = 6;
+        const scale = (Math.min(w, h) - pad * 2) / (half * 2);
+        const toX = (x) => w / 2 + (x - cx) * scale;
+        const toY = (z) => h / 2 + (z - cz) * scale;
+
+        // Live terrain + water background (oceans, coastlines, the deep sea).
+        const ws = this.worldStream;
+        if (ws && ws.mapColorAt) {
+            const CP = 4;
+            for (let sy = 0; sy < h; sy += CP) {
+                for (let sx = 0; sx < w; sx += CP) {
+                    const wx = cx + (sx + CP / 2 - w / 2) / scale;
+                    const wz = cz + (sy + CP / 2 - h / 2) / scale;
+                    ctx.fillStyle = '#' + ('000000' + ws.mapColorAt(wx, wz).toString(16)).slice(-6);
+                    ctx.fillRect(sx, sy, CP, CP);
+                }
             }
         }
 
-        // Start / End markers
-        if (this.levelStartWorld) {
-            ctx.fillStyle = '#7fff7f';
-            ctx.fillRect(toX(this.levelStartWorld.x) - 3, toY(this.levelStartWorld.z) - 3, 6, 6);
-        }
-        if (this.levelEndWorld) {
-            ctx.fillStyle = '#ff5050';
-            ctx.fillRect(toX(this.levelEndWorld.x) - 3, toY(this.levelEndWorld.z) - 3, 6, 6);
+        // Faint world props (trees/rocks) for context.
+        ctx.fillStyle = 'rgba(120,170,120,0.22)';
+        for (const wl of this.walls) {
+            if (!wl || wl.placed || !wl.position) continue;
+            ctx.fillRect(toX(wl.position.x) - 1, toY(wl.position.z) - 1, 2, 2);
         }
 
-        // Pickups
-        if (this.pickups && this.pickups.length) {
-            ctx.fillStyle = '#66ffcc';
-            for (const p of this.pickups) {
-                ctx.fillRect(toX(p.position.x) - 1.5, toY(p.position.z) - 1.5, 3, 3);
-            }
-        }
-
-        // Enemies
+        // Animals.
         if (this.playMode && this.playMode.enemies) {
-            ctx.fillStyle = '#ff4444';
+            ctx.fillStyle = 'rgba(255,207,90,0.85)';
             for (const e of this.playMode.enemies) {
-                ctx.beginPath();
-                ctx.arc(toX(e.position.x), toY(e.position.z), 2.5, 0, Math.PI * 2);
-                ctx.fill();
+                if (!e.userData || !e.userData.isAnimal) continue;
+                ctx.fillRect(toX(e.position.x) - 1.5, toY(e.position.z) - 1.5, 3, 3);
             }
         }
 
-        // Player (with facing wedge)
-        if (this.player) {
-            const px = toX(this.player.position.x);
-            const py = toY(this.player.position.z);
-            const yaw = this.characterRotation || 0;
-            ctx.save();
-            ctx.translate(px, py);
-            ctx.rotate(-yaw);
-            ctx.fillStyle = '#ffd28a';
-            ctx.beginPath();
-            ctx.moveTo(0, -6);
-            ctx.lineTo(4, 4);
-            ctx.lineTo(-4, 4);
-            ctx.closePath();
-            ctx.fill();
-            ctx.strokeStyle = '#fff';
-            ctx.lineWidth = 1;
-            ctx.stroke();
-            ctx.restore();
+        // Placed structures — bright cyan, the whole point of the map.
+        ctx.fillStyle = '#5fd0ff';
+        ctx.shadowColor = '#5fd0ff';
+        ctx.shadowBlur = 4;
+        for (const wl of placed) {
+            const s = Math.max(2.5, (wl.size ? wl.size.x : 1) * scale);
+            ctx.fillRect(toX(wl.position.x) - s / 2, toY(wl.position.z) - s / 2, s, s);
         }
+        ctx.shadowBlur = 0;
+
+        // Nether Portal landmark.
+        if (ws && ws.netherPortal) {
+            this._drawNetherMarker(ctx, toX(ws.netherPortal.x), toY(ws.netherPortal.z), 4, false);
+        }
+
+        // Player with facing wedge. World forward = (sin,cos) in (x,z); on the
+        // map +x is right and +z is down, so align local +x to that direction.
+        const rot = this.characterRotation || 0;
+        const ppx = toX(px), ppy = toY(pz);
+        ctx.save();
+        ctx.translate(ppx, ppy);
+        ctx.rotate(Math.atan2(Math.cos(rot), Math.sin(rot)));
+        ctx.fillStyle = '#ffd28a';
+        ctx.beginPath();
+        ctx.moveTo(6, 0);
+        ctx.lineTo(-4, 4);
+        ctx.lineTo(-4, -4);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.restore();
+
+        // North marker.
+        ctx.fillStyle = 'rgba(255,255,255,0.6)';
+        ctx.font = '9px "Courier New", monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('N', w / 2, 9);
+
+        // Label shows how many structures are on the map.
+        const label = wrap.querySelector('.mm-label');
+        if (label) label.textContent = placed.length ? `BUILDS · ${placed.length}` : 'MAP';
     }
 
     updateObjectives() {
@@ -10361,7 +10788,8 @@ class Game3D {
             const isOwned = item.type !== 'empty' && this.isItemOwned(item.id);
             const isActiveBlock = !!(this.activeBlockId && this.BLOCK_DEFS && this.BLOCK_DEFS[item.id] && item.id === this.activeBlockId);
             const isSelected = (item.type === 'weapon' && item.id === activeWeaponId) || isActiveBlock;
-            const isArmed = item.id === 'jetpack' && this.jetpackArmed;
+            const isArmed = (item.id === 'jetpack' && this.jetpackArmed)
+                || (item.id === 'pickaxe' && this.owPickaxeEquipped);
             if (isArmed) slot.classList.add('qb-armed');
             if (item.id === 'speed' && this.powerUps.speedBoostTimer > 0) {
                 slot.classList.add('qb-speed-active');
@@ -10439,6 +10867,11 @@ class Game3D {
             this.toggleJetpackArmed();
             return;
         }
+        // Pickaxe is likewise a mode — toggles the open-world mining tool.
+        if (item.id === 'pickaxe') {
+            this.toggleOwPickaxe();
+            return;
+        }
 
         // Block tool: arm placement mode. Left-click then drops a block.
         if (this.BLOCK_DEFS && this.BLOCK_DEFS[item.id]) {
@@ -10470,6 +10903,19 @@ class Game3D {
             this.activateSelectedItem(item.id);
             this.updateInventoryGridUI && this.updateInventoryGridUI();
         }
+    }
+
+    toggleOwPickaxe() {
+        if (this.activeModeId !== 'open_world') {
+            this.showMessage('Pickaxe is for the open world');
+            return;
+        }
+        this.owPickaxeEquipped = !this.owPickaxeEquipped;
+        this.showMessage(this.owPickaxeEquipped ? 'Pickaxe equipped — click to mine' : 'Pickaxe away');
+        this.audio && this.audio.play && this.audio.play('uiClick');
+        this._qbSig = null;
+        this.updateInventoryGridUI && this.updateInventoryGridUI();
+        if (this.isDrawerOpen) this.updateDrawerUI();
     }
 
     toggleJetpackArmed() {
@@ -10552,12 +10998,14 @@ class Game3D {
         const weaponItems = reg.weapons.map(d => ({ ...d, type: 'weapon' }));
         const consumableItems = reg.consumables.map(d => ({ ...d, type: 'item' }));
         const blockItems = (reg.blocks || []).map(d => ({ ...d, type: 'block' }));
+        const toolItems = (reg.tools || []).map(d => ({ ...d, type: 'tool' }));
 
         const ownedOnly = this.drawerFilter === 'owned';
         const filt = (it) => !ownedOnly || this.isItemOwned(it.id);
         const visibleWeapons = weaponItems.filter(filt);
         const visibleConsumables = consumableItems.filter(filt);
         const visibleBlocks = blockItems.filter(filt);
+        const visibleTools = toolItems.filter(filt);
 
         // Stats header
         const hp = this.player.hp ?? 0;
@@ -10619,6 +11067,13 @@ class Game3D {
                             ${visibleBlocks.length ? '' : `<div class="drawer-empty">No blocks${ownedOnly ? ' yet' : ''}.</div>`}
                         </div>
                     </div>
+
+                    <div class="drawer-section">
+                        <h4>Tools <span class="ds-count">${visibleTools.length}/${toolItems.length}</span></h4>
+                        <div id="tool-grid" class="drawer-grid">
+                            ${visibleTools.length ? '' : `<div class="drawer-empty">No tools${ownedOnly ? ' here' : ''}.</div>`}
+                        </div>
+                    </div>
                 </div>
 
                 <div class="drawer-help">
@@ -10674,11 +11129,15 @@ class Game3D {
         const blockGrid = drawer.querySelector('#block-grid');
         if (blockGrid) visibleBlocks.forEach(item => blockGrid.appendChild(this.createDrawerItem(item)));
 
+        const toolGrid = drawer.querySelector('#tool-grid');
+        if (toolGrid) visibleTools.forEach(item => toolGrid.appendChild(this.createDrawerItem(item)));
+
         this.setupDrawerKeyboardNavigation();
     }
 
     // Short effect blurb for an item card (e.g. "+25 HP", "15 dmg · range 2.5")
     itemEffectText(item) {
+        if (item.id === 'pickaxe') return this.owPickaxeEquipped ? 'equipped — click to mine' : 'equip to mine';
         if (item.type === 'weapon') {
             const w = this.WEAPON_STATS[item.id];
             if (!w) return '';
@@ -10719,6 +11178,9 @@ class Game3D {
                 slot.classList.add('qb-selected');
             }
             if (itemId === 'jetpack' && this.jetpackArmed) {
+                slot.classList.add('qb-armed');
+            }
+            if (itemId === 'pickaxe' && this.owPickaxeEquipped) {
                 slot.classList.add('qb-armed');
             }
             if (i === this.selectedDrawerSlot) {
