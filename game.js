@@ -1683,7 +1683,7 @@ class Game3D {
 
     // How many of `id` does the player currently own/have stocked?
     getItemCount(id) {
-        if (id === 'pickaxe') return this.activeModeId === 'open_world' ? 1 : 0;
+        if (id === 'pickaxe') return this._pickaxeMode() ? 1 : 0;
         if (this.WEAPON_STATS[id]) return this.player.weapons.includes(id) ? 1 : 0;
         if (this.BLOCK_DEFS && this.BLOCK_DEFS[id]) {
             return (this.inventory.blocks && this.inventory.blocks[id]) || 0;
@@ -1701,7 +1701,7 @@ class Game3D {
     }
 
     isItemOwned(id) {
-        if (id === 'pickaxe') return this.activeModeId === 'open_world';
+        if (id === 'pickaxe') return this._pickaxeMode();
         if (id === 'speed') {
             return this.getSpeedBoostStock() > 0 || (this.powerUps.speedBoostTimer || 0) > 0;
         }
@@ -2432,7 +2432,7 @@ class Game3D {
         // active "weapon" while armed. The open-world pickaxe likewise replaces
         // the held weapon with its own viewmodel (managed by WorldStream).
         const blockArmed = !!this.activeBlockId
-            || (this.activeModeId === 'open_world' && this.owPickaxeEquipped);
+            || (this._pickaxeMode() && this.owPickaxeEquipped);
 
         // ---- Melee viewmodels (all melee weapons share the swing animation; only the active one is visible) ----
         const meleeWeaponId = this.player.weapons[this.player.currentWeaponIndex];
@@ -7030,7 +7030,8 @@ class Game3D {
             const now = performance.now();
             if (now - (this._planetActAt || 0) < 150) return;
             this._planetActAt = now;
-            if (this.activeBlockId) this.planetWorld.placeBlock();
+            if (this.owPickaxeEquipped) this.planetWorld.mineBlock();
+            else if (this.activeBlockId) this.planetWorld.placeBlock();
             else this.planetWorld.mineBlock();
             return;
         }
@@ -8892,8 +8893,8 @@ class Game3D {
                 return;
             }
 
-            // C: toggle the pickaxe (open world only). When equipped, click mines.
-            if (event.code === 'KeyC' && !event.repeat && this.activeModeId === 'open_world'
+            // C: toggle the pickaxe (open world / planet). When equipped, click mines.
+            if (event.code === 'KeyC' && !event.repeat && this._pickaxeMode()
                 && !this.modalOpen && !this.isDrawerOpen) {
                 this.toggleOwPickaxe();
                 return;
@@ -10934,12 +10935,19 @@ class Game3D {
         }
     }
 
+    // Modes that surface the pickaxe mining tool.
+    _pickaxeMode() {
+        return this.activeModeId === 'open_world' || this.activeModeId === 'planet';
+    }
+
     toggleOwPickaxe() {
-        if (this.activeModeId !== 'open_world') {
+        if (!this._pickaxeMode()) {
             this.showMessage('Pickaxe is for the open world');
             return;
         }
         this.owPickaxeEquipped = !this.owPickaxeEquipped;
+        // Equipping the pickaxe puts away any selected block so a click mines.
+        if (this.owPickaxeEquipped) this.activeBlockId = null;
         this.showMessage(this.owPickaxeEquipped ? 'Pickaxe equipped — click to mine' : 'Pickaxe away');
         this.audio && this.audio.play && this.audio.play('uiClick');
         this._qbSig = null;

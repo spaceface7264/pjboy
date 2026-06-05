@@ -79,6 +79,7 @@
     const FACE_N = 56;         // quad-sphere grid cells per face edge (6·N² tiles)
     const ELEV_STEP = 2;       // elevation quantization (block step height)
     const TILE_H = ELEV_STEP * 3; // tile thickness (overlaps inward to hide cliff gaps)
+    const MAX_DIG = 3;         // max terrain steps you can dig per cell (= one tile depth, walls stay sealed)
     const MAXP = 4000;         // max player-placed blocks
     function colorHex(e) {
         return e < -1.5 ? 0x8a7b50 : e < 1 ? 0xe6d6a8 : e < AMP * 0.45 ? 0x6fae3a
@@ -155,6 +156,8 @@
             this._placedCount = 0;
             this._placedStacks = new Map(); // surface-cell key → stack height
             this._placedKeys = [];          // instanceId → cell key (for mining)
+            this._dugDepth = new Map();     // surface-cell key → terrain steps dug down
+            this._holes = new Set();        // cells dug clean through → open shaft to the core
             this._raycaster = null;
             this._saved = null;
             this.loader = null;
@@ -165,6 +168,11 @@
             this._center = new THREE.Vector3(0, 0, 0);
             this._fwd = new THREE.Vector3(1, 0, 0);
             this._up = new THREE.Vector3(0, 1, 0);
+            this._lastUp = new THREE.Vector3(0, 1, 0); // last good radial up (held through the core singularity)
+            this._inside = false;       // true while in the hollow interior (only flips by passing a hole)
+            this._coreUp = new THREE.Vector3(0, 1, 0);  // frozen camera up while falling through the core (no 180° flip)
+            this._coreFwd = new THREE.Vector3(0, 0, -1); // frozen reference forward (mouse look rotates around it)
+            this._coreYaw0 = 0;                          // yaw at core entry (relative mouse-look baseline)
             this._right = new THREE.Vector3();
             this._dir = new THREE.Vector3();
             this._tang = new THREE.Vector3();
@@ -180,8 +188,11 @@
         // Walkable top radius in a direction = quantized surface + placed stack.
         groundRadius(dir) {
             const c = cellOf(dir);
-            const stack = this._placedStacks.get(c.face + ',' + c.iu + ',' + c.iv) || 0;
-            return R + quantElev(dir) + stack * ELEV_STEP;
+            const key = c.face + ',' + c.iu + ',' + c.iv;
+            if (this._holes.has(key)) return -1; // open shaft to the core — no floor here
+            const stack = this._placedStacks.get(key) || 0;
+            const dug = this._dugDepth.get(key) || 0;
+            return R + quantElev(dir) + (stack - dug) * ELEV_STEP;
         }
 
         // ---- lifecycle ----
@@ -201,6 +212,8 @@
             g.player.velocity.set(0, 0, 0);
             // Seed a tangent forward and sync the yaw tracker.
             const up = this._up.copy(spawn).normalize();
+            this._lastUp.copy(up);
+            this._inside = false;
             this._fwd.set(0, 1, 0);
             if (Math.abs(this._fwd.dot(up)) > 0.9) this._fwd.set(1, 0, 0);
             this._fwd.projectOnPlane(up).normalize();
@@ -357,6 +370,8 @@
             this._placedCount = 0;
             this._placedStacks = new Map();
             this._placedKeys = [];
+            this._dugDepth = new Map();
+            this._holes = new Set();
             this.game.scene.add(this._placedMesh);
 
             // Placement preview wireframe (oriented to the targeted cell).
@@ -398,7 +413,8 @@
             const c = cellOf(hit.point.clone().normalize());
             const fr = cellFrame(c.face, c.iu, c.iv);
             const stack = this._placedStacks.get(fr.key) || 0;
-            const centerR = fr.baseRR + stack * ELEV_STEP + ELEV_STEP / 2; // on top of the stack
+            const dug = this._dugDepth.get(fr.key) || 0;
+            const centerR = fr.baseRR + (stack - dug) * ELEV_STEP + ELEV_STEP / 2; // on top of the (possibly dug) surface
             const basis = new THREE.Matrix4().makeBasis(fr.tU, fr.n, fr.tV);
             const q = new THREE.Quaternion().setFromRotationMatrix(basis);
             const pos = fr.c.clone().multiplyScalar(centerR);
@@ -418,15 +434,49 @@
 
         mineBlock() {
             const hit = this._rayHit();
-            if (!hit || hit.object !== this._placedMesh || hit.instanceId == null) return;
-            const i = hit.instanceId;
-            const key = this._placedKeys[i];
-            if (key != null) {
-                const stack = this._placedStacks.get(key) || 0;
-                if (stack > 0) this._placedStacks.set(key, stack - 1);
+            if (!hit || hit.instanceId == null) return;
+            // A player-placed block takes priority (it's what the ray hits first).
+            if (hit.object === this._placedMesh) {
+                const i = hit.instanceId;
+                const key = this._placedKeys[i];
+                if (key != null) {
+                    const stack = this._placedStacks.get(key) || 0;
+                    if (stack > 0) this._placedStacks.set(key, stack - 1);
+                }
+                this._placedMesh.setMatrixAt(i, new THREE.Matrix4().makeScale(0, 0, 0)); // hide
+                this._placedMesh.instanceMatrix.needsUpdate = true;
+                this.game.audio && this.game.audio.play && this.game.audio.play('swordHit');
+                return;
             }
-            this._placedMesh.setMatrixAt(i, new THREE.Matrix4().makeScale(0, 0, 0)); // hide
-            this._placedMesh.instanceMatrix.needsUpdate = true;
+            // Otherwise dig the planet surface itself, one step down at this cell.
+            if (hit.object === this._planet) this._digTerrain(hit.instanceId);
+        }
+
+        // Lower one terrain cell by a block-step (exposes dirt then stone).
+        _digTerrain(inst) {
+            const key = this._cellKeyByInstance[inst];
+            if (key == null || this._holes.has(key)) return;
+            const parts = key.split(',');
+            const fr = cellFrame(+parts[0], +parts[1], +parts[2]);
+            const dug = this._dugDepth.get(key) || 0;
+            if (dug >= MAX_DIG) {
+                // Break clean through the shell — open a shaft to the hollow core.
+                this._holes.add(key);
+                this._planet.setMatrixAt(inst, new THREE.Matrix4().makeScale(0, 0, 0));
+                this._planet.instanceMatrix.needsUpdate = true;
+                this.game.audio && this.game.audio.play && this.game.audio.play('explosion');
+                return;
+            }
+            const nd = dug + 1;
+            this._dugDepth.set(key, nd);
+            const q = new THREE.Quaternion().setFromRotationMatrix(
+                new THREE.Matrix4().makeBasis(fr.tU, fr.n, fr.tV));
+            const pos = fr.c.clone().multiplyScalar(fr.baseRR - TILE_H / 2 - nd * ELEV_STEP);
+            const m = new THREE.Matrix4().compose(pos, q, new THREE.Vector3(fr.cellW, TILE_H, fr.cellW));
+            this._planet.setMatrixAt(inst, m);
+            this._planet.instanceMatrix.needsUpdate = true;
+            this._planet.setColorAt(inst, new THREE.Color(nd <= 1 ? 0x6b4f2a : 0x70726f)); // dirt → stone
+            if (this._planet.instanceColor) this._planet.instanceColor.needsUpdate = true;
             this.game.audio && this.game.audio.play && this.game.audio.play('swordHit');
         }
 
@@ -572,8 +622,9 @@
             const center = this._center;
 
             const up = this._up.copy(p).sub(center);
-            const dist = up.length() || 1;
-            up.divideScalar(dist);
+            const dist = up.length();
+            if (dist > 0.5) { up.divideScalar(dist); this._lastUp.copy(up); }
+            else { up.copy(this._lastUp); } // near the core radial-up is undefined — hold the last good one
 
             // Parallel-transport the forward tangent + apply mouse yaw delta.
             const yaw = g.characterRotation || 0;
@@ -616,17 +667,43 @@
                 this._onGround = false;
             }
 
-            // Integrate + ground clamp.
+            // Integrate, then resolve against the shell. The shell is solid from
+            // BOTH sides; a dug HOLE cell is the only passage. `_inside` tracks
+            // whether we're in the hollow interior and only flips while over a hole,
+            // so solid cells block in EVERY mode (walk, fall, fly): from outside you
+            // stand on the outer face, from inside you stop at the inner face. This
+            // stops flying out through rock and the "toggle fly → snap outside" jump.
             p.addScaledVector(vel, dt);
-            const dir = this._dir.copy(p).sub(center).normalize();
-            const groundR = this.groundRadius(dir);
-            if (!g.flyMode && p.length() <= groundR) {
-                p.copy(dir).multiplyScalar(groundR);
-                const inward = dir.dot(vel);
-                if (inward < 0) vel.addScaledVector(dir, -inward); // kill sink, keep slide
-                this._onGround = true;
-            } else if (!g.flyMode) {
-                this._onGround = false;
+            const dir = this._dir.copy(p).sub(center);
+            const pr = dir.length() || 1;
+            dir.divideScalar(pr);
+            const outerR = this.groundRadius(dir); // -1 over an open shaft
+            this._onGround = false;
+
+            if (outerR > 0) {                       // solid cell
+                if (this._inside) {                 // hollow side → blocked at the inner face
+                    const innerR = outerR - TILE_H;
+                    if (pr > innerR) {
+                        p.copy(dir).multiplyScalar(innerR);
+                        const pen = dir.dot(vel);
+                        if (pen > 0) vel.addScaledVector(dir, -pen); // kill push into the shell
+                    }
+                } else if (pr < outerR) {           // outside → stand / land / climb on the outer face
+                    p.copy(dir).multiplyScalar(outerR);
+                    const inward = dir.dot(vel);
+                    if (inward < 0) vel.addScaledVector(dir, -inward);
+                    if (!g.flyMode) this._onGround = true;
+                }
+            } else {                                // open shaft — the only crossing of the shell
+                const surfR = R + quantElev(dir);
+                if (!this._inside && pr < surfR - TILE_H) {
+                    this._inside = true;            // entered the interior — freeze the camera up
+                    this._coreUp.copy(up);
+                    this._coreFwd.copy(this._fwd);
+                    this._coreYaw0 = g.characterRotation || 0;
+                } else if (this._inside && pr > surfR + 1) {
+                    this._inside = false;           // climbed/flew back out into the sky
+                }
             }
 
             // Orient the player model to stand on the surface.
@@ -644,7 +721,32 @@
             const g = this.game;
             const p = g.player.position;
             const center = this._center;
-            const up = this._up.copy(p).sub(center).normalize();
+            const cam0 = g.camera;
+
+            // Inside the planet: hold the up vector steady (the radial up would
+            // otherwise flip 180° crossing the center) but still let the mouse
+            // rotate the look around it.
+            if (this._inside) {
+                const fu = this._coreUp;
+                const yaw = (g.characterRotation || 0) - this._coreYaw0;
+                const pitch = g.fpvPitch || 0;
+                const hfwd = this._coreFwd.clone().applyAxisAngle(fu, yaw);
+                const look = hfwd.clone().multiplyScalar(Math.cos(pitch)).addScaledVector(fu, Math.sin(pitch));
+                cam0.up.copy(fu);
+                if (g.viewMode === 'fpv') {
+                    const eye = p.clone().addScaledVector(fu, EYE);
+                    cam0.position.copy(eye);
+                    cam0.lookAt(eye.clone().add(look));
+                } else {
+                    cam0.position.copy(p).addScaledVector(fu, 4).addScaledVector(hfwd, -12);
+                    cam0.lookAt(p);
+                }
+                return;
+            }
+
+            const up = this._up.copy(p).sub(center);
+            const ud = up.length();
+            if (ud > 0.5) up.divideScalar(ud); else up.copy(this._lastUp); // steady view through the core
             const fwd = this._right.copy(this._fwd).projectOnPlane(up).normalize(); // reuse scratch
             const pitch = g.fpvPitch || 0;
             const cam = g.camera;

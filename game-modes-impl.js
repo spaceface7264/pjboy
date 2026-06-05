@@ -1549,8 +1549,8 @@
                 all: [...tools, ...reg.blocks]
             };
         }
-        // The open world surfaces the pickaxe tool; other play modes don't.
-        const tools = (this.activeModeId === 'open_world') ? (reg.tools || []) : [];
+        // The open world and tiny planet surface the pickaxe tool; other play modes don't.
+        const tools = this._pickaxeMode && this._pickaxeMode() ? (reg.tools || []) : [];
         return {
             weapons: reg.weapons,
             consumables: reg.consumables,
