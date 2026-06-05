@@ -2331,7 +2331,6 @@
             if (g.cheeseFloor) g.cheeseFloor.visible = false;
             if (g.crystalRoof) g.crystalRoof.visible = false;
             if (g.gridHelper) g.gridHelper.visible = false;
-            g.roofY = null;
 
             this._saved = {
                 skyMat: g.sky ? g.sky.material : null,
@@ -2340,7 +2339,11 @@
                 fogNear: g.scene.fog ? g.scene.fog.near : null,
                 fogFar: g.scene.fog ? g.scene.fog.far : null,
                 groundColor: g.ground && g.ground.material ? g.ground.material.color.getHex() : null,
+                roofY: g.roofY, // restore so other modes rebuild the ceiling correctly
             };
+            g.roofY = null; // open sky — no ceiling cap on jumps/flight
+
+
 
             // Voxels + water cover the world now; the flat base plane would poke
             // through deep ocean floors, so hide it.
@@ -2400,6 +2403,7 @@
             if (g.crystalRoof) g.crystalRoof.visible = true;
             if (g.gridHelper) g.gridHelper.visible = true;
             if (!s) return;
+            if (s.roofY != null) g.roofY = s.roofY; // so the crystal ceiling rebuilds at the right height
             if (s.skyMat && g.sky) g.sky.material = s.skyMat; // restore flat sky dome
             if (g.scene.fog) {
                 if (s.fogColor != null) g.scene.fog.color.setHex(s.fogColor);
