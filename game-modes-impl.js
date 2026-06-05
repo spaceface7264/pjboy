@@ -1354,6 +1354,9 @@
         if (this.activeModeId === 'open_world' && this.worldStream) {
             this.worldStream.update(deltaTime);
         }
+        if (this.activeModeId === 'planet' && this.planetWorld) {
+            this.planetWorld.update(deltaTime);
+        }
         if (this.gameMode === 'creator') {
             this.updateCreatorMode(deltaTime);
         }

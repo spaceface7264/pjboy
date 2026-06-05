@@ -1218,6 +1218,11 @@ class Game3D {
     }
 
     updatePlacementGhost() {
+        // The planet uses a center-screen surface raycast, not the flat ghost cube.
+        if (this.activeModeId === 'planet') {
+            if (this.placementGhost) this.placementGhost.visible = false;
+            return;
+        }
         const id = this.activeBlockId;
         const showGhost = !!id && this.gameMode === 'play' && !this.isDrawerOpen
             && this.player && this.player.position && this.camera;
@@ -7018,6 +7023,17 @@ class Game3D {
 
     handlePlayClick(event) {
         if (this._worldMapOpen) return;
+        // Tiny Planet: build (block selected) or mine on the surface.
+        if (this.activeModeId === 'planet' && this.planetWorld) {
+            // handlePlayClick fires on BOTH mousedown and click for one physical
+            // click — debounce so a single click places/mines exactly once.
+            const now = performance.now();
+            if (now - (this._planetActAt || 0) < 150) return;
+            this._planetActAt = now;
+            if (this.activeBlockId) this.planetWorld.placeBlock();
+            else this.planetWorld.mineBlock();
+            return;
+        }
         // Open-world pickaxe mines instead of attacking/placing.
         if (this.activeModeId === 'open_world' && this.owPickaxeEquipped) {
             this.mineTarget();
@@ -8852,9 +8868,10 @@ class Game3D {
                 }
             }
 
-            // F: toggle creative flight (open world only — flags aren't used
+            // F: toggle creative flight (open world + planet — flags aren't used
             // there). Returns before the flag handler so there's no conflict.
-            if (event.code === 'KeyF' && !event.repeat && this.activeModeId === 'open_world'
+            if (event.code === 'KeyF' && !event.repeat
+                && (this.activeModeId === 'open_world' || this.activeModeId === 'planet')
                 && !this.modalOpen && !this.isDrawerOpen) {
                 this.flyMode = !this.flyMode;
                 this.player.velocity.y = 0;
@@ -9399,6 +9416,13 @@ class Game3D {
             return;
         }
 
+        // Tiny Planet mode runs its own spherical (radial-gravity) controller.
+        if (this.activeModeId === 'planet' && this.planetWorld) {
+            this.planetWorld.updatePlayer(deltaTime);
+            this.updateCamera();
+            return;
+        }
+
         const speedMultiplier = this.getSpeedBoostMultiplier();
         const inWater = this._inWater();
         const waterScale = inWater ? 0.55 : 1; // slower swimming
@@ -9909,6 +9933,11 @@ class Game3D {
     }
     
     updateCamera() {
+        // Tiny Planet mode uses a surface-relative (radial-up) camera.
+        if (this.activeModeId === 'planet' && this.planetWorld) {
+            this.planetWorld.updateCamera();
+            return;
+        }
         // Play-mode camera: Isometric or First-Person
         if (this.gameMode === 'play') {
             if (this.viewMode === 'fpv') {

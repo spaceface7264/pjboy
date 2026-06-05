@@ -389,6 +389,7 @@
             // Giant spawn tree with swaying vines.
             this._spawnTree = null;
             this._treeWalls = [];   // per-cube collision/mining entries
+            this._grove = [];       // scenery jungle oaks {group, walls}
             this._vines = [];
             this._treePhase = 0;
             // Fixed Nether Portal landmark (placed near spawn). Read by the maps.
@@ -497,9 +498,15 @@
             if (this._spawnTree && this._spawnTree.parent) g.scene.remove(this._spawnTree);
             this._spawnTree = null;
             this._vines = [];
-            if (this._treeWalls && this._treeWalls.length) {
-                const gone = new Set(this._treeWalls);
-                for (const w of this._treeWalls) g._removeWallFromHash(w);
+            const allTreeWalls = (this._treeWalls || []).slice();
+            for (const t of (this._grove || [])) {
+                if (t.group && t.group.parent) g.scene.remove(t.group);
+                if (t.walls) for (const w of t.walls) allTreeWalls.push(w);
+            }
+            this._grove = [];
+            if (allTreeWalls.length) {
+                const gone = new Set(allTreeWalls);
+                for (const w of allTreeWalls) g._removeWallFromHash(w);
                 g.walls = g.walls.filter((w) => !gone.has(w));
                 this._treeWalls = [];
             }
@@ -1270,12 +1277,14 @@
         // A giant Minecraft-style tree at spawn: blocky tiered wood trunk, a wide
         // flat leaf canopy, and leaf-cube curtains draping down (jungle vibes).
         // Built entirely from 1×1 cubes via two InstancedMeshes (wood + leaves).
-        _buildSpawnTree(x, z) {
-            if (this._spawnTree) return;
-            this._ensureVoxelAssets(); // need the shared 1×1 cube geometry
+        _buildOakTree(x, z, opts) {
+            opts = opts || {};
+            const mineable = !!opts.mineable, hs = opts.heightScale || 1, singleWood = !!opts.singleWood;
+            this._ensureVoxelAssets(); // shared 1×1 cube geometry + materials
             const g = this.game;
             x = Math.round(x); z = Math.round(z);
             const baseY = surfaceY(x, z);
+            const localWalls = [];
 
             if (!this._treeWoodMats) {
                 // One varied bark texture: per-column tone, random grooves, knots,
@@ -1334,7 +1343,7 @@
                 this._treeFlowerMat = new THREE.MeshLambertMaterial({ color: 0xd86fce });
             }
 
-            const rng = mulberry32(20260605);   // stable but irregular
+            const rng = mulberry32(opts.seed || 1);
             const wood = [], leaves = [];
             const occ = new Set();              // dedupe overlapping cubes
             const put = (arr, cx, cy, cz) => {
@@ -1348,10 +1357,10 @@
             const czAt = (yy) => Math.cos(yy * 0.17 + 1.3) * 1.2;
 
             // Round, jittered, leaning trunk with a ragged edge.
-            const TH = 18;
+            const TH = Math.max(6, Math.round(18 * hs));
             for (let yy = 0; yy < TH; yy++) {
                 const t = yy / TH;
-                const r = 4.2 * (1 - t) + 1.6 * t + (rng() - 0.5) * 0.5;
+                const r = (4.2 * (1 - t) + 1.6 * t) * hs + (rng() - 0.5) * 0.5;
                 const ox = cxAt(yy), oz = czAt(yy);
                 const R = Math.ceil(r) + 1;
                 for (let dx = -R; dx <= R; dx++) {
@@ -1377,12 +1386,12 @@
             // Bulbous leaf clumps held up by branches (jungle-tree silhouette).
             const topX = cxAt(TH - 1), topZ = czAt(TH - 1);
             const cy0 = TH;
-            const clumps = [{ cx: topX, cy: cy0 + 4, cz: topZ, r: 5 }];
+            const clumps = [{ cx: topX, cy: cy0 + 4 * hs, cz: topZ, r: 5 * hs }];
             const NC = 6 + (rng() * 3 | 0);
             for (let i = 0; i < NC; i++) {
                 const a = (i / NC) * Math.PI * 2 + (rng() - 0.5) * 0.7;
-                const rad = 4 + rng() * 6;
-                clumps.push({ cx: topX + Math.cos(a) * rad, cy: cy0 + 1 + (rng() * 5 | 0), cz: topZ + Math.sin(a) * rad, r: 3 + rng() * 2 });
+                const rad = (4 + rng() * 6) * hs;
+                clumps.push({ cx: topX + Math.cos(a) * rad, cy: cy0 + (1 + rng() * 5) * hs, cz: topZ + Math.sin(a) * rad, r: (3 + rng() * 2) * hs });
             }
             // Wood branches from the trunk top out to each clump.
             for (const cl of clumps) {
@@ -1422,9 +1431,8 @@
                 }
             }
 
-            this._treeWalls = [];
-            // Register a per-cube collision/mining entry that points back at its
-            // InstancedMesh slot, so a single hit hides just that block.
+            // Per-cube collision/mining entry (only for mineable trees) pointing
+            // back at its InstancedMesh slot, so a hit hides just that block.
             const regWall = (im, ii, wx, wy, wz) => {
                 const we = {
                     position: new THREE.Vector3(wx, wy, wz),
@@ -1433,7 +1441,7 @@
                 };
                 g.walls.push(we);
                 g._addWallToHash(we);
-                this._treeWalls.push(we);
+                localWalls.push(we);
             };
 
             // Position-only instanced mesh with per-cube tone jitter (leaves).
@@ -1445,7 +1453,7 @@
                     m.makeTranslation(positions[i][0], positions[i][1], positions[i][2]);
                     im.setMatrixAt(i, m);
                     if (jit) { const b = 1 - jit + rng() * jit * 2; c.setRGB(b, b, b); im.setColorAt(i, c); }
-                    regWall(im, i, positions[i][0], positions[i][1], positions[i][2]);
+                    if (mineable) regWall(im, i, positions[i][0], positions[i][1], positions[i][2]);
                 }
                 im.instanceMatrix.needsUpdate = true;
                 if (im.instanceColor) im.instanceColor.needsUpdate = true;
@@ -1467,7 +1475,7 @@
                     const b = 0.88 + rng() * 0.2;
                     c.setRGB(b, b, b);
                     im.setColorAt(i, c);
-                    regWall(im, i, it.x, it.y, it.z);
+                    if (mineable) regWall(im, i, it.x, it.y, it.z);
                 }
                 im.instanceMatrix.needsUpdate = true;
                 if (im.instanceColor) im.instanceColor.needsUpdate = true;
@@ -1475,24 +1483,58 @@
             };
 
             const group = new THREE.Group();
-            // Wood: split across the 4 bark variants, each cube randomly oriented.
+            // Wood: split across bark variants (1 for scenery to save draw calls).
             const HALF = Math.PI / 2;
-            const buckets = this._treeWoodMats.map(() => []);
+            const nVar = singleWood ? 1 : this._treeWoodMats.length;
+            const buckets = [];
+            for (let v = 0; v < nVar; v++) buckets.push([]);
             for (const wp of wood) {
-                buckets[rng() * this._treeWoodMats.length | 0].push({
+                buckets[rng() * nVar | 0].push({
                     x: wp[0], y: wp[1], z: wp[2],
-                    // Yaw only — keeps bark grain upright and the rings on top.
-                    rx: 0, ry: (rng() * 4 | 0) * HALF, rz: 0,
+                    rx: 0, ry: (rng() * 4 | 0) * HALF, rz: 0, // yaw only — grain upright
                 });
             }
-            for (let v = 0; v < buckets.length; v++) {
+            for (let v = 0; v < nVar; v++) {
                 if (buckets[v].length) group.add(mkRot(buckets[v], this._treeWoodMats[v]));
             }
             group.add(mkInst(leaves, this._treeLeafMat, 0.12));
             if (flowers.length) group.add(mkInst(flowers, this._treeFlowerMat, 0.1));
             g.scene.add(group);
-            this._spawnTree = group;
-            this._vines = []; // canopy/vines are static blocks now
+
+            // Scenery trees get a single trunk collider (protected from mining).
+            if (!mineable) {
+                const tw = Math.max(3, Math.round(4 * hs));
+                const e = { position: new THREE.Vector3(x, baseY + 0.5 + TH / 2, z), size: { x: tw, y: TH, z: tw }, destructible: false, station: true };
+                g.walls.push(e);
+                g._addWallToHash(e);
+                localWalls.push(e);
+            }
+            return { group, walls: localWalls };
+        }
+
+        // Hero spawn tree (fully mineable) + a jungle grove of scenery oaks.
+        _buildSpawnTree(x, z) {
+            if (this._spawnTree) return;
+            const r = this._buildOakTree(x, z, { seed: 20260605, mineable: true, heightScale: 1 });
+            this._spawnTree = r.group;
+            this._treeWalls = r.walls;
+            this._vines = [];
+            this._buildJungle(x, z);
+        }
+
+        // Scaled-down scenery oaks scattered on land around (cx,cz).
+        _buildJungle(cx, cz) {
+            this._grove = [];
+            for (let i = 0; i < 16; i++) {
+                const a = Math.random() * Math.PI * 2;
+                const rad = 22 + Math.random() * 60;
+                const px = Math.round(cx + Math.cos(a) * rad), pz = Math.round(cz + Math.sin(a) * rad);
+                if (surfaceY(px, pz) <= WATER_Y + 1) continue; // land only
+                const seed = (Math.imul(px, 73856093) ^ Math.imul(pz, 19349663)) >>> 0;
+                this._grove.push(this._buildOakTree(px, pz, {
+                    seed, mineable: false, singleWood: true, heightScale: 0.5 + Math.random() * 0.5,
+                }));
+            }
         }
 
         // Hide one tree cube (used when a block is mined) and drop its entry.
