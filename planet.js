@@ -792,7 +792,17 @@
                 roofVisible: g.crystalRoof ? g.crystalRoof.visible : null,
                 roofY: g.roofY,
                 skyRenderOrder: g.sky ? g.sky.renderOrder : 0,
+                camFar: g.camera ? g.camera.far : 1000,
+                camNear: g.camera ? g.camera.near : 0.1,
             };
+            // Push the far plane out so distant worlds (orbits up to ~9000, plus the
+            // camera's own distance) never clip at far vantages/angles; raise near a
+            // touch to keep depth precision with the much bigger range.
+            if (g.camera) {
+                g.camera.far = 13000;
+                g.camera.near = 0.5;
+                g.camera.updateProjectionMatrix();
+            }
             if (g.sky) {
                 // depthWrite off → the sky is a pure background fill that never occludes
                 // anything by depth (so the far sun, stars, and other worlds stay visible at any
@@ -827,7 +837,11 @@
             if (g.cheeseFloor && s.cheeseVisible != null) g.cheeseFloor.visible = s.cheeseVisible;
             if (g.crystalRoof && s.roofVisible != null) g.crystalRoof.visible = s.roofVisible;
             if (s.roofY != null) g.roofY = s.roofY;
-            if (g.camera) g.camera.up.set(0, 1, 0); // undo radial up-vector
+            if (g.camera) {
+                g.camera.up.set(0, 1, 0); // undo radial up-vector
+                g.camera.far = s.camFar; g.camera.near = s.camNear;
+                g.camera.updateProjectionMatrix();
+            }
         }
 
         // ---- props ----
@@ -917,26 +931,46 @@
         _buildAtmosphere() {
             const g = this.game;
             const a = (this._activeDef && this._activeDef.atm) || [0x6db4ff, 0x8ec6ff, 0xbfe0ff];
-            const c0 = new THREE.Color(a[0]), c1 = new THREE.Color(a[1]), c2 = new THREE.Color(a[2]);
-            // Smooth 3-stop colour gradient across the stack (inner -> outer).
-            const grad = (t) => t < 0.5 ? c0.clone().lerp(c1, t * 2) : c1.clone().lerp(c2, (t - 0.5) * 2);
-            // Many thin shells with a smooth opacity falloff read as a continuous
-            // haze instead of a few hard bands: densest inner sky fading to a faint
-            // upper haze near SOI_INNER.
-            const N = 10, rIn = 1.13, rOut = 1.62;
-            this._atm = [];
-            for (let i = 0; i < N; i++) {
-                const t = i / (N - 1);
-                const r = R * (rIn + (rOut - rIn) * t);
-                const op = 0.042 * Math.pow(1 - t, 1.5) + 0.004;
-                const s = new THREE.Mesh(
-                    new THREE.SphereGeometry(r, 48, 32),
-                    new THREE.MeshBasicMaterial({ color: grad(t), transparent: true, opacity: op, side: THREE.DoubleSide, depthWrite: false })
-                );
-                s.frustumCulled = false;
-                g.scene.add(s);
-                this._atm.push(s);
-            }
+            // One sphere with a fresnel gradient in the shader → a perfectly smooth
+            // haze (no shell silhouettes). Densest toward the limb/horizon, fading to
+            // a faint zenith, with a continuous inner→outer colour blend. A small
+            // base term gives the whole sky a faint tint from the surface.
+            const mat = new THREE.ShaderMaterial({
+                uniforms: {
+                    uInner: { value: new THREE.Color(a[0]) },   // horizon / dense
+                    uOuter: { value: new THREE.Color(a[2]) },   // zenith / faint
+                    uBase: { value: 0.05 },                     // overall sky tint
+                    uIntensity: { value: 0.5 },                 // limb strength
+                    uOffset: { value: 0.92 },                   // how far the glow spreads inward
+                    uPower: { value: 1.7 },                     // falloff sharpness
+                },
+                vertexShader: [
+                    'varying vec3 vNormalV;',
+                    'void main() {',
+                    '  vNormalV = normalize(normalMatrix * normal);',
+                    '  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);',
+                    '}'
+                ].join('\n'),
+                fragmentShader: [
+                    'uniform vec3 uInner; uniform vec3 uOuter;',
+                    'uniform float uBase; uniform float uIntensity; uniform float uOffset; uniform float uPower;',
+                    'varying vec3 vNormalV;',
+                    'void main() {',
+                    '  float d = dot(normalize(vNormalV), vec3(0.0, 0.0, 1.0));',
+                    '  float fres = pow(clamp(uOffset - d, 0.0, 1.0), uPower);',
+                    '  float alpha = clamp(uBase + fres * uIntensity, 0.0, 0.6);',
+                    '  vec3 col = mix(uOuter, uInner, clamp(fres, 0.0, 1.0));',
+                    '  gl_FragColor = vec4(col, alpha);',
+                    '}'
+                ].join('\n'),
+                transparent: true,
+                side: THREE.BackSide,
+                depthWrite: false,
+            });
+            const s = new THREE.Mesh(new THREE.SphereGeometry(R * 1.5, 64, 48), mat);
+            s.frustumCulled = false;
+            g.scene.add(s);
+            this._atm = [s];
         }
 
         // Cloud layer from the Cloud_*.glb models, scattered on a shell above the
@@ -1538,7 +1572,7 @@
                 vel.lerp(want, Math.min(1, 3.5 * dt));
             } else {
                 // Forces: nose thrust, home gravity, a gentle pull near the sister planet.
-                const THRUST = 60, MAXSP = 90;
+                const THRUST = 200, MAXSP = 400; // faster cruise for the now-huge inter-planet gaps
                 if (throttle) vel.addScaledVector(H, throttle * THRUST * dt);
                 vel.addScaledVector(up, -GRAVITY * gravityScale(dist) * dt);
                 if (destDist < this._destRadius * 3.2) {

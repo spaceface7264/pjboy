@@ -143,7 +143,7 @@
             props: true,
             clouds: true,
             atm: [0x6db4ff, 0x8ec6ff, 0xbfe0ff],
-            orbit: { dir: [0.42, 0.82, 0.40], dist: 620 }
+            orbit: { dir: [0.42, 0.82, 0.40], dist: 3200 }
         };
     }
 
@@ -204,7 +204,7 @@
             props: !!biome.lush,
             clouds: rng() < 0.5,
             atm: atm,
-            orbit: { dir: dir, dist: Math.round(lerp(500, 820, rng())) }
+            orbit: { dir: dir, dist: Math.round(lerp(2500, 9000, rng())) }
         };
     }
 
