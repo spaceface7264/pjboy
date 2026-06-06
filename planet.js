@@ -99,10 +99,6 @@
     const MAXP = 4000;         // max player-placed blocks
     const ROCKET_SCALE = 1.8;  // world scale of the rocket landmark
     const ROCKET_LOWEST = -0.6; // model's lowest point (fin/engine tip) before scaling
-    // Sister planet you can fly to once airborne. Lives out past the space edge.
-    const DEST_NAME = 'Ember';
-    const DEST_DIST = 660;     // distance of its center from the home planet's center
-    const DEST_RADIUS = 58;
     const CHARGE_TIME = 1.4;   // seconds of held Space to fully charge a launch
     // The system's star. Its LIGHT comes from very far away (parallel rays, like a
     // real sun); its disk is drawn as a camera-following billboard in that same
@@ -110,29 +106,31 @@
     const SUN_DIST = 100000;        // true distance of the star (light source)
     const SUN_RENDER_DIST = 380;    // where the disk is drawn from the camera (inside the 500 sky)
     const SUN_RADIUS = 16;          // apparent disk radius at the render distance (~2.4°)
-    // Terrain palettes by elevation band (deep → low → mid → high → peak).
-    function palTerra(e) {
-        return e < -1.5 ? 0x8a7b50 : e < 1 ? 0xe6d6a8 : e < AMP * 0.45 ? 0x6fae3a
-            : e < AMP * 0.8 ? 0x8a8d92 : 0xeaf2f7;
-    }
-    function palEmber(e) {       // volcanic / basalt sister world
-        return e < -1.5 ? 0x5a1505 : e < 1 ? 0x7a2a14 : e < AMP * 0.45 ? 0xc1432f
-            : e < AMP * 0.8 ? 0xe07b2c : 0xf0e2c2;
-    }
-    function palGoliath(e) {     // colossal psychedelic world: violet → magenta → toxic green → cyan
-        return e < -1.5 ? 0x241046 : e < 1 ? 0x5e1b86 : e < AMP * 0.45 ? 0xb52db0
-            : e < AMP * 0.8 ? 0x2fe39a : 0xc7f7ff;
-    }
-    let PAL = palTerra;
+    // The walkable worlds — built from the procedural catalog (planetgen.js). The
+    // ACTIVE one builds at the origin; the rest render as distant prop globes at
+    // their `orbit`. Each has its own radius + gravity. The first entry's key is
+    // 'home' (the curated Terra start world).
+    const UNIVERSE_SEED = 13337;
+    const PLANET_COUNT = 12;
+    const PLANETS = {};
+    (function () {
+        var list = (typeof window !== 'undefined' && window.PlanetGen)
+            ? window.PlanetGen.generate(UNIVERSE_SEED, PLANET_COUNT) : [];
+        if (!list.length) { // safety fallback so the mode still works if planetgen is missing
+            list = [{
+                key: 'home', name: 'Terra', R: 90, gravity: 26, noiseScale: 1.9, amp: 15, seaBias: 0.46, seed: 9123,
+                sea: 0x2a6fb0, sky: 0x6fae3a, props: true, clouds: true, atm: [0x6db4ff, 0x8ec6ff, 0xbfe0ff],
+                orbit: { dir: [0.42, 0.82, 0.40], dist: 620 },
+                pal: function (e) {
+                    return e < -1.5 ? 0x8a7b50 : e < 1 ? 0xe6d6a8 : e < AMP * 0.45 ? 0x6fae3a
+                        : e < AMP * 0.8 ? 0x8a8d92 : 0xeaf2f7;
+                }
+            }];
+        }
+        list.forEach(function (d) { PLANETS[d.key] = d; });
+    })();
+    let PAL = PLANETS.home.pal;
     function colorHex(e) { return PAL(e); }
-
-    // The walkable worlds. The ACTIVE one builds at the origin; the rest render as
-    // distant prop globes at their `orbit`. Each has its own radius + gravity.
-    const PLANETS = {
-        home:    { key: 'home',    name: 'Terra',   R: 90,  gravity: 26, noiseScale: 1.9, amp: 15, seaBias: 0.46, seed: 9123, sea: 0x2a6fb0, sky: 0x6fae3a, pal: palTerra,   props: true,  clouds: true,  atm: [0x6db4ff, 0x8ec6ff, 0xbfe0ff], orbit: { dir: [0.42, 0.82, 0.40], dist: 620 } },
-        ember:   { key: 'ember',   name: 'Ember',   R: 70,  gravity: 30, noiseScale: 2.7, amp: 20, seaBias: 0.30, seed: 4477, sea: 0xc23a10, sky: 0xc1432f, pal: palEmber,   props: false, clouds: false, atm: [0xff7a3a, 0xff9a5a, 0xffc79a], orbit: { dir: [-0.65, 0.35, -0.67], dist: 690 } },
-        goliath: { key: 'goliath', name: 'Goliath', R: 175, gravity: 16, noiseScale: 1.3, amp: 40, seaBias: 0.42, seed: 7788, sea: 0x12b39a, sky: 0x9b27b0, pal: palGoliath, props: false, clouds: true,  atm: [0x8a2be2, 0x3fd0c0, 0xc7f7ff], orbit: { dir: [0.30, -0.60, 0.74], dist: 820 } },
-    };
     const PROP_SCALE = 0.5;      // a prop globe's apparent radius = R * PROP_SCALE
     function setActivePlanet(def) {
         R = def.R; GRAVITY = def.gravity;
@@ -270,9 +268,10 @@
             // world renders as a distant prop. One of them is the current flight TARGET.
             this._destCenter = new THREE.Vector3();   // selected target's position
             this._destRadius = 45;                    // selected target's prop radius
-            this._propMeshes = {};                    // key -> prop group (all non-active)
+            this._propMeshes = {};                    // key -> { group, def, cheap, terrain } (all non-active)
             this._activeDef = PLANETS.home;
-            this._targetDef = PLANETS.ember;          // current flight destination
+            // First non-home world is the default flight destination.
+            this._targetDef = PLANETS[Object.keys(PLANETS).find((k) => k !== 'home')] || PLANETS.home;
             this._activeKey = 'home';
             // launch camera hand-off (eased pad -> chase)
             this._camPos = new THREE.Vector3();
@@ -346,7 +345,7 @@
             // Always start on the home world; the others are distant props.
             this._activeDef = PLANETS.home;
             this._activeKey = this._activeDef.key;
-            this._targetDef = PLANETS.ember;
+            this._targetDef = PLANETS[Object.keys(PLANETS).find((k) => k !== this._activeKey)] || PLANETS.home;
             setActivePlanet(this._activeDef);
             this._buildPlanet();
             this._setupScene();
@@ -424,6 +423,8 @@
             if (this._sunMesh && this._sunDir) this._sunMesh.position.copy(g.camera.position).addScaledVector(this._sunDir, SUN_RENDER_DIST);
             // Starfield follows the camera so stars hold fixed sky directions.
             if (this._stars) this._stars.position.copy(g.camera.position);
+            // Distance-based LOD: build/drop real terrain on the distant planet props.
+            this._updatePropLOD();
             if (this._dust) {
                 this._dust.t += (dt || 0.016);
                 const k = this._dust.t / this._dust.life;
@@ -794,7 +795,7 @@
             };
             if (g.sky) {
                 // depthWrite off → the sky is a pure background fill that never occludes
-                // anything by depth (so the far sun, stars, and Ember stay visible at any
+                // anything by depth (so the far sun, stars, and other worlds stay visible at any
                 // altitude). renderOrder -2000 draws it first, under everything else.
                 g.sky.material = new THREE.MeshBasicMaterial({ color: 0x05060d, side: THREE.BackSide, depthWrite: false });
                 g.sky.renderOrder = -2000;
@@ -1439,7 +1440,7 @@
             this._camUpV.copy(this._rocketDir);
             this._camBlendT = 1.0;
             this._camLastT = (typeof performance !== 'undefined') ? performance.now() : 0;
-            g.showMessage && g.showMessage('🚀 LIFTOFF!  Mouse: pitch/yaw · A/D roll · Space thrust · Shift brake · G → ' + DEST_NAME, 4600);
+            g.showMessage && g.showMessage('🚀 LIFTOFF!  Mouse: pitch/yaw · A/D roll · Space thrust · Shift brake · G → ' + ((this._targetDef && this._targetDef.name) || 'a world'), 4600);
             this._charge = 0;
         }
 
@@ -1780,12 +1781,17 @@
 
         _clearPlanetProps() {
             const g = this.game;
-            for (const k in this._propMeshes) g.scene.remove(this._propMeshes[k]);
+            for (const k in this._propMeshes) {
+                const rec = this._propMeshes[k];
+                if (rec && rec.group) g.scene.remove(rec.group);
+            }
             this._propMeshes = {};
         }
 
-        // Build a distant prop for EVERY non-active world — a real terrain globe
-        // (same generator/palette you'll land on) scaled to its prop size.
+        // Build a distant prop for EVERY non-active world. By default each is a CHEAP
+        // body (low-poly icosphere + atmosphere halo); the real coarse terrain globe
+        // is built lazily on approach (see _updatePropLOD). Stored per-key as
+        // { group, def, cheap, terrain }.
         _buildPlanetProps() {
             this._clearPlanetProps();
             for (const key in PLANETS) {
@@ -1801,10 +1807,34 @@
             }
         }
 
+        // Cheap far-LOD body: a low-poly icosphere coloured by the world's sky tint,
+        // plus an additive atmosphere halo. Built at R-scale inside a group that's
+        // scaled to prop size and parked at the orbit. This is the default for every
+        // non-active world.
         _buildOneProp(def) {
             const g = this.game;
-            this._ensureCubeGeo();
             const grp = new THREE.Group();
+            const cheap = new THREE.Group();
+            // Sized by THIS world's own radius (not the active world's R).
+            cheap.add(new THREE.Mesh(new THREE.IcosahedronGeometry(def.R, 2),
+                new THREE.MeshStandardMaterial({ color: def.sky, roughness: 0.85, metalness: 0.0, flatShading: true })));
+            // Atmosphere halo (built at def.R-scale; group scale shrinks to prop size).
+            cheap.add(new THREE.Mesh(new THREE.SphereGeometry(def.R * 1.14, 24, 16),
+                new THREE.MeshBasicMaterial({ color: def.atm[1], transparent: true, opacity: 0.16, side: THREE.BackSide, blending: THREE.AdditiveBlending, depthWrite: false })));
+            cheap.traverse((o) => { if (o.isMesh) { o.castShadow = false; o.frustumCulled = false; } });
+            grp.add(cheap);
+            grp.scale.setScalar(PROP_SCALE);            // R-scale body → prop size
+            grp.position.copy(this._orbitOf(def));
+            g.scene.add(grp);
+            return { group: grp, def, cheap, terrain: null };
+        }
+
+        // Near-LOD: the real coarse terrain globe (tiles + water + halo), built at
+        // R-scale and added into the prop's group. Generated with this world's params
+        // via a temporary setActivePlanet()/restore so elevation/colour match landing.
+        _buildPropTerrain(def) {
+            this._ensureCubeGeo();
+            const sub = new THREE.Group();
             const restore = this._activeDef;
             setActivePlanet(def);                       // generate with this world's params
             const NP = 40;
@@ -1830,23 +1860,44 @@
                     }
             tiles.instanceMatrix.needsUpdate = true;
             if (tiles.instanceColor) tiles.instanceColor.needsUpdate = true;
-            grp.add(tiles);
-            grp.add(new THREE.Mesh(new THREE.SphereGeometry(R, 40, 28),
+            sub.add(tiles);
+            sub.add(new THREE.Mesh(new THREE.SphereGeometry(R, 40, 28),
                 new THREE.MeshLambertMaterial({ color: SEA_COLOR, transparent: true, opacity: 0.72 })));
-            // Atmosphere halo (built at R-scale; group scale shrinks to prop size).
-            grp.add(new THREE.Mesh(new THREE.SphereGeometry(R * 1.14, 24, 16),
+            // Atmosphere halo (built at R-scale; parent group scale shrinks to prop size).
+            sub.add(new THREE.Mesh(new THREE.SphereGeometry(R * 1.14, 24, 16),
                 new THREE.MeshBasicMaterial({ color: def.atm[1], transparent: true, opacity: 0.16, side: THREE.BackSide, blending: THREE.AdditiveBlending, depthWrite: false })));
-            if (def.key === 'ember') {
-                const ring = new THREE.Mesh(new THREE.RingGeometry(R * 1.45, R * 2.0, 64),
-                    new THREE.MeshBasicMaterial({ color: 0xd8a878, transparent: true, opacity: 0.45, side: THREE.DoubleSide, depthWrite: false }));
-                ring.rotation.x = Math.PI * 0.42; ring.rotation.z = 0.3; grp.add(ring);
-            }
             setActivePlanet(restore);
-            grp.traverse((o) => { if (o.isMesh) o.castShadow = false; });
-            grp.scale.setScalar(PROP_SCALE);            // R-scale globe → prop size
-            grp.position.copy(this._orbitOf(def));
-            g.scene.add(grp);
-            return grp;
+            sub.traverse((o) => { if (o.isMesh) { o.castShadow = false; o.frustumCulled = false; } });
+            return sub;
+        }
+
+        // Distance-based LOD for the distant planet props. Within an approach band,
+        // lazily build the real coarse terrain globe and hide the cheap icosphere;
+        // outside it (with hysteresis) drop the terrain and show the cheap body again.
+        // Cheap bodies elsewhere keep the sky full of worlds at near-zero cost.
+        _updatePropLOD() {
+            const g = this.game;
+            const cam = g.camera;
+            if (!cam) return;
+            for (const k in this._propMeshes) {
+                const rec = this._propMeshes[k];
+                if (!rec || !rec.group) continue;
+                const propRadius = rec.def.R * PROP_SCALE;            // apparent radius
+                const d = cam.position.distanceTo(rec.group.position); // group sits at the orbit
+                const near = d < propRadius * 3 + 90;
+                const far = d > propRadius * 3 + 160;                  // hysteresis gap
+                if (near && !rec.terrain) {
+                    // Upgrade to real terrain (built at R-scale; the group's PROP_SCALE shrinks it).
+                    rec.terrain = this._buildPropTerrain(rec.def);
+                    rec.group.add(rec.terrain);
+                    if (rec.cheap) rec.cheap.visible = false;
+                } else if (far && rec.terrain) {
+                    // Downgrade back to the cheap body.
+                    rec.group.remove(rec.terrain);
+                    rec.terrain = null;
+                    if (rec.cheap) rec.cheap.visible = true;
+                }
+            }
         }
 
         // Swap the world at the origin with the distant prop world (rebuilds terrain,
