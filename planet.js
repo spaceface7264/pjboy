@@ -108,6 +108,7 @@
     const SUN_DIST = 100000;        // true distance of the star (light source)
     const SUN_RENDER_DIST = 380;    // where the disk is drawn from the camera (inside the 500 sky)
     const SUN_RADIUS = 16;          // apparent disk radius at the render distance (~2.4°)
+    const DAY_SPEED = 1;            // day/night time multiplier (1 = real per-planet day lengths; >1 for testing)
     // The walkable worlds — built from the procedural catalog (planetgen.js). The
     // ACTIVE one builds at the origin; the rest render as distant prop globes at
     // their `orbit`. Each has its own radius + gravity. The first entry's key is
@@ -807,7 +808,14 @@
                 skyRenderOrder: g.sky ? g.sky.renderOrder : 0,
                 camFar: g.camera ? g.camera.far : 1000,
                 camNear: g.camera ? g.camera.near : 0.1,
+                baseAmbient: g.ambientLight ? g.ambientLight.intensity : null,
+                baseDir: g.directionalLight ? g.directionalLight.intensity : null,
             };
+            // Silence the always-on base-scene lights so the planet's own moving sun +
+            // day/night ambient fully control surface brightness (otherwise the night
+            // side stays lit by the bright base ambient/directional).
+            if (g.ambientLight) g.ambientLight.intensity = 0;
+            if (g.directionalLight) g.directionalLight.intensity = 0;
             // Push the far plane out so distant worlds (orbits up to ~9000, plus the
             // camera's own distance) never clip at far vantages/angles; raise near a
             // touch to keep depth precision with the much bigger range.
@@ -850,6 +858,8 @@
             if (g.cheeseFloor && s.cheeseVisible != null) g.cheeseFloor.visible = s.cheeseVisible;
             if (g.crystalRoof && s.roofVisible != null) g.crystalRoof.visible = s.roofVisible;
             if (s.roofY != null) g.roofY = s.roofY;
+            if (g.ambientLight && s.baseAmbient != null) g.ambientLight.intensity = s.baseAmbient;
+            if (g.directionalLight && s.baseDir != null) g.directionalLight.intensity = s.baseDir;
             if (g.camera) {
                 g.camera.up.set(0, 1, 0); // undo radial up-vector
                 g.camera.far = s.camFar; g.camera.near = s.camNear;
@@ -1061,28 +1071,52 @@
             this._sunDir = flight.clone().multiplyScalar(0.5).addScaledVector(perp, 0.7).normalize();
             this._sunCenter.copy(this._sunDir).multiplyScalar(SUN_DIST);
 
+            // Soft glowing star from billboard sprites (always face the camera): a
+            // white-hot core, a warm corona, and a wide faint bloom. Colours shift
+            // toward sunset orange near the horizon (driven in _updateDayNight).
             const grp = new THREE.Group();
-            grp.add(new THREE.Mesh(
-                new THREE.IcosahedronGeometry(SUN_RADIUS, 3),
-                new THREE.MeshBasicMaterial({ color: 0xfff2b0 })
-            ));
-            const halo = (r, color, op) => new THREE.Mesh(
-                new THREE.SphereGeometry(r, 32, 24),
-                new THREE.MeshBasicMaterial({ color, transparent: true, opacity: op, side: THREE.BackSide, blending: THREE.AdditiveBlending, depthWrite: false })
-            );
-            grp.add(halo(SUN_RADIUS * 1.5, 0xffd56a, 0.5));
-            grp.add(halo(SUN_RADIUS * 2.4, 0xffb347, 0.25));
-            grp.traverse((o) => { o.frustumCulled = false; });
+            const sprite = (tex, scale, color) => {
+                const m = new THREE.SpriteMaterial({ map: tex, color: color, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
+                const s = new THREE.Sprite(m);
+                s.scale.setScalar(scale);
+                grp.add(s);
+                return m;
+            };
+            const coreTex = this._sunGlowTex(['rgba(255,255,250,1)', 'rgba(255,235,170,0.85)', 'rgba(255,196,90,0)']);
+            const glowTex = this._sunGlowTex(['rgba(255,210,130,0.5)', 'rgba(255,150,60,0.16)', 'rgba(255,120,40,0)']);
+            this._sunBloomMat = sprite(glowTex, SUN_RADIUS * 8.5, 0xffffff); // wide faint bloom
+            this._sunGlowMat = sprite(glowTex, SUN_RADIUS * 4, 0xffd9a0);    // corona
+            this._sunCoreMat = sprite(coreTex, SUN_RADIUS * 2.2, 0xffffff);  // bright disk
+            grp.traverse((o) => { o.frustumCulled = false; o.renderOrder = 5; });
             grp.position.copy(this._sunDir).multiplyScalar(SUN_RENDER_DIST); // updated to follow the camera
             g.scene.add(grp);
             this._sunMesh = grp;
+            this._sunCoreBase = new THREE.Color(0xfff4d2);
+            this._sunGlowBase = new THREE.Color(0xffc070);
+            this._sunWarm = new THREE.Color(0xff5a1e); // sunset/sunrise tint
 
             // Light from the real far position → near-parallel rays across the system
             // (distance 0 = no falloff). Lights the sun-facing hemisphere of both worlds.
-            this._sunLight = new THREE.PointLight(0xfff4d6, 1.5, 0);
+            this._sunLight = new THREE.PointLight(0xfff4d6, 2.4, 0);
             this._sunLight.position.copy(this._sunCenter);
             g.scene.add(this._sunLight);
             if (this._sun) this._sun.intensity = 0.18; // old directional → faint fill only
+        }
+
+        // Radial-gradient sprite texture (bright centre → transparent edge) for the sun.
+        _sunGlowTex(stops) {
+            const c = document.createElement('canvas');
+            c.width = c.height = 128;
+            const x = c.getContext('2d');
+            const grd = x.createRadialGradient(64, 64, 0, 64, 64, 64);
+            grd.addColorStop(0, stops[0]);
+            grd.addColorStop(0.45, stops[1]);
+            grd.addColorStop(1, stops[2]);
+            x.fillStyle = grd;
+            x.fillRect(0, 0, 128, 128);
+            const t = new THREE.CanvasTexture(c);
+            if (THREE.sRGBEncoding) t.encoding = THREE.sRGBEncoding;
+            return t;
         }
 
         _clearSun() {
@@ -1116,18 +1150,28 @@
             const g = this.game;
             if (!this._sunMesh || !this._sunBase) return;
             this._daySec = (this._activeDef && this._activeDef.daySec) || this._daySec || 300;
-            this._dayT = (this._dayT + dt) % this._daySec;
+
+            // Player distance from the planet centre → how much of the planet's spin we
+            // share. Full on the surface, fading to zero once we're out of its gravity
+            // (in space you're in the inertial frame, so the sky stops wheeling with you).
+            const p = g.player.position;
+            const up = this._dnUp.copy(p).sub(this._center);
+            const ul = up.length() || 1; up.divideScalar(ul);
+            const spinShare = gravityScale(ul); // 1 surface .. 0 space
+
+            this._dayT = (this._dayT + dt * DAY_SPEED * spinShare) % this._daySec;
             const th = this._dayT / this._daySec * Math.PI * 2;
             const sun = this._sunNow.copy(this._sunBase).applyAxisAngle(this._spinAxis, th); // unit dir to the sun
+
+            // True planetary spin: the whole celestial sphere wheels together (only while
+            // we're in the planet's pull). The sun is one point in it (rotated by θ); the
+            // starfield rotates by the same θ so stars wheel about the celestial pole.
+            if (this._stars) this._stars.quaternion.setFromAxisAngle(this._spinAxis, th);
 
             // Disk (camera-following) + far light follow the moving sun.
             this._sunMesh.position.copy(g.camera.position).addScaledVector(sun, SUN_RENDER_DIST);
             if (this._sunLight) this._sunLight.position.copy(sun).multiplyScalar(SUN_DIST);
 
-            // Sun elevation where the player stands → day factor (twilight band at horizon).
-            const p = g.player.position;
-            const up = this._dnUp.copy(p).sub(this._center);
-            const ul = up.length() || 1; up.divideScalar(ul);
             const elev = up.dot(sun);
             const day = Math.max(0, Math.min(1, (elev + 0.12) / 0.30));
             const night = 1 - day;
@@ -1143,11 +1187,20 @@
                 u.uBase.value = 0.05 * day;
                 if (this._atmBaseInner) u.uInner.value.copy(this._atmBaseInner).lerp(this._sunsetCol, twilight * 0.65 * (day * 0.5 + 0.5));
             }
-            // Ambient dims at night.
-            if (this._ambient) this._ambient.intensity = 0.12 + 0.4 * day;
+            // Ambient + the fixed fill light dim at night so the surface goes dark
+            // (the moving sun only lights the day-facing hemisphere via the point light).
+            if (this._ambient) this._ambient.intensity = 0.26 + 0.30 * day; // night stays navigable (dim moonlight)
+            if (this._sun) this._sun.intensity = 0.18 * day;
             // Stars brighten at night (color multiplies vertex colours; opaque → no
             // transparent-pass issues). Black by day (atmosphere covers them anyway).
             if (this._stars) this._stars.material.color.setScalar(Math.max(night, spaceF));
+            // Sun reddens toward the horizon (sunrise/sunset glow).
+            if (this._sunCoreMat) {
+                const warm = Math.max(0, Math.min(1, 1 - Math.max(0, elev) / 0.35));
+                this._sunCoreMat.color.copy(this._sunCoreBase).lerp(this._sunWarm, warm * 0.7);
+                this._sunGlowMat.color.copy(this._sunGlowBase).lerp(this._sunWarm, warm);
+                if (this._sunBloomMat) this._sunBloomMat.color.copy(this._sunGlowBase).lerp(this._sunWarm, warm * 0.9);
+            }
         }
 
         // ---- starfield: deep-space backdrop for orientation ----
