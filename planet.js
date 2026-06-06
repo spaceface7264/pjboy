@@ -363,6 +363,7 @@
             this._buildPlanetProps();
             this._buildSun();
             this._buildStars();
+            this._configureDayNight();
             this._preloadProps();
             if (g.clearEnemies) g.clearEnemies();
 
@@ -430,8 +431,9 @@
             const g = this.game;
             // Slowly drift the cloud layer for a living sky.
             if (this._clouds) this._clouds.rotation.y += (dt || 0.016) * 0.006;
-            // Keep the sun's disk pinned to its sky direction (camera-following → looks infinitely far).
-            if (this._sunMesh && this._sunDir) this._sunMesh.position.copy(g.camera.position).addScaledVector(this._sunDir, SUN_RENDER_DIST);
+            // Day/night: advance the sun around the planet, move the disk + light,
+            // recolour sky/atmosphere/ambient and fade the stars in at night.
+            this._updateDayNight(dt);
             // Starfield follows the camera so stars hold fixed sky directions.
             if (this._stars) this._stars.position.copy(g.camera.position);
             // Distance-based LOD: build terrain + fade the cheap sphere out to reveal it.
@@ -982,6 +984,7 @@
             s.frustumCulled = false;
             g.scene.add(s);
             this._atm = [s];
+            this._atmBaseInner = new THREE.Color(a[0]); // for sunset tinting in day/night
         }
 
         // Cloud layer from the Cloud_*.glb models, scattered on a shell above the
@@ -1086,6 +1089,65 @@
             const g = this.game;
             if (this._sunMesh) { g.scene.remove(this._sunMesh); this._sunMesh = null; }
             if (this._sunLight) { g.scene.remove(this._sunLight); this._sunLight = null; }
+        }
+
+        // ---- day/night cycle (per-active-world) ----
+
+        // Set the spin axis, the equatorial base sun direction, the day length and a
+        // per-world phase. Called after the sun is built and on every world swap.
+        _configureDayNight() {
+            const def = this._activeDef || {};
+            const tilt = (def.axisTilt != null) ? def.axisTilt : 0.25;
+            this._spinAxis = new THREE.Vector3(Math.sin(tilt), Math.cos(tilt), 0).normalize();
+            // Base sun direction made perpendicular to the axis → it sweeps a great
+            // circle (real sunrise/sunset everywhere but the poles).
+            const base = (this._sunDir ? this._sunDir.clone() : new THREE.Vector3(1, 0, 0.3));
+            base.projectOnPlane(this._spinAxis);
+            if (base.lengthSq() < 1e-4) { base.set(1, 0, 0).projectOnPlane(this._spinAxis); }
+            this._sunBase = base.normalize();
+            this._daySec = def.daySec || 300;
+            this._dayT = (((def.seed || 0) % 1000) / 1000) * this._daySec; // start phase varies per world
+            if (!this._sunNow) this._sunNow = new THREE.Vector3();
+            if (!this._dnUp) this._dnUp = new THREE.Vector3();
+            if (!this._sunsetCol) this._sunsetCol = new THREE.Color(0xff7a2a);
+        }
+
+        _updateDayNight(dt) {
+            const g = this.game;
+            if (!this._sunMesh || !this._sunBase) return;
+            this._daySec = (this._activeDef && this._activeDef.daySec) || this._daySec || 300;
+            this._dayT = (this._dayT + dt) % this._daySec;
+            const th = this._dayT / this._daySec * Math.PI * 2;
+            const sun = this._sunNow.copy(this._sunBase).applyAxisAngle(this._spinAxis, th); // unit dir to the sun
+
+            // Disk (camera-following) + far light follow the moving sun.
+            this._sunMesh.position.copy(g.camera.position).addScaledVector(sun, SUN_RENDER_DIST);
+            if (this._sunLight) this._sunLight.position.copy(sun).multiplyScalar(SUN_DIST);
+
+            // Sun elevation where the player stands → day factor (twilight band at horizon).
+            const p = g.player.position;
+            const up = this._dnUp.copy(p).sub(this._center);
+            const ul = up.length() || 1; up.divideScalar(ul);
+            const elev = up.dot(sun);
+            const day = Math.max(0, Math.min(1, (elev + 0.12) / 0.30));
+            const night = 1 - day;
+            // In space the sky is always starry regardless of surface day/night.
+            const spaceF = Math.max(0, Math.min(1, (ul - SOI_INNER) / Math.max(1, SOI_OUTER - SOI_INNER)));
+            const twilight = 1 - Math.min(1, Math.abs(elev) / 0.16); // peaks near the horizon
+
+            // Atmosphere: fade out at night (reveals stars); warm sunset tint at horizon.
+            const atm = this._atm && this._atm[0];
+            if (atm && atm.material.uniforms) {
+                const u = atm.material.uniforms;
+                u.uIntensity.value = 0.5 * day;
+                u.uBase.value = 0.05 * day;
+                if (this._atmBaseInner) u.uInner.value.copy(this._atmBaseInner).lerp(this._sunsetCol, twilight * 0.65 * (day * 0.5 + 0.5));
+            }
+            // Ambient dims at night.
+            if (this._ambient) this._ambient.intensity = 0.12 + 0.4 * day;
+            // Stars brighten at night (color multiplies vertex colours; opaque → no
+            // transparent-pass issues). Black by day (atmosphere covers them anyway).
+            if (this._stars) this._stars.material.color.setScalar(Math.max(night, spaceF));
         }
 
         // ---- starfield: deep-space backdrop for orientation ----
@@ -2009,6 +2071,7 @@
             if (newActive.clouds) this._buildClouds();
             this._targetDef = null;                         // pick a fresh default target
             this._buildPlanetProps();                       // every other world becomes a prop
+            this._configureDayNight();                      // this world's day length + spin axis
         }
 
         _ensureChargeUI() {
