@@ -1551,12 +1551,14 @@
         }
         // The open world and tiny planet surface the pickaxe tool; other play modes don't.
         const tools = this._pickaxeMode && this._pickaxeMode() ? (reg.tools || []) : [];
+        // Tiny Planet is a build/explore sandbox — no combat, so hide weapons.
+        const weapons = this.activeModeId === 'planet' ? [] : reg.weapons;
         return {
-            weapons: reg.weapons,
+            weapons,
             consumables: reg.consumables,
             blocks: reg.blocks,
             tools,
-            all: [...reg.weapons, ...reg.consumables, ...reg.blocks, ...tools]
+            all: [...weapons, ...reg.consumables, ...reg.blocks, ...tools]
         };
     };
 
@@ -1652,6 +1654,12 @@
     Game3D.prototype.defaultQuickbarLayout = function () {
         if (this.activeModeId === 'campaign') return this.campaignQuickbarLayout();
         if (this.gameMode === 'creator') return this.creatorDefaultQuickbarLayout();
+        if (this.activeModeId === 'planet') {
+            // Build/explore sandbox — no weapons. Pickaxe + blocks.
+            const layout = ['pickaxe', ...Object.keys(this.BLOCK_DEFS || {})].slice(0, 9);
+            while (layout.length < 9) layout.push(null);
+            return layout;
+        }
         return _defaultQuickbarLayout.call(this).map((id) =>
             (id && this.BLOCK_DEFS && this.BLOCK_DEFS[id] ? null : id)
         );
@@ -1661,6 +1669,11 @@
     Game3D.prototype.loadQuickbarLayout = function () {
         if (this.activeModeId === 'campaign') {
             this.quickbarLayout = this.campaignQuickbarLayout();
+            return;
+        }
+        if (this.activeModeId === 'planet') {
+            // Always the weapon-free build bar; don't restore a saved layout with weapons.
+            this.quickbarLayout = this.defaultQuickbarLayout();
             return;
         }
         _loadQuickbarLayout.call(this);

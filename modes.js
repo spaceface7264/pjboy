@@ -114,6 +114,10 @@
                 g.setupPlayMode && g.setupPlayMode();
                 g.planetWorld && g.planetWorld.enter();
                 g.setViewMode && g.setViewMode('fpv');
+                // Refresh to the weapon-free build quickbar for this mode.
+                g.loadQuickbarLayout && g.loadQuickbarLayout();
+                g._qbSig = null;
+                g.updateInventoryGridUI && g.updateInventoryGridUI();
             },
             exit(g) {
                 g.flyMode = false;

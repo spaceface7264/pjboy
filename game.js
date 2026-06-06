@@ -2432,7 +2432,8 @@ class Game3D {
         // active "weapon" while armed. The open-world pickaxe likewise replaces
         // the held weapon with its own viewmodel (managed by WorldStream).
         const blockArmed = !!this.activeBlockId
-            || (this._pickaxeMode() && this.owPickaxeEquipped);
+            || (this._pickaxeMode() && this.owPickaxeEquipped)
+            || this.activeModeId === 'planet'; // no combat on the planet — never show a weapon
 
         // ---- Melee viewmodels (all melee weapons share the swing animation; only the active one is visible) ----
         const meleeWeaponId = this.player.weapons[this.player.currentWeaponIndex];
