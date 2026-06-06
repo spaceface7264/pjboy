@@ -92,7 +92,9 @@
         return sum / norm; // 0..1
     }
 
-    const FACE_N = 56;         // quad-sphere grid cells per face edge (6·N² tiles)
+    // Quad-sphere grid cells per face edge (6·N² tiles). Mutable: scales with the
+    // active world's radius (set by setActivePlanet) so big planets keep small blocks.
+    let FACE_N = 56;
     const ELEV_STEP = 2;       // elevation quantization (block step height)
     const TILE_H = ELEV_STEP * 3; // tile thickness (overlaps inward to hide cliff gaps)
     const MAX_DIG = 3;         // max terrain steps you can dig per cell (= one tile depth, walls stay sealed)
@@ -137,6 +139,11 @@
         SOI_INNER = R * 1.6; SOI_OUTER = R * 2.6;
         NOISE_SCALE = def.noiseScale; AMP = def.amp; SEA_BIAS = def.seaBias;
         SEED = def.seed; SEA_COLOR = def.sea; PAL = def.pal;
+        // Resolution scales with radius to keep ~constant block size (Terra: R90→56),
+        // clamped so the tile count stays sane (24..320 → up to ~615k tiles). Only the
+        // ACTIVE world builds at full res (on landing); distant props stay coarse.
+        // Crisp up to ~R515; bigger worlds get progressively chunkier blocks.
+        FACE_N = Math.max(24, Math.min(320, Math.round(R * (56 / 90))));
     }
 
     // Signed land elevation for a unit surface direction.
@@ -323,6 +330,7 @@
                     if (e.repeat || g.activeModeId !== 'planet') return;
                     if (e.code === 'KeyE') this._onInteract();
                     else if (e.code === 'KeyG' && this._riding && !this._launching) this._toggleCourse();
+                    else if (e.code === 'KeyM' && this._riding && !this._launching) this._toggleMap();
                 };
                 window.addEventListener('keydown', this._onKeyDown);
             }
@@ -342,6 +350,7 @@
             this._arrived = false;
             this._charge = 0;
             this._nearRocket = false;
+            this._mapOpen = false;
             // Always start on the home world; the others are distant props.
             this._activeDef = PLANETS.home;
             this._activeKey = this._activeDef.key;
@@ -406,6 +415,8 @@
             this._rocketBase = null;
             if (this._altEl) this._altEl.style.display = 'none';
             if (this._promptEl) this._promptEl.style.display = 'none';
+            this._mapOpen = false;
+            if (this._mapEl) this._mapEl.style.display = 'none';
             if (this._chargeEl) this._chargeEl.style.display = 'none';
             if (this._editsDirty) this._saveEdits(); // flush pending edits on the way out
             if (this._beforeUnload) { window.removeEventListener('beforeunload', this._beforeUnload); this._beforeUnload = null; }
@@ -1322,6 +1333,7 @@
         _onInteract() {
             const g = this.game;
             if (g.activeModeId !== 'planet' || !this._rocket) return;
+            if (this._mapOpen) { this._toggleMap(); return; } // E just closes the map
             if (this._riding) this._tryDisembark();
             else if (this._nearRocket) this._boardRocket();
         }
@@ -1440,6 +1452,7 @@
         // updatePlayer hook while piloting: charge on the pad, else free flight.
         _updateRocket(dt) {
             const g = this.game;
+            if (this._mapOpen) { g.player.velocity.set(0, 0, 0); this._drawMap(); return; } // frozen while the map is up
             const p = g.player.position;
             const up = this._up.copy(p).sub(this._center);
             const dist = up.length();
@@ -2015,6 +2028,149 @@
 
         _showCharge(on) { this._ensureChargeUI().style.display = on ? 'block' : 'none'; }
         _updateChargeUI(c) { this._ensureChargeUI(); this._chargeFill.style.width = (c * 100).toFixed(0) + '%'; }
+
+        // ---- star map (destination selector while flying) ----
+
+        _ensureMapUI() {
+            if (this._mapEl) return this._mapEl;
+            const wrap = document.createElement('div');
+            wrap.id = 'planet-map';
+            wrap.style.cssText = 'position:fixed;inset:0;z-index:200;display:none;align-items:center;justify-content:center;background:rgba(4,7,14,0.8);';
+            const panel = document.createElement('div');
+            panel.style.cssText = 'position:relative;padding:12px;border-radius:14px;background:rgba(14,18,28,0.96);border:1px solid rgba(120,170,255,0.4);box-shadow:0 8px 50px #000;';
+            const title = document.createElement('div');
+            title.textContent = '🛰  STAR MAP — click a world to set course   ·   [M] close';
+            title.style.cssText = 'text-align:center;margin-bottom:8px;font:600 13px/1.3 monospace;letter-spacing:0.5px;color:#9fd0ff;';
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex;gap:12px;align-items:stretch;';
+            const canvas = document.createElement('canvas');
+            canvas.width = 480; canvas.height = 480;
+            canvas.style.cssText = 'display:block;border-radius:10px;background:radial-gradient(circle at 50% 50%,#0a1426,#05070d);cursor:crosshair;';
+            // Clickable destination list (alternative to the visual map).
+            const list = document.createElement('div');
+            list.style.cssText = 'width:220px;max-height:480px;overflow-y:auto;display:flex;flex-direction:column;gap:4px;font:600 12px/1.25 monospace;color:#cfe3ff;';
+            row.appendChild(canvas); row.appendChild(list);
+            panel.appendChild(title); panel.appendChild(row);
+            wrap.appendChild(panel);
+            document.body.appendChild(wrap);
+            canvas.addEventListener('click', (e) => { e.stopPropagation(); this._onMapClick(e); });
+            wrap.addEventListener('click', (e) => { if (e.target === wrap) { e.stopPropagation(); this._toggleMap(); } });
+            this._mapEl = wrap; this._mapCanvas = canvas; this._mapCtx = canvas.getContext('2d'); this._mapList = list;
+            return wrap;
+        }
+
+        _toggleMap() {
+            this._ensureMapUI();
+            this._mapOpen = !this._mapOpen;
+            this._mapEl.style.display = this._mapOpen ? 'flex' : 'none';
+            if (this._mapOpen) {
+                if (document.exitPointerLock) document.exitPointerLock(); // free the cursor to click
+                this._drawMap();
+                this._fillMapList();
+            }
+        }
+
+        // Course selection shared by the map and the list.
+        _selectDestination(key) {
+            this._setTarget(key);
+            this._autopilot = true;
+            this._toggleMap();
+            this.game.showMessage && this.game.showMessage('🛰 Course locked → ' + this._targetDef.name, 2000);
+        }
+
+        // Build the clickable destination list (sorted by distance).
+        _fillMapList() {
+            const list = this._mapList;
+            if (!list) return;
+            list.innerHTML = '';
+            const pp = this.game.player.position;
+            const rows = [];
+            for (const key in PLANETS) {
+                if (key === this._activeKey) continue;
+                rows.push({ key: key, def: PLANETS[key], dist: pp.distanceTo(this._orbitOf(PLANETS[key])) });
+            }
+            rows.sort((a, b) => a.dist - b.dist);
+            for (const r of rows) {
+                const sel = this._targetDef && this._targetDef.key === r.key;
+                const item = document.createElement('div');
+                item.style.cssText = 'display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;cursor:pointer;'
+                    + 'background:' + (sel ? 'rgba(120,170,255,0.22)' : 'rgba(255,255,255,0.05)') + ';'
+                    + 'border:1px solid ' + (sel ? 'rgba(160,200,255,0.8)' : 'rgba(255,255,255,0.08)') + ';';
+                const sw = '#' + r.def.sky.toString(16).padStart(6, '0');
+                item.innerHTML = '<span style="width:12px;height:12px;border-radius:50%;background:' + sw + ';flex:none;box-shadow:0 0 6px ' + sw + '"></span>'
+                    + '<span style="flex:1">' + r.def.name + '</span>'
+                    + '<span style="opacity:0.7">' + (r.dist | 0) + 'm</span>';
+                item.addEventListener('click', (e) => { e.stopPropagation(); this._selectDestination(r.key); });
+                item.addEventListener('mouseenter', () => { if (!sel) item.style.background = 'rgba(255,255,255,0.12)'; });
+                item.addEventListener('mouseleave', () => { if (!sel) item.style.background = 'rgba(255,255,255,0.05)'; });
+                list.appendChild(item);
+            }
+        }
+
+        // Top-down (x,z) schematic of the system: active world at the centre, others
+        // at their orbits, the ship as a marker. Click a world to lock course to it.
+        _drawMap() {
+            const ctx = this._mapCtx, cv = this._mapCanvas;
+            if (!ctx) return;
+            const W = cv.width, H = cv.height, pad = 56;
+            ctx.clearRect(0, 0, W, H);
+            const pp = this.game.player.position;
+            // Bounds over all worlds + the ship + origin (active world sits at origin).
+            let minX = 0, maxX = 0, minZ = 0, maxZ = 0;
+            const consider = (x, z) => { if (x < minX) minX = x; if (x > maxX) maxX = x; if (z < minZ) minZ = z; if (z > maxZ) maxZ = z; };
+            for (const key in PLANETS) { if (key === this._activeKey) continue; const c = this._orbitOf(PLANETS[key]); consider(c.x, c.z); }
+            consider(pp.x, pp.z);
+            const span = Math.max(1, Math.max(maxX - minX, maxZ - minZ));
+            const scale = (Math.min(W, H) - pad * 2) / span;
+            const cx0 = (minX + maxX) / 2, cz0 = (minZ + maxZ) / 2;
+            const toX = (x) => W / 2 + (x - cx0) * scale;
+            const toY = (z) => H / 2 + (z - cz0) * scale;
+
+            // Active world (origin).
+            const adef = PLANETS[this._activeKey];
+            const ox = toX(0), oy = toY(0);
+            ctx.beginPath(); ctx.arc(ox, oy, 7, 0, 7); ctx.fillStyle = '#' + (adef ? adef.sky : 0x6fae3a).toString(16).padStart(6, '0'); ctx.fill();
+            ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.lineWidth = 1; ctx.stroke();
+            ctx.fillStyle = '#9fb8d8'; ctx.font = '11px monospace';
+            ctx.fillText((adef ? adef.name : 'home') + ' (here)', ox + 11, oy + 4);
+
+            // Other worlds.
+            this._mapDots = [];
+            for (const key in PLANETS) {
+                if (key === this._activeKey) continue;
+                const def = PLANETS[key];
+                const c = this._orbitOf(def);
+                const sx = toX(c.x), sy = toY(c.z);
+                const r = Math.max(5, Math.min(18, def.R * 0.07));
+                ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(sx, sy); ctx.strokeStyle = 'rgba(120,150,200,0.15)'; ctx.lineWidth = 1; ctx.stroke();
+                ctx.beginPath(); ctx.arc(sx, sy, r, 0, 7); ctx.fillStyle = '#' + def.sky.toString(16).padStart(6, '0'); ctx.fill();
+                const isTarget = this._targetDef && this._targetDef.key === key;
+                ctx.strokeStyle = isTarget ? '#ffffff' : 'rgba(255,255,255,0.35)'; ctx.lineWidth = isTarget ? 3 : 1; ctx.stroke();
+                ctx.fillStyle = '#cfe3ff'; ctx.font = '11px monospace';
+                ctx.fillText(def.name + '  ' + (pp.distanceTo(c) | 0) + 'm', sx + r + 4, sy + 4);
+                this._mapDots.push({ key: key, cx: sx, cy: sy, r: Math.max(r, 14) });
+            }
+
+            // Ship.
+            const px = toX(pp.x), py = toY(pp.z);
+            ctx.beginPath(); ctx.arc(px, py, 4, 0, 7); ctx.fillStyle = '#7CFC00'; ctx.fill();
+            ctx.fillStyle = '#bdffae'; ctx.fillText('▲ you', px + 7, py + 4);
+        }
+
+        _onMapClick(e) {
+            const cv = this._mapCanvas;
+            if (!cv || !this._mapDots) return;
+            const rect = cv.getBoundingClientRect();
+            const mx = (e.clientX - rect.left) * (cv.width / rect.width);
+            const my = (e.clientY - rect.top) * (cv.height / rect.height);
+            let best = null, bestD = Infinity;
+            for (const d of this._mapDots) {
+                const dd = (d.cx - mx) * (d.cx - mx) + (d.cy - my) * (d.cy - my);
+                if (dd < bestD && dd < (d.r + 8) * (d.r + 8)) { bestD = dd; best = d; }
+            }
+            if (!best) return;
+            this._selectDestination(best.key);
+        }
 
         _updateCourseUI(destDist) {
             const m = destDist.toFixed(0);
