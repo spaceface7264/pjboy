@@ -423,8 +423,8 @@
             if (this._sunMesh && this._sunDir) this._sunMesh.position.copy(g.camera.position).addScaledVector(this._sunDir, SUN_RENDER_DIST);
             // Starfield follows the camera so stars hold fixed sky directions.
             if (this._stars) this._stars.position.copy(g.camera.position);
-            // Distance-based LOD: build/drop real terrain on the distant planet props.
-            this._updatePropLOD();
+            // Distance-based LOD: build terrain + fade the cheap sphere out to reveal it.
+            this._updatePropLOD(dt);
             if (this._dust) {
                 this._dust.t += (dt || 0.016);
                 const k = this._dust.t / this._dust.life;
@@ -916,21 +916,27 @@
         // space they read as an atmospheric halo around the globe.
         _buildAtmosphere() {
             const g = this.game;
-            const mk = (r, color, op) => {
+            const a = (this._activeDef && this._activeDef.atm) || [0x6db4ff, 0x8ec6ff, 0xbfe0ff];
+            const c0 = new THREE.Color(a[0]), c1 = new THREE.Color(a[1]), c2 = new THREE.Color(a[2]);
+            // Smooth 3-stop colour gradient across the stack (inner -> outer).
+            const grad = (t) => t < 0.5 ? c0.clone().lerp(c1, t * 2) : c1.clone().lerp(c2, (t - 0.5) * 2);
+            // Many thin shells with a smooth opacity falloff read as a continuous
+            // haze instead of a few hard bands: densest inner sky fading to a faint
+            // upper haze near SOI_INNER.
+            const N = 10, rIn = 1.13, rOut = 1.62;
+            this._atm = [];
+            for (let i = 0; i < N; i++) {
+                const t = i / (N - 1);
+                const r = R * (rIn + (rOut - rIn) * t);
+                const op = 0.042 * Math.pow(1 - t, 1.5) + 0.004;
                 const s = new THREE.Mesh(
                     new THREE.SphereGeometry(r, 48, 32),
-                    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: op, side: THREE.DoubleSide, depthWrite: false })
+                    new THREE.MeshBasicMaterial({ color: grad(t), transparent: true, opacity: op, side: THREE.DoubleSide, depthWrite: false })
                 );
                 s.frustumCulled = false;
                 g.scene.add(s);
-                return s;
-            };
-            const a = (this._activeDef && this._activeDef.atm) || [0x6db4ff, 0x8ec6ff, 0xbfe0ff];
-            this._atm = [
-                mk(R * 1.22, a[0], 0.10),  // lower sky
-                mk(R * 1.45, a[1], 0.06),  // mid
-                mk(R * 1.62, a[2], 0.035), // upper haze (~SOI_INNER)
-            ];
+                this._atm.push(s);
+            }
         }
 
         // Cloud layer from the Cloud_*.glb models, scattered on a shell above the
@@ -1554,7 +1560,19 @@
                 const iw = dir.dot(vel); if (iw < 0) { this._contactSpeed = -iw; vel.addScaledVector(dir, -iw); }
             }
 
-            // Sister-planet surface clamp + arrival.
+            // Planets are SOLID. Find the nearest world we've entered and make it the
+            // target, so the clamp below pushes us out of it (and arrival/landing use
+            // it) — you can't fly through any planet, not just the selected one.
+            let hitKey = null, hitDist = Infinity;
+            for (const key in PLANETS) {
+                if (key === this._activeKey) continue;
+                const pdef = PLANETS[key];
+                const dist = p.distanceTo(this._orbitOf(pdef));
+                if (dist < pdef.R * PROP_SCALE + DELTA && dist < hitDist) { hitDist = dist; hitKey = key; }
+            }
+            if (hitKey && (!this._targetDef || this._targetDef.key !== hitKey)) this._setTarget(hitKey);
+
+            // Surface clamp + arrival for the current target world.
             const dC = this._dir2.copy(p).sub(this._destCenter);
             const dpr = dC.length() || 1; dC.divideScalar(dpr);
             if (dpr < this._destRadius + DELTA) {
@@ -1824,18 +1842,20 @@
             const g = this.game;
             const grp = new THREE.Group();
             const cheap = new THREE.Group();
-            // Sized by THIS world's own radius (not the active world's R).
-            cheap.add(new THREE.Mesh(new THREE.IcosahedronGeometry(def.R, 2),
-                new THREE.MeshStandardMaterial({ color: def.sky, roughness: 0.85, metalness: 0.0, flatShading: true })));
+            // Sized by THIS world's own radius (not the active world's R). The body is
+            // transparent so it can fade OUT to reveal the (opaque) terrain on approach.
+            const bodyMat = new THREE.MeshStandardMaterial({ color: def.sky, roughness: 0.85, metalness: 0.0, flatShading: true, transparent: true, opacity: 1 });
+            cheap.add(new THREE.Mesh(new THREE.IcosahedronGeometry(def.R, 2), bodyMat));
             // Atmosphere halo (built at def.R-scale; group scale shrinks to prop size).
-            cheap.add(new THREE.Mesh(new THREE.SphereGeometry(def.R * 1.14, 24, 16),
-                new THREE.MeshBasicMaterial({ color: def.atm[1], transparent: true, opacity: 0.16, side: THREE.BackSide, blending: THREE.AdditiveBlending, depthWrite: false })));
+            const haloMat = new THREE.MeshBasicMaterial({ color: def.atm[1], transparent: true, opacity: 0.16, side: THREE.BackSide, blending: THREE.AdditiveBlending, depthWrite: false });
+            cheap.add(new THREE.Mesh(new THREE.SphereGeometry(def.R * 1.14, 24, 16), haloMat));
             cheap.traverse((o) => { if (o.isMesh) { o.castShadow = false; o.frustumCulled = false; } });
             grp.add(cheap);
             grp.scale.setScalar(PROP_SCALE);            // R-scale body → prop size
             grp.position.copy(this._orbitOf(def));
             g.scene.add(grp);
-            return { group: grp, def, cheap, terrain: null };
+            return { group: grp, def, cheap, terrain: null, cheapFade: 1,
+                cheapMats: [{ mat: bodyMat, base: 1 }, { mat: haloMat, base: 0.16 }] };
         }
 
         // Near-LOD: the real coarse terrain globe (tiles + water + halo), built at
@@ -1880,31 +1900,40 @@
             return sub;
         }
 
-        // Distance-based LOD for the distant planet props. Within an approach band,
-        // lazily build the real coarse terrain globe and hide the cheap icosphere;
-        // outside it (with hysteresis) drop the terrain and show the cheap body again.
-        // Cheap bodies elsewhere keep the sky full of worlds at near-zero cost.
-        _updatePropLOD() {
+        // Distance-based LOD. On approach the real (OPAQUE) terrain globe is built and
+        // the cheap sphere FADES OUT over it to reveal it (a single convex mesh fades
+        // cleanly — a transparent InstancedMesh can't sort its tiles). On leaving, the
+        // cheap body fades back in and the terrain is freed. Hysteresis avoids flicker.
+        _updatePropLOD(dt) {
             const g = this.game;
             const cam = g.camera;
             if (!cam) return;
+            const step = Math.min(1, (dt || 0.016) / 0.5); // ~0.5s fade
             for (const k in this._propMeshes) {
                 const rec = this._propMeshes[k];
                 if (!rec || !rec.group) continue;
-                const propRadius = rec.def.R * PROP_SCALE;            // apparent radius
-                const d = cam.position.distanceTo(rec.group.position); // group sits at the orbit
-                const near = d < propRadius * 3 + 90;
-                const far = d > propRadius * 3 + 160;                  // hysteresis gap
-                if (near && !rec.terrain) {
-                    // Upgrade to real terrain (built at R-scale; the group's PROP_SCALE shrinks it).
+                const propRadius = rec.def.R * PROP_SCALE;
+                const d = cam.position.distanceTo(rec.group.position);
+                let want = !!rec.terrain;                             // hysteresis
+                if (d < propRadius * 3 + 90) want = true;
+                else if (d > propRadius * 3 + 170) want = false;
+
+                if (want && !rec.terrain) {                           // build the opaque terrain
                     rec.terrain = this._buildPropTerrain(rec.def);
                     rec.group.add(rec.terrain);
-                    if (rec.cheap) rec.cheap.visible = false;
-                } else if (far && rec.terrain) {
-                    // Downgrade back to the cheap body.
+                }
+                if (rec.cheapFade === undefined) rec.cheapFade = 1;
+                // Fade the cheap body out once terrain exists & is wanted; else back in.
+                const target = (want && rec.terrain) ? 0 : 1;
+                rec.cheapFade += (rec.cheapFade < target ? step : -step);
+                if (rec.cheapFade > 1) rec.cheapFade = 1;
+                if (rec.cheapFade < 0) rec.cheapFade = 0;
+                if (rec.cheapMats) for (let j = 0; j < rec.cheapMats.length; j++) rec.cheapMats[j].mat.opacity = rec.cheapMats[j].base * rec.cheapFade;
+                if (rec.cheap) rec.cheap.visible = rec.cheapFade > 0.02;
+                // Once we've left and the cheap body is fully back, free the terrain.
+                if (!want && rec.terrain && rec.cheapFade >= 1) {
                     rec.group.remove(rec.terrain);
                     rec.terrain = null;
-                    if (rec.cheap) rec.cheap.visible = true;
                 }
             }
         }
