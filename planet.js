@@ -1369,23 +1369,32 @@
 
         // G while flying: cycle the destination through the other worlds, then off.
         // (cycle order: world A → world B → … → manual)
+        // G: lock onto the world the ship is pointed at (best heading alignment,
+        // slight bias toward nearer worlds). Pressing G again while already locked
+        // onto that same world cancels autopilot.
         _toggleCourse() {
             const g = this.game;
-            const others = Object.keys(PLANETS).filter((k) => k !== this._activeKey);
-            if (!this._autopilot) {
-                // turn on, heading to the current target
-                this._autopilot = true;
-                this._setTarget(this._targetDef && this._targetDef.key !== this._activeKey ? this._targetDef.key : others[0]);
-            } else {
-                // advance to the next world, or switch autopilot off after the last
-                const idx = others.indexOf(this._targetDef.key);
-                const next = others[idx + 1];
-                if (next) { this._setTarget(next); }
-                else { this._autopilot = false; }
+            const p = g.player.position;
+            const head = this._heading; // ship nose direction
+            const to = new THREE.Vector3();
+            let bestKey = null, bestScore = -Infinity;
+            for (const key in PLANETS) {
+                if (key === this._activeKey) continue;
+                to.copy(this._orbitOf(PLANETS[key])).sub(p);
+                const dist = to.length() || 1;
+                to.divideScalar(dist);
+                const score = head.dot(to) - dist * 0.0003; // aim first, nearer breaks ties
+                if (score > bestScore) { bestScore = score; bestKey = key; }
             }
-            g.showMessage && g.showMessage(this._autopilot
-                ? ('🛰 Course → ' + this._targetDef.name + '  (G: next world)')
-                : 'Autopilot off — manual control', 1800);
+            if (!bestKey) return;
+            if (this._autopilot && this._targetDef && this._targetDef.key === bestKey) {
+                this._autopilot = false; // re-press while aimed at the same world → cancel
+                g.showMessage && g.showMessage('Autopilot off — manual control', 1800);
+                return;
+            }
+            this._setTarget(bestKey);
+            this._autopilot = true;
+            g.showMessage && g.showMessage('🛰 Course locked → ' + this._targetDef.name + '  (point & G to retarget)', 2000);
         }
 
         // updatePlayer hook while piloting: charge on the pad, else free flight.
@@ -1948,7 +1957,7 @@
             const m = destDist.toFixed(0);
             this._showPrompt(this._autopilot
                 ? ('🛰 Autopilot → ' + this._targetDef.name + '  ·  ' + m + 'm  ·  [G] cancel')
-                : ('[G] set course → ' + this._targetDef.name + '  ·  ' + m + 'm   ·   [E] land'));
+                : ('point at a world + [G] to lock course   ·   [E] land'));
         }
 
         // ---- altitude HUD ----
