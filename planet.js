@@ -810,8 +810,8 @@
             // camera's own distance) never clip at far vantages/angles; raise near a
             // touch to keep depth precision with the much bigger range.
             if (g.camera) {
-                g.camera.far = 13000;
-                g.camera.near = 0.5;
+                g.camera.far = 21000;
+                g.camera.near = 1.5;
                 g.camera.updateProjectionMatrix();
             }
             if (g.sky) {
@@ -1585,7 +1585,7 @@
                 vel.lerp(want, Math.min(1, 3.5 * dt));
             } else {
                 // Forces: nose thrust, home gravity, a gentle pull near the sister planet.
-                const THRUST = 200, MAXSP = 400; // faster cruise for the now-huge inter-planet gaps
+                const THRUST = 400, MAXSP = 800; // faster cruise for the scaled-up system
                 if (throttle) vel.addScaledVector(H, throttle * THRUST * dt);
                 vel.addScaledVector(up, -GRAVITY * gravityScale(dist) * dt);
                 if (destDist < this._destRadius * 3.2) {

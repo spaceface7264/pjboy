@@ -143,7 +143,7 @@
             props: true,
             clouds: true,
             atm: [0x6db4ff, 0x8ec6ff, 0xbfe0ff],
-            orbit: { dir: [0.42, 0.82, 0.40], dist: 3200 }
+            orbit: { dir: [0.42, 0.82, 0.40], dist: 7000 }
         };
     }
 
@@ -152,24 +152,24 @@
         return {
             key: 'ember', name: 'Ember', R: 70, gravity: 30, noiseScale: 2.7, amp: 20, seaBias: 0.30, seed: 4477,
             sea: 0xc23a10, sky: 0xc1432f, pal: makePalette(20, 0x5a1505, 0x7a2a14, 0xc1432f, 0xe07b2c, 0xf0e2c2),
-            props: false, clouds: false, atm: [0xff7a3a, 0xff9a5a, 0xffc79a], orbit: { dir: [-0.65, 0.35, -0.67], dist: 4200 }
+            props: false, clouds: false, atm: [0xff7a3a, 0xff9a5a, 0xffc79a], orbit: { dir: [-0.65, 0.35, -0.67], dist: 9000 }
         };
     }
     function makeGoliath() {
         return {
             key: 'goliath', name: 'Goliath', R: 175, gravity: 16, noiseScale: 1.3, amp: 40, seaBias: 0.42, seed: 7788,
             sea: 0x12b39a, sky: 0x9b27b0, pal: makePalette(40, 0x241046, 0x5e1b86, 0xb52db0, 0x2fe39a, 0xc7f7ff),
-            props: false, clouds: true, atm: [0x8a2be2, 0x3fd0c0, 0xc7f7ff], orbit: { dir: [0.30, -0.60, 0.74], dist: 6800 }
+            props: false, clouds: true, atm: [0x8a2be2, 0x3fd0c0, 0xc7f7ff], orbit: { dir: [0.30, -0.60, 0.74], dist: 13000 }
         };
     }
-    // A truly colossal ocean-blue giant. Kept just under the nearest orbit (2500) so
-    // other worlds aren't embedded in it. Very low gravity (big floaty jumps), gentle
-    // huge features. Blocks are chunky at this scale (capped FACE_N); big build on land.
+    // A truly colossal ocean-blue giant. Kept under the nearest orbit (~6500) so other
+    // worlds aren't embedded in it. Very low gravity (big floaty jumps), gentle huge
+    // features. Blocks are chunky at this scale (capped FACE_N); big build on landing.
     function makeAtlas() {
         return {
-            key: 'atlas', name: 'Atlas', R: 2000, gravity: 11, noiseScale: 0.7, amp: 70, seaBias: 0.5, seed: 5150,
-            sea: 0x0a3a6b, sky: 0x2a86b8, pal: makePalette(70, 0x06203f, 0x1a5a8a, 0x2a9fb0, 0xd8c89a, 0xf2f6ff),
-            props: false, clouds: true, atm: [0x5aa0ff, 0x8ec6ff, 0xc7e8ff], orbit: { dir: [-0.2, 0.55, -0.81], dist: 9500 }
+            key: 'atlas', name: 'Atlas', R: 5000, gravity: 9, noiseScale: 0.6, amp: 80, seaBias: 0.5, seed: 5150,
+            sea: 0x0a3a6b, sky: 0x2a86b8, pal: makePalette(80, 0x06203f, 0x1a5a8a, 0x2a9fb0, 0xd8c89a, 0xf2f6ff),
+            props: false, clouds: true, atm: [0x5aa0ff, 0x8ec6ff, 0xc7e8ff], orbit: { dir: [-0.2, 0.55, -0.81], dist: 16000 }
         };
     }
 
@@ -230,7 +230,7 @@
             props: !!biome.lush,
             clouds: rng() < 0.5,
             atm: atm,
-            orbit: { dir: dir, dist: Math.round(lerp(2500, 9000, rng())) }
+            orbit: { dir: dir, dist: Math.round(lerp(6500, 20000, rng())) }
         };
     }
 
