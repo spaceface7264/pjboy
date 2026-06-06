@@ -109,6 +109,8 @@
     const SUN_RENDER_DIST = 380;    // where the disk is drawn from the camera (inside the 500 sky)
     const SUN_RADIUS = 16;          // apparent disk radius at the render distance (~2.4°)
     const DAY_SPEED = 1;            // day/night time multiplier (1 = real per-planet day lengths; >1 for testing)
+    const ECLIPTIC_AXIS = new THREE.Vector3(0.06, 0.998, 0).normalize(); // shared spin + orbital pole
+    const ORBIT_K = 0.00046;       // orbital period (s) = ORBIT_K · radius^1.5 (Kepler-ish; ~4–15 min)
     // The walkable worlds — built from the procedural catalog (planetgen.js). The
     // ACTIVE one builds at the origin; the rest render as distant prop globes at
     // their `orbit`. Each has its own radius + gravity. The first entry's key is
@@ -357,6 +359,7 @@
             this._activeKey = this._activeDef.key;
             this._targetDef = PLANETS[Object.keys(PLANETS).find((k) => k !== this._activeKey)] || PLANETS.home;
             setActivePlanet(this._activeDef);
+            this._initOrbits();         // orbital params (used by _orbitOf for props/flight)
             this._buildPlanet();
             this._setupScene();
             this._buildAtmosphere();
@@ -430,11 +433,20 @@
         // the updatePlayer guard).
         update(dt) {
             const g = this.game;
+            // Advance orbital time (always — planets keep revolving even in space).
+            this._orbitT = (this._orbitT || 0) + (dt || 0.016);
             // Slowly drift the cloud layer for a living sky.
             if (this._clouds) this._clouds.rotation.y += (dt || 0.016) * 0.006;
             // Day/night: advance the sun around the planet, move the disk + light,
             // recolour sky/atmosphere/ambient and fade the stars in at night.
             this._updateDayNight(dt);
+            // Revolve the planet props along their live orbits, and keep the flight
+            // target pinned to its moving world.
+            for (const k in this._propMeshes) {
+                const rec = this._propMeshes[k];
+                if (rec && rec.group) rec.group.position.copy(this._orbitOf(rec.def));
+            }
+            if (this._targetDef && this._targetDef.key !== this._activeKey) this._destCenter.copy(this._orbitOf(this._targetDef));
             // Starfield follows the camera so stars hold fixed sky directions.
             if (this._stars) this._stars.position.copy(g.camera.position);
             // Distance-based LOD: build terrain + fade the cheap sphere out to reveal it.
@@ -1131,8 +1143,9 @@
         // per-world phase. Called after the sun is built and on every world swap.
         _configureDayNight() {
             const def = this._activeDef || {};
-            const tilt = (def.axisTilt != null) ? def.axisTilt : 0.25;
-            this._spinAxis = new THREE.Vector3(Math.sin(tilt), Math.cos(tilt), 0).normalize();
+            // Spin around the SHARED system pole (= the ecliptic pole) so the daily
+            // wheel and orbits stay consistent (planets revolve relative to the sun).
+            this._spinAxis = ECLIPTIC_AXIS.clone();
             // Base sun direction made perpendicular to the axis → it sweeps a great
             // circle (real sunrise/sunset everywhere but the poles).
             const base = (this._sunDir ? this._sunDir.clone() : new THREE.Vector3(1, 0, 0.3));
@@ -1161,7 +1174,12 @@
 
             this._dayT = (this._dayT + dt * DAY_SPEED * spinShare) % this._daySec;
             const th = this._dayT / this._daySec * Math.PI * 2;
-            const sun = this._sunNow.copy(this._sunBase).applyAxisAngle(this._spinAxis, th); // unit dir to the sun
+            // Yearly drift: the active world's own orbit slowly shifts the sun's path
+            // (so the sun drifts relative to the stars over the "year"); daily spin θ
+            // wheels everything on top.
+            const ao = this._orbits && this._orbits[this._activeKey];
+            const yearDrift = ao ? ao.omega * (this._orbitT || 0) : 0;
+            const sun = this._sunNow.copy(this._sunBase).applyAxisAngle(this._spinAxis, th + yearDrift); // unit dir to the sun
 
             // True planetary spin: the whole celestial sphere wheels together (only while
             // we're in the planet's pull). The sun is one point in it (rotated by θ); the
@@ -1958,7 +1976,28 @@
 
         // ---- planets (props) + flight target + launch HUD ----
 
-        _orbitOf(def) { return new THREE.Vector3().fromArray(def.orbit.dir).normalize().multiplyScalar(def.orbit.dist); }
+        // Cache each world's orbital base position + angular rate (Kepler-ish: outer =
+        // slower). The current layout is the t=0 snapshot.
+        _initOrbits() {
+            this._orbits = {};
+            this._orbitT = 0;
+            for (const key in PLANETS) {
+                const def = PLANETS[key];
+                const base = new THREE.Vector3().fromArray(def.orbit.dir).normalize().multiplyScalar(def.orbit.dist);
+                const period = ORBIT_K * Math.pow(def.orbit.dist, 1.5);
+                this._orbits[key] = { base: base, omega: (2 * Math.PI) / period };
+            }
+        }
+
+        // LIVE position of a world: its orbital base rotated by (daily spin + its own
+        // orbital advance) around the shared pole. Planets thus share the daily wheel
+        // AND drift relative to the sun (revolve). Used for rendering + flight + map.
+        _orbitOf(def) {
+            const o = this._orbits && this._orbits[def.key];
+            if (!o) return new THREE.Vector3().fromArray(def.orbit.dir).normalize().multiplyScalar(def.orbit.dist);
+            const dayTh = (this._dayT || 0) / (this._daySec || 300) * Math.PI * 2;
+            return o.base.clone().applyAxisAngle(ECLIPTIC_AXIS, o.omega * (this._orbitT || 0) + dayTh);
+        }
         _propRadiusOf(def) { return def.R * PROP_SCALE; }
 
         // Select which world the flight is heading to (drives autopilot + arrival).
