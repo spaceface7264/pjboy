@@ -118,12 +118,12 @@
     // --- Biome archetypes (bias hue/ranges for flavor) --------------------
     // Each returns tweaks; chosen by RNG, but pure-hue fallback is also valid.
     const BIOMES = [
-        { name: 'lush',     hue: 0.30, hueJ: 0.06, sat: 0.55, lush: true,  seaShift: 0.55, ampB: [12, 30], seaB: [0.40, 0.55] },
-        { name: 'desert',   hue: 0.10, hueJ: 0.04, sat: 0.55, lush: false, seaShift: 0.50, ampB: [6, 22],  seaB: [0.25, 0.40] },
-        { name: 'ice',      hue: 0.55, hueJ: 0.05, sat: 0.30, lush: false, seaShift: 0.45, ampB: [10, 28], seaB: [0.45, 0.60] },
-        { name: 'volcanic', hue: 0.02, hueJ: 0.04, sat: 0.70, lush: false, seaShift: 0.50, ampB: [18, 45], seaB: [0.25, 0.45] },
-        { name: 'alien',    hue: 0.78, hueJ: 0.10, sat: 0.62, lush: false, seaShift: 0.40, ampB: [12, 38], seaB: [0.30, 0.55] },
-        { name: 'ocean',    hue: 0.58, hueJ: 0.06, sat: 0.55, lush: false, seaShift: 0.50, ampB: [6, 18],  seaB: [0.55, 0.60] }
+        { name: 'lush',     hue: 0.30, hueJ: 0.06, sat: 0.55, lush: true,  seaShift: 0.55, ampB: [12, 30], seaB: [0.40, 0.55], weather: 'rain' },
+        { name: 'desert',   hue: 0.10, hueJ: 0.04, sat: 0.55, lush: false, seaShift: 0.50, ampB: [6, 22],  seaB: [0.25, 0.40], weather: 'dust' },
+        { name: 'ice',      hue: 0.55, hueJ: 0.05, sat: 0.30, lush: false, seaShift: 0.45, ampB: [10, 28], seaB: [0.45, 0.60], weather: 'snow' },
+        { name: 'volcanic', hue: 0.02, hueJ: 0.04, sat: 0.70, lush: false, seaShift: 0.50, ampB: [18, 45], seaB: [0.25, 0.45], weather: 'ash' },
+        { name: 'alien',    hue: 0.78, hueJ: 0.10, sat: 0.62, lush: false, seaShift: 0.40, ampB: [12, 38], seaB: [0.30, 0.55], weather: 'rain' },
+        { name: 'ocean',    hue: 0.58, hueJ: 0.06, sat: 0.55, lush: false, seaShift: 0.50, ampB: [6, 18],  seaB: [0.55, 0.60], weather: 'rain' }
     ];
 
     // --- Curated home world (Terra) ---------------------------------------
@@ -137,7 +137,7 @@
             amp: 15,
             seaBias: 0.46,
             seed: 9123,
-            daySec: 360, axisTilt: 0.35,
+            daySec: 360, axisTilt: 0.35, weather: 'rain',
             sea: 0x2a6fb0,
             sky: 0x6fae3a,
             pal: makePalette(15, 0x8a7b50, 0xe6d6a8, 0x6fae3a, 0x8a8d92, 0xeaf2f7),
@@ -151,14 +151,14 @@
     // --- Curated sister worlds (always present) ---------------------------
     function makeEmber() {
         return {
-            key: 'ember', name: 'Ember', R: 70, gravity: 30, noiseScale: 2.7, amp: 20, seaBias: 0.30, seed: 4477, daySec: 140, axisTilt: 0.1,
+            key: 'ember', name: 'Ember', R: 70, gravity: 30, noiseScale: 2.7, amp: 20, seaBias: 0.30, seed: 4477, daySec: 140, axisTilt: 0.1, weather: 'ash',
             sea: 0xc23a10, sky: 0xc1432f, pal: makePalette(20, 0x5a1505, 0x7a2a14, 0xc1432f, 0xe07b2c, 0xf0e2c2),
             props: false, clouds: false, atm: [0xff7a3a, 0xff9a5a, 0xffc79a], orbit: { dir: [-0.65, 0.35, -0.67], dist: 9000 }
         };
     }
     function makeGoliath() {
         return {
-            key: 'goliath', name: 'Goliath', R: 175, gravity: 16, noiseScale: 1.3, amp: 40, seaBias: 0.42, seed: 7788, daySec: 520, axisTilt: 0.5,
+            key: 'goliath', name: 'Goliath', R: 175, gravity: 16, noiseScale: 1.3, amp: 40, seaBias: 0.42, seed: 7788, daySec: 520, axisTilt: 0.5, weather: 'rain',
             sea: 0x12b39a, sky: 0x9b27b0, pal: makePalette(40, 0x241046, 0x5e1b86, 0xb52db0, 0x2fe39a, 0xc7f7ff),
             props: false, clouds: true, atm: [0x8a2be2, 0x3fd0c0, 0xc7f7ff], orbit: { dir: [0.30, -0.60, 0.74], dist: 13000 }
         };
@@ -168,7 +168,7 @@
     // features. Blocks are chunky at this scale (capped FACE_N); big build on landing.
     function makeAtlas() {
         return {
-            key: 'atlas', name: 'Atlas', R: 5000, gravity: 9, noiseScale: 0.6, amp: 80, seaBias: 0.5, seed: 5150, daySec: 900, axisTilt: 0.2,
+            key: 'atlas', name: 'Atlas', R: 5000, gravity: 9, noiseScale: 0.6, amp: 80, seaBias: 0.5, seed: 5150, daySec: 900, axisTilt: 0.2, weather: 'rain',
             sea: 0x0a3a6b, sky: 0x2a86b8, pal: makePalette(80, 0x06203f, 0x1a5a8a, 0x2a9fb0, 0xd8c89a, 0xf2f6ff),
             props: false, clouds: true, atm: [0x5aa0ff, 0x8ec6ff, 0xc7e8ff], orbit: { dir: [-0.2, 0.55, -0.81], dist: 16000 }
         };
@@ -227,6 +227,7 @@
             seed: ((rng() * 0x7fffffff) | 0) >>> 0 || (idx * 2654435761 >>> 0),
             daySec: Math.round(lerp(120, 600, rng())), // own day length
             axisTilt: Math.round(rng() * 0.7 * 100) / 100,
+            weather: biome.weather,
             sea: sea,
             sky: sky,
             pal: makePalette(amp, bands[0], bands[1], bands[2], bands[3], bands[4]),

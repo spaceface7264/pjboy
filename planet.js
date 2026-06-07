@@ -368,6 +368,8 @@
             this._buildSun();
             this._buildStars();
             this._configureDayNight();
+            this._configureWeather();
+            this._buildWeather();
             this._preloadProps();
             if (g.clearEnemies) g.clearEnemies();
 
@@ -406,6 +408,7 @@
             this._landed = false;
             this._clearSun();
             this._clearStars();
+            this._clearWeather();
             if (this._sun) { g.scene.remove(this._sun); g.scene.remove(this._sun.target); }
             if (this._ambient) g.scene.remove(this._ambient);
             this._clearProps();
@@ -440,6 +443,9 @@
             // Day/night: advance the sun around the planet, move the disk + light,
             // recolour sky/atmosphere/ambient and fade the stars in at night.
             this._updateDayNight(dt);
+            // Weather: precipitation fronts, overcast, lightning (after day/night so
+            // the lightning flash layers on top of the cycle's ambient).
+            this._updateWeather(dt);
             // Revolve the planet props along their live orbits, and keep the flight
             // target pinned to its moving world.
             for (const k in this._propMeshes) {
@@ -1066,6 +1072,117 @@
             const g = this.game;
             if (this._atm) { for (const s of this._atm) g.scene.remove(s); this._atm = null; }
             if (this._clouds) { g.scene.remove(this._clouds); this._clouds = null; }
+        }
+
+        // ---- weather (per-world precipitation + fronts) ----
+
+        // Soft round / vertical-streak particle textures (cached).
+        _wxTex(streak) {
+            const key = streak ? '_wxStreakTex' : '_wxRoundTex';
+            if (this[key]) return this[key];
+            const c = document.createElement('canvas'); c.width = c.height = 32;
+            const x = c.getContext('2d');
+            if (streak) {
+                const grd = x.createLinearGradient(16, 0, 16, 32);
+                grd.addColorStop(0, 'rgba(255,255,255,0)'); grd.addColorStop(0.5, 'rgba(255,255,255,1)'); grd.addColorStop(1, 'rgba(255,255,255,0)');
+                x.fillStyle = grd; x.fillRect(13, 0, 6, 32);
+            } else {
+                const grd = x.createRadialGradient(16, 16, 0, 16, 16, 16);
+                grd.addColorStop(0, 'rgba(255,255,255,1)'); grd.addColorStop(0.6, 'rgba(255,255,255,0.5)'); grd.addColorStop(1, 'rgba(255,255,255,0)');
+                x.fillStyle = grd; x.fillRect(0, 0, 32, 32);
+            }
+            const t = new THREE.CanvasTexture(c);
+            this[key] = t; return t;
+        }
+
+        _wxStyle(type) {
+            switch (type) {
+                case 'snow': return { color: 0xffffff, size: 2.0, speed: 9, wind: 1.5, maxOp: 0.9, streak: false, storm: false };
+                case 'ash': return { color: 0xff7a3a, size: 1.3, speed: 12, wind: 4, maxOp: 0.8, streak: false, storm: false };
+                case 'dust': return { color: 0xd8b070, size: 1.6, speed: 7, wind: 10, maxOp: 0.5, streak: false, storm: false };
+                default: return { color: 0xb9d4ff, size: 1.6, speed: 55, wind: 6, maxOp: 0.8, streak: true, storm: true }; // rain
+            }
+        }
+
+        _configureWeather() {
+            this._wxType = (this._activeDef && this._activeDef.weather) || 'rain';
+            this._wxStyleDef = this._wxStyle(this._wxType);
+            this._wxIntensity = 0;
+            this._wxTarget = 0.55;                   // start with a front building in (so it's visible)
+            this._wxTimer = 18 + Math.random() * 30; // then fronts roll through
+            this._wxFlash = 0;
+        }
+
+        // Build the precipitation particle field (local box, oriented to the player's up).
+        _buildWeather() {
+            this._clearWeather();
+            const N = 1400;
+            this._wxBox = 70; this._wxH = 80;
+            const pos = new Float32Array(N * 3);
+            for (let i = 0; i < N; i++) {
+                pos[i * 3] = (Math.random() - 0.5) * this._wxBox * 2;
+                pos[i * 3 + 1] = Math.random() * this._wxH;
+                pos[i * 3 + 2] = (Math.random() - 0.5) * this._wxBox * 2;
+            }
+            const geo = new THREE.BufferGeometry();
+            geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+            const st = this._wxStyleDef || this._wxStyle('rain');
+            const mat = new THREE.PointsMaterial({
+                map: this._wxTex(st.streak), color: st.color, size: st.size,
+                transparent: true, opacity: 0, depthWrite: false, sizeAttenuation: true
+            });
+            const pts = new THREE.Points(geo, mat);
+            pts.frustumCulled = false;
+            this.game.scene.add(pts);
+            this._rain = pts;
+        }
+
+        _clearWeather() {
+            if (this._rain) { this.game.scene.remove(this._rain); this._rain = null; }
+        }
+
+        _updateWeather(dt) {
+            const r = this._rain;
+            if (!r) return;
+            const g = this.game;
+            const p = g.player.position;
+            const up = this._dnUp ? this._dnUp : (this._dnUp = new THREE.Vector3());
+            up.copy(p).sub(this._center);
+            const ul = up.length() || 1; up.divideScalar(ul);
+            // Weather only near a surface (fades out with altitude / in space).
+            const alt = Math.max(0, ul - this.groundRadius(up));
+            const near = Math.max(0, 1 - alt / 160);
+
+            // Fronts: every ~20–70s pick a new target (clear spells or active weather).
+            this._wxTimer -= dt;
+            if (this._wxTimer <= 0) {
+                this._wxTarget = (Math.random() < 0.45) ? 0 : (0.4 + Math.random() * 0.6);
+                this._wxTimer = 20 + Math.random() * 50;
+            }
+            this._wxIntensity += (this._wxTarget - this._wxIntensity) * Math.min(1, dt * 0.15);
+            const vis = this._wxIntensity * near;
+
+            const st = this._wxStyleDef;
+            const UPY = this._UPY || (this._UPY = new THREE.Vector3(0, 1, 0));
+            r.position.copy(p);
+            r.quaternion.setFromUnitVectors(UPY, up);
+            const arr = r.geometry.attributes.position.array;
+            const fall = st.speed * dt, wind = st.wind * dt, B = this._wxBox, H = this._wxH;
+            for (let i = 0; i < arr.length; i += 3) {
+                arr[i + 1] -= fall; arr[i] += wind;
+                if (arr[i + 1] < 0) { arr[i + 1] += H; arr[i] = (Math.random() - 0.5) * B * 2; arr[i + 2] = (Math.random() - 0.5) * B * 2; }
+                if (arr[i] > B) arr[i] -= B * 2;
+            }
+            r.geometry.attributes.position.needsUpdate = true;
+            r.material.opacity = st.maxOp * vis;
+            r.visible = vis > 0.02;
+
+            // Storms: lightning flashes at high intensity (brief ambient pop).
+            if (st.storm && vis > 0.5 && Math.random() < dt * 0.5 * (vis - 0.4)) this._wxFlash = 1;
+            this._wxFlash = Math.max(0, this._wxFlash - dt * 4);
+            if (this._ambient && this._wxFlash > 0) this._ambient.intensity += this._wxFlash * 1.4;
+            // Overcast: dim the cloud layer a touch as weather builds.
+            if (this._clouds) this._clouds.traverse((o) => { if (o.isMesh && o.material) { o.material.color && o.material.color.setScalar(1 - 0.45 * vis); } });
         }
 
         // ---- the sun: solar-system center + primary light source ----
@@ -2164,6 +2281,8 @@
             this._targetDef = null;                         // pick a fresh default target
             this._buildPlanetProps();                       // every other world becomes a prop
             this._configureDayNight();                      // this world's day length + spin axis
+            this._configureWeather();                       // this world's precipitation type
+            this._buildWeather();                           // rebuild particles for the new type
         }
 
         _ensureChargeUI() {
