@@ -486,6 +486,7 @@
             if (this._water) g.scene.remove(this._water);
             if (this._rocket) { g.scene.remove(this._rocket); this._rocket = null; }
             if (this._ship) { g.scene.remove(this._ship); this._ship = null; }
+            if (this._reGlow) { g.scene.remove(this._reGlow); this._reGlow = null; }
             this._clearPlanetProps();
             if (this._dust) { g.scene.remove(this._dust.ring); this._dust = null; }
             this._landed = false;
@@ -522,7 +523,17 @@
             // Advance orbital time (always — planets keep revolving even in space).
             this._orbitT = (this._orbitT || 0) + (dt || 0.016);
             // Slowly drift the cloud layer for a living sky.
-            if (this._clouds) this._clouds.rotation.y += (dt || 0.016) * 0.006;
+            if (this._clouds) {
+                this._clouds.rotation.y += (dt || 0.016) * 0.006;
+                // Altitude-driven fade: clouds dissolve as you climb past them into space
+                // (the Cubic Odyssey "terrain & clouds melt away" cue on ascent/descent).
+                const camR = g.camera.position.distanceTo(this._center);
+                const cloudR = R * 1.4;
+                const f = 1 - Math.min(1, Math.max(0, (camR - cloudR) / Math.max(1, SOI_OUTER - cloudR)));
+                this._clouds.traverse((o) => { if (o.isMesh && o.material) o.material.opacity = 0.92 * f; });
+            }
+            // Drop the reentry glow when not piloting.
+            if (!this._riding && this._reGlow) this._reGlow.visible = false;
             // Day/night: advance the sun around the planet, move the disk + light,
             // recolour sky/atmosphere/ambient and fade the stars in at night.
             this._updateDayNight(dt);
@@ -2249,6 +2260,13 @@
                 if (throttle < ramp) throttle = ramp;
             }
 
+            // Atmospheric envelope (reentry): density rises toward a body's surface
+            // (nearest of home / target wins). In thick air the top speed drops and drag
+            // stiffens — so flight is fast in vacuum and draggy on descent (two-tier feel).
+            const homeAtmD = Math.max(0, Math.min(1, 1 - (dist - R) / (1.6 * R)));
+            const destAtmD = Math.max(0, Math.min(1, 1 - (destDist - this._destRadius) / (1.6 * this._destRadius)));
+            const atmD = Math.max(homeAtmD, destAtmD);
+
             if (autoLanding) {
                 // Ease velocity into a slow radial descent that gentles near the
                 // surface — a clean, soft set-down straight onto the spot below.
@@ -2258,16 +2276,22 @@
                 vel.lerp(want, Math.min(1, 3.5 * dt));
             } else {
                 // Forces: nose thrust, home gravity, a gentle pull near the sister planet.
-                const THRUST = 400, MAXSP = 800; // faster cruise for the scaled-up system
+                const THRUST = 400;
+                const MAXSP = 800 + (220 - 800) * atmD;            // 800 vacuum → ~220 deep atmosphere
                 if (throttle) vel.addScaledVector(H, throttle * THRUST * dt);
                 vel.addScaledVector(up, -GRAVITY * gravityScale(dist) * dt);
                 if (destDist < this._destRadius * 3.2) {
                     const dg = 20 * (1 - destDist / (this._destRadius * 3.2));
                     vel.addScaledVector(toDest, dg * dt);
                 }
-                vel.multiplyScalar(1 - Math.min(0.5, 0.5 * dt));   // light drag for control
+                const dragK = 0.5 + 3.2 * atmD;                    // light in vacuum, stiff in air
+                vel.multiplyScalar(1 - Math.min(0.85, dragK * dt));
                 const sp = vel.length(); if (sp > MAXSP) vel.multiplyScalar(MAXSP / sp);
             }
+
+            // Reentry heat intensity (drives the nose glow + camera shake).
+            this._atmD = atmD;
+            this._reentry = atmD * Math.min(1, vel.length() / 260);
 
             p.addScaledVector(vel, dt);
 
@@ -2342,8 +2366,10 @@
             const inSpace = dist >= SOI_OUTER;
             if (inSpace !== this._inSpace) {
                 this._inSpace = inSpace;
-                g.showMessage && g.showMessage(inSpace ? '🚀 Reached space — zero gravity' : 'Re-entering atmosphere', 1800);
+                g.showMessage && g.showMessage(inSpace ? '🚀 Reached space — zero gravity' : '🔥 Re-entering atmosphere', 1800);
             }
+            // Coarse flight phase (for HUD / future hooks).
+            this._phase = this._landed ? 'TOUCHDOWN' : (this._liftoffT > 0 ? 'TAKEOFF' : (inSpace ? 'CRUISE' : 'REENTRY'));
             this._updateAltUI(dist, up);
             if (this._landed) this._showPrompt('🛬 Landed — E to step out · Space to lift off');
             else if (autoLanding) this._showPrompt('🛬 Auto-landing on ' + this._targetDef.name + ' · ' + Math.max(0, destAltNow).toFixed(0) + 'm');
@@ -2352,6 +2378,27 @@
 
             this._seatRocket(p, H);
             this._updateExhaust(dt, throttle > 0.05, Math.max(0, throttle));
+            this._updateReentryGlow(p, H);
+        }
+
+        // Additive heat glow at the nose during fast atmospheric reentry (intensity =
+        // this._reentry, set in _flyRocket). Hidden in vacuum / slow descent.
+        _updateReentryGlow(p, H) {
+            const g = this.game;
+            const r = this._reentry || 0;
+            if (r < 0.03) { if (this._reGlow) this._reGlow.visible = false; return; }
+            if (!this._reGlow) {
+                const tex = this._reGlowTex || (this._reGlowTex = this._sunGlowTex(['rgba(255,245,225,1)', 'rgba(255,140,60,0.55)', 'rgba(255,90,30,0)']));
+                const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
+                this._reGlow = new THREE.Sprite(mat);
+                this._reGlow.frustumCulled = false;
+                g.scene.add(this._reGlow);
+            }
+            this._reGlow.visible = true;
+            const sc = ROCKET_SCALE * (5 + 12 * r);
+            this._reGlow.scale.set(sc, sc, 1);
+            this._reGlow.position.copy(p).addScaledVector(H, ROCKET_SCALE * 2.4); // leading shock at the nose
+            this._reGlow.material.opacity = Math.min(0.92, r);
         }
 
         // Orient the rocket so its nose (+Y) points along the heading H.
@@ -2511,6 +2558,14 @@
                 cam.up.copy(desiredUp);
                 cam.position.copy(desiredPos);
                 cam.lookAt(desiredTgt);
+            }
+            // Reentry shudder — a small translational jitter scaled by heat intensity.
+            const shake = this._reentry || 0;
+            if (shake > 0.05) {
+                const s = shake * 0.8;
+                cam.position.x += (Math.random() - 0.5) * s;
+                cam.position.y += (Math.random() - 0.5) * s;
+                cam.position.z += (Math.random() - 0.5) * s;
             }
         }
 
