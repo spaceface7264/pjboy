@@ -984,6 +984,31 @@ class Game3D {
         return 0;
     }
 
+    // Solid-terrain wall test for open-world voxels. The player is blocked from
+    // moving into (x,z) when a solid block occupies their BODY span there — i.e.
+    // a face higher than a single-block step-up, up to head height. Lower lips
+    // (≤1 block) are walkable (the floor clamp steps you up); overhangs above the
+    // head are passable (you walk under them). This is exact per-voxel, so dug
+    // tunnels, shafts and overhangs all collide correctly.
+    //
+    // On the open natural surface it is bypassed entirely so steep hillsides stay
+    // freely walkable (climbed via the floor clamp, exactly as before digging).
+    _terrainBlocksMove(x, z) {
+        const ws = this.worldStream;
+        if (this.activeModeId !== 'open_world' || !ws || !ws.solidCell) return false;
+        if (this.flyMode) return false; // creative flight phases past terrain walls
+        const py = this.player.position.y;
+        const genHere = ws.genHeightAt ? ws.genHeightAt(this.player.position.x, this.player.position.z) : py;
+        if (py >= genHere - 0.5) return false; // on/above the natural surface → free movement
+        const cx = Math.round(x / 1), cz = Math.round(z / 1); // CELL = 1
+        const lo = Math.floor(py + 1.0) + 1; // first block above the 1-block step-up line
+        const hi = Math.floor(py + 1.7) + 1; // block at head height
+        for (let k = lo; k <= hi; k++) {
+            if (ws.solidCell(cx, k, cz)) return true;
+        }
+        return false;
+    }
+
     // March a ray forward until it drops to/below the ground surface; returns
     // {x, z} of the hit or null. Used so block placement lands on terrain.
     _marchRayToGround(origin, dir, maxDist) {
@@ -1313,9 +1338,11 @@ class Game3D {
             const tHit = tEnter >= 0 ? tEnter : 0;
             if (tHit < bestT) { bestT = tHit; best = w; }
         }
-        // Also consider the terrain surface; mine whichever is closer.
-        const ground = (this.worldStream && this.worldStream.raycastGround)
-            ? this.worldStream.raycastGround(origin, dir, MAX_REACH) : null;
+        // Also consider the terrain voxels; mine whichever block is closer. The
+        // voxel ray returns the exact 1×1×1 block under the crosshair, so mining
+        // carves a single hole (with whatever blocks above it left in place).
+        const ground = (this.worldStream && this.worldStream.raycastVoxel)
+            ? this.worldStream.raycastVoxel(origin, dir, MAX_REACH) : null;
         if (best && (!ground || bestT <= ground.dist)) {
             const pt = origin.clone().addScaledVector(dir, bestT);
             if (best.voxelTree) {
@@ -1328,8 +1355,8 @@ class Game3D {
                 this.spawnImpact && this.spawnImpact(pt, 0xffe08a);
                 this.audio && this.audio.play && this.audio.play('swordHit');
             }
-        } else if (ground && this.worldStream.digCell(ground.cellX, ground.cellZ)) {
-            const pt = new THREE.Vector3(ground.x, this.worldStream.heightAt(ground.x, ground.z), ground.z);
+        } else if (ground && this.worldStream.digVoxel(ground.cx, ground.k, ground.cz)) {
+            const pt = new THREE.Vector3(ground.x, ground.y, ground.z);
             this.spawnImpact && this.spawnImpact(pt, 0xbfae86);
             this.audio && this.audio.play && this.audio.play('swordHit');
         }
@@ -8816,7 +8843,10 @@ class Game3D {
             }
 
             if (event.code === 'KeyM') {
-                this.toggleMoreDrawer();
+                // While piloting the rocket, M opens the star map (PlanetWorld) — not the drawer.
+                if (!(this.activeModeId === 'planet' && this.planetWorld && this.planetWorld._riding)) {
+                    this.toggleMoreDrawer();
+                }
             }
 
             if (event.code === 'KeyT' && this.gameMode === 'create') {
@@ -9494,30 +9524,34 @@ class Game3D {
 
             let testPos = pos.clone();
             testPos.x += newVX * deltaTime;
+            let allowX;
             if (this.checkCollisionAxis(testPos, 'x')) {
                 const slideTest = this.player.position.clone();
                 slideTest.x = testPos.x;
-                if (!this.checkCollision(slideTest)) {
-                    this.player.position.x = testPos.x;
-                } else {
-                    newVX = 0;
-                }
+                allowX = !this.checkCollision(slideTest);
             } else {
+                allowX = true;
+            }
+            if (allowX && !this._terrainBlocksMove(testPos.x, this.player.position.z)) {
                 this.player.position.x = testPos.x;
+            } else {
+                newVX = 0;
             }
 
             testPos = this.player.position.clone();
             testPos.z += newVZ * deltaTime;
+            let allowZ;
             if (this.checkCollisionAxis(testPos, 'z')) {
                 const slideTest = this.player.position.clone();
                 slideTest.z = testPos.z;
-                if (!this.checkCollision(slideTest)) {
-                    this.player.position.z = testPos.z;
-                } else {
-                    newVZ = 0;
-                }
+                allowZ = !this.checkCollision(slideTest);
             } else {
+                allowZ = true;
+            }
+            if (allowZ && !this._terrainBlocksMove(this.player.position.x, testPos.z)) {
                 this.player.position.z = testPos.z;
+            } else {
+                newVZ = 0;
             }
             this.player.velocity.x = newVX;
             this.player.velocity.z = newVZ;
@@ -9557,34 +9591,36 @@ class Game3D {
 
             let testPos = pos.clone();
             testPos.x += newVelocityX * deltaTime;
+            let allowX;
             if (this.checkCollisionAxis(testPos, 'x')) {
                 const slideTest = this.player.position.clone();
                 slideTest.x = testPos.x;
-                if (!this.checkCollision(slideTest)) {
-                    this.player.position.x = testPos.x;
-                    this.player.velocity.x = newVelocityX;
-                } else {
-                    this.player.velocity.x = 0;
-                }
+                allowX = !this.checkCollision(slideTest);
             } else {
+                allowX = true;
+            }
+            if (allowX && !this._terrainBlocksMove(testPos.x, this.player.position.z)) {
                 this.player.position.x = testPos.x;
                 this.player.velocity.x = newVelocityX;
+            } else {
+                this.player.velocity.x = 0;
             }
 
             testPos = this.player.position.clone();
             testPos.z += newVelocityZ * deltaTime;
+            let allowZ;
             if (this.checkCollisionAxis(testPos, 'z')) {
                 const slideTest = this.player.position.clone();
                 slideTest.z = testPos.z;
-                if (!this.checkCollision(slideTest)) {
-                    this.player.position.z = testPos.z;
-                    this.player.velocity.z = newVelocityZ;
-                } else {
-                    this.player.velocity.z = 0;
-                }
+                allowZ = !this.checkCollision(slideTest);
             } else {
+                allowZ = true;
+            }
+            if (allowZ && !this._terrainBlocksMove(this.player.position.x, testPos.z)) {
                 this.player.position.z = testPos.z;
                 this.player.velocity.z = newVelocityZ;
+            } else {
+                this.player.velocity.z = 0;
             }
         }
         
@@ -9716,12 +9752,31 @@ class Game3D {
         this.checkWallCollisionY();
 
         // Floor is y=0 everywhere except the open world, where it follows the
-        // streamed terrain height under the player (rolling hills).
-        const floorY = this._groundHeightAt(this.player.position.x, this.player.position.z);
+        // terrain. In the open world we use the voxel support height so the player
+        // stands on dug shaft floors / tunnel floors (and steps up one block),
+        // instead of being snapped to the un-mined surface above them.
+        const owVoxel = this.activeModeId === 'open_world' && this.worldStream && this.worldStream.supportY;
+        // Carved columns use exact voxel support (stand on dug floors, step up one
+        // block). Untouched columns keep the cheap natural-surface snap so steep
+        // hills stay smoothly walkable exactly as before.
+        const floorY = (owVoxel && this.worldStream.isColumnCarved(this.player.position.x, this.player.position.z))
+            ? this.worldStream.supportY(this.player.position.x, this.player.position.y, this.player.position.z)
+            : this._groundHeightAt(this.player.position.x, this.player.position.z);
         if (this.player.position.y <= floorY) {
             this.player.position.y = floorY;
             this.player.velocity.y = 0;
             this.player.onGround = true;
+        }
+
+        // Open-world ceiling: stop upward motion when the head enters a solid
+        // block, so you can't jump up through a tunnel/overhang roof.
+        if (owVoxel && this.player.velocity.y > 0) {
+            const cx = Math.round(this.player.position.x), cz = Math.round(this.player.position.z);
+            const headK = Math.floor(this.player.position.y + 1.7) + 1;
+            if (this.worldStream.solidCell(cx, headK, cz)) {
+                this.player.position.y = (headK - 1) - 1.7; // sit just under the block's underside
+                this.player.velocity.y = 0;
+            }
         }
 
         if (this.player.model) {

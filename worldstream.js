@@ -62,7 +62,8 @@
     const WATER_DEEP = 0x05182e;           // color over the deepest water
     const WATER_MAX_DEPTH = 12;            // depth (units) at which water reads fully dark
     const DIG_FLOOR = -28;                 // deepest you can mine the ground (world units)
-    const EDITS = new Map();               // "cellX,cellZ" → dug surface height override
+    const REMOVED = new Set();             // "cx,k,cz" individual voxel blocks the player mined out (k = block-top y)
+    const CARVED_COLS = new Set();         // "cx,cz" columns holding ≥1 mined block → rendered as voxel stacks
     const ANIMAL_SPEED = 1.6;              // wander speed (u/s)
 
     const ROOT = 'assets/Blocks/';
@@ -343,13 +344,39 @@
         return h;
     }
 
-    // Quantized block-top height — the walkable/visible surface. Everything
-    // (floor clamp, props, animals, voxels) snaps to this. Dug cells are stored
-    // in EDITS and override the generated height so holes persist.
+    // Quantized block-top height — the natural ground surface. Props, animals,
+    // spawns, fish and the map all snap to this. It is the UN-mined surface;
+    // carving no longer moves it (see the voxel overlay below), so a tree never
+    // sinks into a hole you dig under it later.
     function surfaceY(x, z) {
-        const k = Math.round(x / CELL) + ',' + Math.round(z / CELL);
-        if (EDITS.has(k)) return EDITS.get(k);
         return Math.round(terrainHeight(x, z) / VOXEL_STEP) * VOXEL_STEP;
+    }
+
+    // ---- Voxel carving overlay --------------------------------------------
+    // The world is solid for every block whose top y (k) is ≤ the column's
+    // surface. Mining records individual removed blocks in REMOVED — so a hole
+    // can sit in the MIDDLE of a wall with solid blocks left floating above it
+    // (true voxel digging / tunnels with ceilings), instead of a heightmap that
+    // can only lower a whole column and makes blocks appear to sink. Blocks at
+    // or below DIG_FLOOR are unbreakable bedrock.
+    const cellOf = (w) => Math.round(w / CELL);
+    // Terrain is deterministic, so cache each column's quantized surface — the
+    // voxel render/collision sample a column's height many times per block.
+    const _topCache = new Map();
+    function naturalTop(cx, cz) {
+        const key = cx + ',' + cz;
+        let v = _topCache.get(key);
+        if (v === undefined) {
+            v = Math.round(terrainHeight(cx * CELL, cz * CELL) / VOXEL_STEP) * VOXEL_STEP;
+            if (_topCache.size > 400000) _topCache.clear(); // bound memory on long flights
+            _topCache.set(key, v);
+        }
+        return v;
+    }
+    function blockSolid(cx, k, cz) {
+        if (k > naturalTop(cx, cz)) return false;          // above the surface → air
+        if (k <= DIG_FLOOR) return true;                   // bedrock
+        return !REMOVED.has(cx + ',' + k + ',' + cz);
     }
 
     class WorldStream {
@@ -411,6 +438,15 @@
             return surfaceY(x, z);
         }
 
+        // The ORIGINAL (un-dug) surface height, ignoring mining edits. game.js
+        // compares the player's y against this to tell "standing on a hillside"
+        // (y ≈ generated surface → walk freely) from "down in a dug shaft"
+        // (y well below it → surrounding columns are solid walls to mine through).
+        genHeightAt(x, z) {
+            if (this._netherActive) return Math.max(netherSurfaceY(x, z), NETHER_LAVA_LEVEL);
+            return Math.round(terrainHeight(x, z) / VOXEL_STEP) * VOXEL_STEP;
+        }
+
         // Biome ground color at a world position — used to paint the world map.
         biomeColorAt(x, z) {
             return biomeAt(Math.floor(x / CHUNK_SIZE), Math.floor(z / CHUNK_SIZE)).ground;
@@ -454,7 +490,7 @@
             this._loadClouds();
             this._loadStation();
 
-            EDITS.clear(); // fresh terrain each session
+            REMOVED.clear(); CARVED_COLS.clear(); // fresh terrain each session
             const spawn = this._findLandSpawn();
             g.player.position.set(spawn.x, surfaceY(spawn.x, spawn.z) + 1, spawn.z);
             if (g.player.velocity) g.player.velocity.y = 0;
@@ -1099,24 +1135,55 @@
         _makeVoxelChunk(cx, cz, biome) {
             this._ensureVoxelAssets();
             const grass = [], sand = [], plain = [];
+            // Sort a surface block into its texture/colour bucket by surface height.
+            const pushSurface = (wx, top, z, cy, h) => {
+                const inst = { x: wx, cy, z, h, hex: 0xffffff };
+                if (top >= SNOW_LEVEL) { inst.hex = 0xeaf2f7; plain.push(inst); }            // snow
+                else if (top >= SNOW_LEVEL - 6) { inst.hex = 0x8a8d92; plain.push(inst); }   // rock
+                else if (top <= WATER_Y - 8) { inst.hex = 0x5a4a30; plain.push(inst); }      // ocean floor
+                else if (top <= WATER_Y + VOXEL_STEP) { sand.push(inst); }                  // beach/shallows
+                else { grass.push(inst); }                                                  // grass land
+            };
             for (let r = 0; r < CHUNK_CELLS; r++) {
                 for (let c = 0; c < CHUNK_CELLS; c++) {
-                    const wx = (cx * CHUNK_CELLS + c) * CELL;
-                    const wz = (cz * CHUNK_CELLS + r) * CELL;
-                    const top = surfaceY(wx, wz);
-                    const minN = Math.min(
-                        surfaceY(wx + CELL, wz), surfaceY(wx - CELL, wz),
-                        surfaceY(wx, wz + CELL), surfaceY(wx, wz - CELL)
-                    );
-                    let blockH = top - minN + VOXEL_STEP;
-                    if (blockH < VOXEL_STEP) blockH = VOXEL_STEP;
-                    if (blockH > VOXEL_MAX_H) blockH = VOXEL_MAX_H;
-                    const inst = { x: wx, cy: top - blockH / 2, z: wz, h: blockH, hex: 0xffffff };
-                    if (top >= SNOW_LEVEL) { inst.hex = 0xeaf2f7; plain.push(inst); }            // snow
-                    else if (top >= SNOW_LEVEL - 6) { inst.hex = 0x8a8d92; plain.push(inst); }   // rock
-                    else if (top <= WATER_Y - 8) { inst.hex = 0x5a4a30; plain.push(inst); }      // ocean floor
-                    else if (top <= WATER_Y + VOXEL_STEP) { sand.push(inst); }                  // beach/shallows — sand-textured
-                    else { grass.push(inst); }                                                  // grass-textured land
+                    const cxi = cx * CHUNK_CELLS + c, czi = cz * CHUNK_CELLS + r;
+                    const wx = cxi * CELL, wz = czi * CELL;
+                    const top = naturalTop(cxi, czi);
+                    const carved = CARVED_COLS.has(cxi + ',' + czi);
+                    if (!carved) {
+                        // Untouched column: one merged box (cheap), top at the
+                        // surface down to its lowest neighbour so cliffs are gapless.
+                        const minN = Math.min(
+                            naturalTop(cxi + 1, czi), naturalTop(cxi - 1, czi),
+                            naturalTop(cxi, czi + 1), naturalTop(cxi, czi - 1)
+                        );
+                        let blockH = top - minN + VOXEL_STEP;
+                        if (blockH < VOXEL_STEP) blockH = VOXEL_STEP;
+                        // Bordering a carve → extend to bedrock so the exposed shaft
+                        // wall is fully solid; otherwise cap tall natural cliffs.
+                        const borderCarve = CARVED_COLS.has((cxi + 1) + ',' + czi) || CARVED_COLS.has((cxi - 1) + ',' + czi) ||
+                                            CARVED_COLS.has(cxi + ',' + (czi + 1)) || CARVED_COLS.has(cxi + ',' + (czi - 1));
+                        const cap = borderCarve ? (top - DIG_FLOOR + VOXEL_STEP) : VOXEL_MAX_H;
+                        if (blockH > cap) blockH = cap;
+                        pushSurface(wx, top, wz, top - blockH / 2, blockH);
+                    } else {
+                        // Carved column: emit every solid block that has an air
+                        // neighbour as its own unit cube. Mined blocks are simply
+                        // absent, so holes stay fixed and ceilings float correctly.
+                        for (let k = top; k > DIG_FLOOR; k--) {
+                            if (!blockSolid(cxi, k, czi)) continue;
+                            const buried = blockSolid(cxi + 1, k, czi) && blockSolid(cxi - 1, k, czi) &&
+                                           blockSolid(cxi, k, czi + 1) && blockSolid(cxi, k, czi - 1) &&
+                                           blockSolid(cxi, k + 1, czi) && blockSolid(cxi, k - 1, czi);
+                            if (buried) continue;            // hidden inside solid rock — skip
+                            if (k === top) {
+                                pushSurface(wx, top, wz, k - 0.5, 1);     // keep the surface skin
+                            } else {
+                                // Exposed underground face: dirt near the top, stone deeper.
+                                plain.push({ x: wx, cy: k - 0.5, z: wz, h: 1, hex: (k >= top - 3 ? 0x6b4f2a : 0x6f6f78) });
+                            }
+                        }
+                    }
                 }
             }
             const meshes = [];
@@ -1141,35 +1208,66 @@
             for (const t of chunk.tiles) this.game.scene.add(t);
         }
 
-        // March the camera ray onto the voxel surface; returns the hit cell or null.
-        raycastGround(origin, dir, maxReach) {
-            const step = 0.25;
+        // Is the voxel block (cx,k,cz) solid? Public for game.js collision.
+        solidCell(cx, k, cz) { return blockSolid(cx, k, cz); }
+
+        // Has the column under (wx,wz) been mined at all? game.js uses this to pick
+        // voxel support (in dug columns) vs. the cheap natural-surface snap.
+        isColumnCarved(wx, wz) { return CARVED_COLS.has(cellOf(wx) + ',' + cellOf(wz)); }
+
+        // March the camera ray through the voxels; returns the first SOLID block
+        // it enters {cx,k,cz, point, dist}, or null. Used by mining so you remove
+        // exactly the block under the crosshair — including one inside a wall.
+        raycastVoxel(origin, dir, maxReach) {
+            const step = 0.08;
             for (let t = step; t <= maxReach; t += step) {
-                const x = origin.x + dir.x * t;
-                const y = origin.y + dir.y * t;
-                const z = origin.z + dir.z * t;
-                if (y <= surfaceY(x, z)) {
-                    return { x, z, dist: t, cellX: Math.round(x / CELL), cellZ: Math.round(z / CELL) };
-                }
+                const x = origin.x + dir.x * t, y = origin.y + dir.y * t, z = origin.z + dir.z * t;
+                const cx = cellOf(x), cz = cellOf(z), k = Math.floor(y) + 1; // block (k-1,k] contains y
+                if (blockSolid(cx, k, cz)) return { cx, k, cz, x, y, z, dist: t };
             }
             return null;
         }
 
-        // Dig one block off the targeted ground cell and rebuild affected chunks.
-        digCell(cellX, cellZ) {
-            const k = cellX + ',' + cellZ;
-            const wx = cellX * CELL, wz = cellZ * CELL;
-            const cur = EDITS.has(k) ? EDITS.get(k) : Math.round(terrainHeight(wx, wz) / VOXEL_STEP) * VOXEL_STEP;
-            if (cur <= DIG_FLOOR) return false;
-            EDITS.set(k, cur - VOXEL_STEP);
-            // Rebuild the owning chunk plus neighbours (cliff fill reads neighbours).
-            const ccx = Math.floor(cellX / CHUNK_CELLS), ccz = Math.floor(cellZ / CHUNK_CELLS);
-            this._rebuildChunkTerrain(ccx, ccz);
-            this._rebuildChunkTerrain(ccx + 1, ccz);
-            this._rebuildChunkTerrain(ccx - 1, ccz);
-            this._rebuildChunkTerrain(ccx, ccz + 1);
-            this._rebuildChunkTerrain(ccx, ccz - 1);
+        // Remove a single voxel block and rebuild the meshes around it.
+        digVoxel(cx, k, cz) {
+            if (k <= DIG_FLOOR || k > naturalTop(cx, cz)) return false;     // bedrock / air
+            const key = cx + ',' + k + ',' + cz;
+            if (REMOVED.has(key)) return false;
+            REMOVED.add(key);
+            CARVED_COLS.add(cx + ',' + cz);
+            // Faces of the 4 horizontal neighbours become exposed too, so mark
+            // their chunks dirty as well as the owner.
+            const dirty = new Set();
+            for (const [ox, oz] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) {
+                const ax = cx + ox, az = cz + oz;
+                dirty.add(Math.floor(ax / CHUNK_CELLS) + ',' + Math.floor(az / CHUNK_CELLS));
+            }
+            for (const kk of dirty) {
+                const [ccx, ccz] = kk.split(',').map(Number);
+                this._rebuildChunkTerrain(ccx, ccz);
+            }
             return true;
+        }
+
+        // Highest solid block-top the player's feet can rest on at (wx,wz),
+        // searching from feet (+ a one-block step-up) downward but never up into a
+        // ceiling. Returns that y, or below DIG_FLOOR when nothing supports them.
+        supportY(wx, py, wz) {
+            const cx = cellOf(wx), cz = cellOf(wz);
+            const top = naturalTop(cx, cz);
+            // Ceiling: first solid block whose bottom is above the feet.
+            let ceilBottom = Infinity;
+            for (let k = Math.floor(py) + 2; k <= top; k++) {
+                if (blockSolid(cx, k, cz)) { ceilBottom = k - 1; break; }
+            }
+            // Floor: highest solid block-top at/below (feet + 1 step) and below the ceiling.
+            let maxTop = Math.floor(py + 1.0 + 0.001);
+            if (maxTop > ceilBottom) maxTop = ceilBottom;
+            if (maxTop > top) maxTop = top;
+            for (let k = maxTop; k > DIG_FLOOR - 1; k--) {
+                if (blockSolid(cx, k, cz)) return k;
+            }
+            return DIG_FLOOR - 1;
         }
 
         // First spot at/near the origin whose surface is above sea level.
