@@ -54,6 +54,7 @@
     const PROP_ANIMALS = ['Sheep', 'Chicken', 'Pig', 'Cat'].map(ani);
     const PROP_PATHS = [].concat(PROP_TREES, PROP_DEAD, PROP_SMALL, PROP_ROCKS, PROP_ANIMALS);
     const CLOUD_PATHS = [1, 2, 3, 4].map((n) => ROOT + 'sky/Cloud_' + n + '.glb');
+    const SHIP_PATH = 'assets/Spaceship_Rodin.glb';   // grounded spaceship landmark
     const pick = (arr, rng) => arr[(rng() * arr.length) | 0];
 
     // --- deterministic noise / rng -----------------------------------------
@@ -144,7 +145,58 @@
         list.forEach(function (d) { PLANETS[d.key] = d; });
     })();
     let PAL = PLANETS.home.pal;
-    function colorHex(e) { return PAL(e); }
+
+    // --- biome regions: two low-frequency fields (≈temperature + humidity) carve the
+    // surface into distinct regions, each tinting the elevation palette so a single
+    // planet reads as forest here / arid there / tundra elsewhere. Per-biome hue/sat/
+    // light tweaks (kept modest so the planet's own hue family stays recognisable).
+    const BIOME_TINTS = [
+        { dh: 0.00, ds: 1.00, dl: 1.00 },  // 0 temperate (neutral)
+        { dh: -0.05, ds: 1.18, dl: 0.90 }, // 1 forest    (greener, darker)
+        { dh: 0.06, ds: 0.70, dl: 1.10 },  // 2 arid      (yellower, paler)
+        { dh: 0.00, ds: 0.35, dl: 1.14 },  // 3 tundra    (desaturated, bright)
+        { dh: -0.03, ds: 1.25, dl: 0.80 }  // 4 jungle    (deep saturated green)
+    ];
+    function biomeIndex(dir) {
+        // Low-frequency regions — a single value-noise sample each (no fractal needed),
+        // kept cheap because this runs per tile at build time.
+        const s = Math.max(0.4, NOISE_SCALE * 0.5); // continent-sized patches (below terrain freq)
+        const temp = valueNoise3(dir.x * s, dir.y * s, dir.z * s, (SEED ^ 0x9e3779b1) | 0);
+        const humid = valueNoise3(dir.x * s + 19.3, dir.y * s + 7.1, dir.z * s + 31.7, (SEED ^ 0x85ebca77) | 0);
+        if (humid < 0.40) return temp < 0.50 ? 3 : 2;   // dry  → tundra / arid
+        if (humid > 0.66) return temp < 0.50 ? 1 : 4;   // wet  → forest / jungle
+        return 0;                                         // temperate
+    }
+    // Shift an int-hex colour in HSL space (hue add, sat/light multiply).
+    function hslShift(hex, dh, ds, dl) {
+        let r = ((hex >> 16) & 255) / 255, g = ((hex >> 8) & 255) / 255, b = (hex & 255) / 255;
+        const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+        let h = 0, l = (mx + mn) / 2, sat = 0;
+        if (d > 1e-6) {
+            sat = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn);
+            if (mx === r) h = (g - b) / d + (g < b ? 6 : 0);
+            else if (mx === g) h = (b - r) / d + 2;
+            else h = (r - g) / d + 4;
+            h /= 6;
+        }
+        h = ((h + dh) % 1 + 1) % 1;
+        sat = Math.min(1, Math.max(0, sat * ds));
+        l = Math.min(1, Math.max(0, l * dl));
+        if (sat < 1e-6) { const v = Math.round(l * 255); return (v << 16) | (v << 8) | v; }
+        const q = l < 0.5 ? l * (1 + sat) : l + sat - l * sat, p = 2 * l - q;
+        const hue = (t) => { t = (t % 1 + 1) % 1; return t < 1 / 6 ? p + (q - p) * 6 * t : t < 1 / 2 ? q : t < 2 / 3 ? p + (q - p) * (2 / 3 - t) * 6 : p; };
+        const R8 = Math.round(hue(h + 1 / 3) * 255), G8 = Math.round(hue(h) * 255), B8 = Math.round(hue(h - 1 / 3) * 255);
+        return (R8 << 16) | (G8 << 8) | B8;
+    }
+    // Surface colour at a direction: the planet's elevation band, tinted by its biome
+    // region. Water (e<1) and snow caps (e≥AMP·0.8) stay un-tinted so they read clearly.
+    function colorHex(dir, e) {
+        const base = PAL(e);
+        if (e < 1 || e >= AMP * 0.8) return base;
+        const b = BIOME_TINTS[biomeIndex(dir)];
+        if (b.dh === 0 && b.ds === 1 && b.dl === 1) return base;
+        return hslShift(base, b.dh, b.ds, b.dl);
+    }
     const PROP_SCALE = 0.5;      // a prop globe's apparent radius = R * PROP_SCALE
     function setActivePlanet(def) {
         R = def.R; GRAVITY = def.gravity;
@@ -164,9 +216,18 @@
             : Math.max(24, Math.min(320, Math.round(R * (56 / 90))));
     }
 
-    // Signed land elevation for a unit surface direction.
+    // Signed land elevation for a unit surface direction. Multi-octave on the unit
+    // sphere (continents → hills → detail) plus a ridge term that raises sharp mountain
+    // spines over the high-continent areas, so worlds get real valleys & ranges instead
+    // of one gentle bump. Stays ~0..1 before the (·-SEA_BIAS)·AMP·2 mapping, so SEA_BIAS
+    // still sets the shoreline and AMP still sets the relief.
     function elevation(dir) {
-        const e = fbm3(dir.x * NOISE_SCALE, dir.y * NOISE_SCALE, dir.z * NOISE_SCALE, SEED);
+        const x = dir.x, y = dir.y, z = dir.z, s = NOISE_SCALE;
+        const cont = fbm3(x * s, y * s, z * s, SEED);                              // continents (low freq)
+        const hill = fbm3(x * s * 3.1, y * s * 3.1, z * s * 3.1, (SEED + 1013) | 0); // hills (mid)
+        const det = fbm3(x * s * 7.7, y * s * 7.7, z * s * 7.7, (SEED + 2027) | 0);  // detail (high)
+        const ridge = 1 - Math.abs(2 * hill - 1);                                  // sharp ridgelines
+        const e = 0.58 * cont + 0.24 * hill + 0.10 * det + 0.08 * ridge * cont;    // weights sum to 1
         return (e - SEA_BIAS) * AMP * 2;
     }
     function quantElev(dir) { return Math.round(elevation(dir) / ELEV_STEP) * ELEV_STEP; }
@@ -396,6 +457,7 @@
             const spawn = this._findLandDir();
             // Plant the rocket landmark a short walk from spawn.
             this._placeRocket(this._findLandNear(spawn));
+            this._placeShip(spawn);   // grounded starship landmark nearby
             const p = g.player.position;
             p.copy(spawn).multiplyScalar(this.groundRadius(spawn) + 0.5);
             g.player.velocity.set(0, 0, 0);
@@ -423,6 +485,7 @@
             if (this._preview) { g.scene.remove(this._preview); this._preview = null; }
             if (this._water) g.scene.remove(this._water);
             if (this._rocket) { g.scene.remove(this._rocket); this._rocket = null; }
+            if (this._ship) { g.scene.remove(this._ship); this._ship = null; }
             this._clearPlanetProps();
             if (this._dust) { g.scene.remove(this._dust.ring); this._dust = null; }
             this._landed = false;
@@ -609,7 +672,7 @@
                             scl.set(fr.cellW, TILE_H, fr.cellW);
                             m.compose(pos, q, scl);
                             mesh.setMatrixAt(i, m);
-                            col.setHex(colorHex(fr.baseRR - R));
+                            col.setHex(colorHex(fr.c, fr.baseRR - R));
                             mesh.setColorAt(i, col);
                             this._cellKeyByInstance[i] = fr.key;
                             i++;
@@ -691,7 +754,7 @@
                         scl.set(fr.cellW, TILE_H, fr.cellW);
                         m.compose(pos, q, scl);
                         mesh.setMatrixAt(i, m);
-                        col.setHex(colorHex(fr.baseRR - R));
+                        col.setHex(colorHex(fr.c, fr.baseRR - R));
                         mesh.setColorAt(i, col);
                         i++;
                     }
@@ -776,7 +839,7 @@
                     scl.set(fr.cellW, TILE_H, fr.cellW);
                     m.compose(pos, q, scl);
                     mesh.setMatrixAt(i, m);
-                    col.setHex(dug > 0 ? (dug <= 1 ? 0x6b4f2a : 0x70726f) : colorHex(fr.baseRR - R));
+                    col.setHex(dug > 0 ? (dug <= 1 ? 0x6b4f2a : 0x70726f) : colorHex(fr.c, fr.baseRR - R));
                     mesh.setColorAt(i, col);
                     keyByInstance[i] = key;
                     i++;
@@ -1155,13 +1218,60 @@
             this._props.push(obj);
         }
 
-        // Populate the planet by elevation band: lush grass zone, rocky highlands,
-        // bare snow caps, sparse beaches. Even coverage via a Fibonacci sphere.
+        // Instance every placement of one GLTF asset as a handful of InstancedMeshes
+        // (one per sub-mesh of the model) so thousands of trees/rocks cost only a few
+        // draw calls. Each placement = { dir, scale, spin }; oriented to the surface
+        // normal with its base sitting on the tile top (matches _place).
+        _instanceAsset(path, placements) {
+            const cached = this.assetCache.get(path);
+            if (!cached || !placements.length) return;
+            const src = cached.scene || (cached.scenes && cached.scenes[0]);
+            if (!src) return;
+            src.position.set(0, 0, 0); src.quaternion.identity(); src.scale.set(1, 1, 1);
+            src.updateMatrixWorld(true);
+            const parts = [];
+            src.traverse((o) => { if (o.isMesh && o.geometry) parts.push({ geo: o.geometry, mat: o.material, local: o.matrixWorld.clone() }); });
+            if (!parts.length) return;
+            const minY = this.modelMinY.get(path) || 0;
+            const UPY = this._UPY || (this._UPY = new THREE.Vector3(0, 1, 0));
+            const P = new THREE.Matrix4(), q = new THREE.Quaternion(), qs = new THREE.Quaternion();
+            const pos = new THREE.Vector3(), scl = new THREE.Vector3(), tmp = new THREE.Matrix4();
+            for (const part of parts) {
+                const im = new THREE.InstancedMesh(part.geo, part.mat, placements.length);
+                im.frustumCulled = false; im.castShadow = false; im.receiveShadow = false;
+                for (let i = 0; i < placements.length; i++) {
+                    const pl = placements[i], s = pl.scale;
+                    pos.copy(pl.dir).multiplyScalar(R + quantElev(pl.dir) - minY * s);
+                    q.setFromUnitVectors(UPY, pl.dir);
+                    qs.setFromAxisAngle(UPY, pl.spin);
+                    q.multiply(qs);
+                    scl.set(s, s, s);
+                    P.compose(pos, q, scl);
+                    tmp.multiplyMatrices(P, part.local);
+                    im.setMatrixAt(i, tmp);
+                }
+                im.instanceMatrix.needsUpdate = true;
+                this.game.scene.add(im);
+                this._props.push(im);
+            }
+        }
+
+        // Populate the planet by BIOME region (forest/jungle lush, arid/tundra sparse)
+        // and elevation band. Density scales with surface area so the bigger worlds feel
+        // full; props are instanced per asset so the count stays cheap. Even coverage via
+        // a Fibonacci sphere. Animals stay individual clones (skinned → not instanced).
         _scatterProps() {
             if (this._props.length) return;
             const rng = mulberry32(SEED + 1);
-            const N = 700;
+            const area = 4 * Math.PI * R * R;
+            const N = Math.max(900, Math.min(6000, Math.round(area * 0.012)));
             const ga = Math.PI * (3 - Math.sqrt(5));
+            const groups = new Map(); // path → [{dir,scale,spin}]
+            const add = (path, dir, scale) => {
+                if (!path) return;
+                let a = groups.get(path); if (!a) { a = []; groups.set(path, a); }
+                a.push({ dir: dir.clone(), scale, spin: rng() * Math.PI * 2 });
+            };
             const dir = new THREE.Vector3();
             for (let i = 0; i < N; i++) {
                 const y = 1 - (i / (N - 1)) * 2;
@@ -1169,26 +1279,42 @@
                 const th = ga * i;
                 dir.set(Math.cos(th) * rad + (rng() - 0.5) * 0.05, y + (rng() - 0.5) * 0.05, Math.sin(th) * rad + (rng() - 0.5) * 0.05).normalize();
                 const e = this.elevationAt(dir);
-                if (e < 1) {                                   // beach / shallows — sparse rocks
-                    if (rng() < 0.06) this._place(pick(PROP_ROCKS, rng), dir.clone(), 0.9 + rng() * 0.7, rng);
-                } else if (e < AMP * 0.5) {                    // grass / forest — lush
-                    const r = rng();
-                    if (r < 0.18) this._place(pick(PROP_TREES, rng), dir.clone(), 1.3 + rng() * 0.9, rng);
-                    else if (r < 0.21) this._place(pick(PROP_DEAD, rng), dir.clone(), 1.3 + rng() * 0.6, rng);
-                    else if (r < 0.5) this._place(pick(PROP_SMALL, rng), dir.clone(), 0.8 + rng() * 0.7, rng);
-                    else if (r < 0.56) this._place(pick(PROP_ROCKS, rng), dir.clone(), 1.0 + rng() * 0.8, rng);
-                    else if (r < 0.6) this._place(pick(PROP_ANIMALS, rng), dir.clone(), 1.0 + rng() * 0.4, rng);
-                } else if (e < AMP * 0.8) {                    // highlands — rocks, dead trees
-                    const r = rng();
-                    if (r < 0.14) this._place(pick(PROP_ROCKS, rng), dir.clone(), 1.0 + rng() * 1.0, rng);
-                    else if (r < 0.18) this._place(pick(PROP_DEAD, rng), dir.clone(), 1.2 + rng() * 0.5, rng);
+                if (e < 0.5 || e >= AMP * 0.82) continue;       // shallows/beach & snow caps bare
+                const highland = e >= AMP * 0.5;
+                const biome = biomeIndex(dir);                  // 0 temperate 1 forest 2 arid 3 tundra 4 jungle
+                const r = rng();
+                if (highland) {                                  // rocky highlands across biomes
+                    if (r < 0.16) add(pick(PROP_ROCKS, rng), dir, 1.0 + rng() * 1.1);
+                    else if (r < 0.20 && biome !== 3) add(pick(PROP_DEAD, rng), dir, 1.2 + rng() * 0.5);
+                    else if (r < 0.24 && (biome === 1 || biome === 4)) add(pick(PROP_TREES, rng), dir, 1.1 + rng() * 0.7);
+                } else if (biome === 4) {                         // jungle — densest
+                    if (r < 0.60) add(pick(PROP_TREES, rng), dir, 1.4 + rng() * 1.1);
+                    else if (r < 0.80) add(pick(PROP_SMALL, rng), dir, 0.9 + rng() * 0.8);
+                    else if (r < 0.83) add(pick(PROP_ROCKS, rng), dir, 0.9 + rng() * 0.7);
+                } else if (biome === 1) {                         // forest — lush
+                    if (r < 0.46) add(pick(PROP_TREES, rng), dir, 1.3 + rng() * 0.9);
+                    else if (r < 0.62) add(pick(PROP_SMALL, rng), dir, 0.8 + rng() * 0.7);
+                    else if (r < 0.66) add(pick(PROP_ROCKS, rng), dir, 1.0 + rng() * 0.8);
+                    else if (r < 0.685) this._place(pick(PROP_ANIMALS, rng), dir.clone(), 1.0 + rng() * 0.4, rng);
+                } else if (biome === 0) {                         // temperate — mixed meadow
+                    if (r < 0.22) add(pick(PROP_TREES, rng), dir, 1.3 + rng() * 0.9);
+                    else if (r < 0.48) add(pick(PROP_SMALL, rng), dir, 0.8 + rng() * 0.7);
+                    else if (r < 0.52) add(pick(PROP_ROCKS, rng), dir, 1.0 + rng() * 0.8);
+                    else if (r < 0.545) this._place(pick(PROP_ANIMALS, rng), dir.clone(), 1.0 + rng() * 0.4, rng);
+                } else if (biome === 2) {                         // arid — sparse scrub & rock
+                    if (r < 0.07) add(pick(PROP_DEAD, rng), dir, 1.1 + rng() * 0.6);
+                    else if (r < 0.15) add(pick(PROP_ROCKS, rng), dir, 1.0 + rng() * 1.0);
+                    else if (r < 0.19) add(pick(PROP_SMALL, rng), dir, 0.7 + rng() * 0.5);
+                } else {                                          // tundra — very sparse
+                    if (r < 0.05) add(pick(PROP_DEAD, rng), dir, 1.0 + rng() * 0.5);
+                    else if (r < 0.10) add(pick(PROP_ROCKS, rng), dir, 1.0 + rng() * 0.9);
                 }
-                // snow caps (e ≥ AMP*0.8) stay bare
             }
+            for (const [path, list] of groups) this._instanceAsset(path, list);
         }
 
         _clearProps() {
-            for (const o of this._props) this.game.scene.remove(o);
+            for (const o of this._props) { this.game.scene.remove(o); if (o.isInstancedMesh && o.dispose) o.dispose(); }
             this._props = [];
         }
 
@@ -1785,6 +1911,74 @@
             return base.clone();
         }
 
+        // Load + plant the imported starship as a grounded landmark near `base`.
+        // It sits belly-down on the surface (its +Y is up) at a land clearing a short
+        // walk from spawn. Normalised to a fixed length and given a metallic skin
+        // (the source mesh ships with no materials).
+        _placeShip(base) {
+            const g = this.game;
+            if (!this.loader) this.loader = new THREE.GLTFLoader();
+            if (this._ship) { g.scene.remove(this._ship); this._ship = null; }
+            const tan = new THREE.Vector3(0, 1, 0);
+            if (Math.abs(base.dot(tan)) > 0.9) tan.set(1, 0, 0);
+            tan.projectOnPlane(base).normalize();
+            let dir = base.clone();
+            for (let i = 0; i < 48; i++) {
+                const ang = (12 + (i % 6) * 3) * Math.PI / 180;
+                const axis = tan.clone().applyAxisAngle(base, 2.4 + i * 0.8);
+                const cand = base.clone().applyAxisAngle(axis, ang).normalize();
+                if (this.elevationAt(cand) > 3) { dir = cand; break; }
+            }
+            const place = (gltf) => {
+                if (g.activeModeId !== 'planet') return;     // mode changed mid-load
+                const src = gltf.scene || (gltf.scenes && gltf.scenes[0]);
+                if (!src) return;
+                const obj = src.clone(true);
+                const mat = this._shipMaterial();
+                obj.traverse((o) => { if (o.isMesh) { o.material = mat; o.castShadow = false; o.receiveShadow = false; o.frustumCulled = false; } });
+                const box = new THREE.Box3().setFromObject(obj);
+                const size = new THREE.Vector3(); box.getSize(size);
+                const longest = Math.max(size.x, size.y, size.z) || 1;
+                const scale = 16 / longest;                  // ~16u-long landmark
+                obj.scale.setScalar(scale);
+                const minY = box.min.y * scale;
+                const rr = R + quantElev(dir) - minY;        // base rests on the tile top
+                obj.position.copy(dir).multiplyScalar(rr);
+                obj.quaternion.setFromUnitVectors(this._UPY || (this._UPY = new THREE.Vector3(0, 1, 0)), dir);
+                obj.rotateY(0.6);                            // a pleasing heading
+                g.scene.add(obj);
+                obj.updateMatrixWorld(true);
+                this._ship = obj;
+            };
+            const cached = this.assetCache.get(SHIP_PATH);
+            if (cached) { place(cached); return; }
+            this.loader.load(SHIP_PATH, (gltf) => { this.assetCache.set(SHIP_PATH, gltf); place(gltf); },
+                undefined, (err) => console.warn('[planet] ship load failed', err && err.message));
+        }
+
+        // PBR material for the imported ship (Rodin texture set), built once. The
+        // PNGs are standalone so they need flipY=false to match the glTF UVs; the
+        // colour map is sRGB, the data maps stay linear.
+        _shipMaterial() {
+            if (this._shipMat) return this._shipMat;
+            const tl = this._texLoader || (this._texLoader = new THREE.TextureLoader());
+            const tx = (file, srgb) => {
+                const t = tl.load('assets/ship/' + file);
+                t.flipY = false;
+                if (srgb && THREE.sRGBEncoding) t.encoding = THREE.sRGBEncoding;
+                return t;
+            };
+            this._shipMat = new THREE.MeshStandardMaterial({
+                map: tx('texture_diffuse.png', true),
+                normalMap: tx('texture_normal.png', false),
+                roughnessMap: tx('texture_roughness.png', false),
+                metalnessMap: tx('texture_metallic.png', false),
+                metalness: 1.0,
+                roughness: 1.0,
+            });
+            return this._shipMat;
+        }
+
         // ---- rocket: interaction & launch ----
 
         _ensurePromptUI() {
@@ -1879,6 +2073,7 @@
                 this._showCharge(false);
                 const spawn = this._findLandDir();
                 this._plantRocketAt(spawn);
+                this._placeShip(spawn);
                 const side = this._fwd.clone().cross(spawn).normalize();
                 g.player.position.copy(spawn).multiplyScalar(this.groundRadius(spawn) + 0.5).addScaledVector(side, 3);
                 g.player.velocity.set(0, 0, 0);
@@ -2429,7 +2624,7 @@
                         scl.set(fr.cellW, TILE_H, fr.cellW);
                         m.compose(pos, q, scl);
                         tiles.setMatrixAt(i, m);
-                        col.setHex(colorHex(fr.baseRR - R));
+                        col.setHex(colorHex(fr.c, fr.baseRR - R));
                         tiles.setColorAt(i, col);
                         i++;
                     }
