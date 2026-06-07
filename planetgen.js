@@ -131,16 +131,16 @@
         return {
             key: 'home',
             name: 'Terra',
-            R: 90,
+            R: 150,
             gravity: 26,
             noiseScale: 1.9,
-            amp: 15,
+            amp: 24,
             seaBias: 0.46,
             seed: 9123,
             daySec: 360, axisTilt: 0.35, weather: 'rain',
             sea: 0x2a6fb0,
             sky: 0x6fae3a,
-            pal: makePalette(15, 0x8a7b50, 0xe6d6a8, 0x6fae3a, 0x8a8d92, 0xeaf2f7),
+            pal: makePalette(24, 0x8a7b50, 0xe6d6a8, 0x6fae3a, 0x8a8d92, 0xeaf2f7),
             props: true,
             clouds: true,
             atm: [0x6db4ff, 0x8ec6ff, 0xbfe0ff],
@@ -151,24 +151,26 @@
     // --- Curated sister worlds (always present) ---------------------------
     function makeEmber() {
         return {
-            key: 'ember', name: 'Ember', R: 70, gravity: 30, noiseScale: 2.7, amp: 20, seaBias: 0.30, seed: 4477, daySec: 140, axisTilt: 0.1, weather: 'ash',
-            sea: 0xc23a10, sky: 0xc1432f, pal: makePalette(20, 0x5a1505, 0x7a2a14, 0xc1432f, 0xe07b2c, 0xf0e2c2),
+            key: 'ember', name: 'Ember', R: 120, gravity: 30, noiseScale: 2.7, amp: 28, seaBias: 0.30, seed: 4477, daySec: 140, axisTilt: 0.1, weather: 'ash',
+            sea: 0xc23a10, sky: 0xc1432f, pal: makePalette(28, 0x5a1505, 0x7a2a14, 0xc1432f, 0xe07b2c, 0xf0e2c2),
             props: false, clouds: false, atm: [0xff7a3a, 0xff9a5a, 0xffc79a], orbit: { dir: [-0.65, 0.35, -0.67], dist: 9000 }
         };
     }
     function makeGoliath() {
         return {
-            key: 'goliath', name: 'Goliath', R: 175, gravity: 16, noiseScale: 1.3, amp: 40, seaBias: 0.42, seed: 7788, daySec: 520, axisTilt: 0.5, weather: 'rain',
-            sea: 0x12b39a, sky: 0x9b27b0, pal: makePalette(40, 0x241046, 0x5e1b86, 0xb52db0, 0x2fe39a, 0xc7f7ff),
+            key: 'goliath', name: 'Goliath', R: 240, gravity: 16, noiseScale: 1.3, amp: 55, seaBias: 0.42, seed: 7788, daySec: 520, axisTilt: 0.5, weather: 'rain',
+            sea: 0x12b39a, sky: 0x9b27b0, pal: makePalette(55, 0x241046, 0x5e1b86, 0xb52db0, 0x2fe39a, 0xc7f7ff),
             props: false, clouds: true, atm: [0x8a2be2, 0x3fd0c0, 0xc7f7ff], orbit: { dir: [0.30, -0.60, 0.74], dist: 13000 }
         };
     }
     // A truly colossal ocean-blue giant. Kept under the nearest orbit (~6500) so other
     // worlds aren't embedded in it. Very low gravity (big floaty jumps), gentle huge
-    // features. Blocks are chunky at this scale (capped FACE_N); big build on landing.
+    // features. `streamed: true` → builds a cheap coarse shell on landing (instant)
+    // instead of a 600k-tile globe; fine surface detail streams in near the player.
     function makeAtlas() {
         return {
             key: 'atlas', name: 'Atlas', R: 5000, gravity: 9, noiseScale: 0.6, amp: 80, seaBias: 0.5, seed: 5150, daySec: 900, axisTilt: 0.2, weather: 'rain',
+            streamed: true,
             sea: 0x0a3a6b, sky: 0x2a86b8, pal: makePalette(80, 0x06203f, 0x1a5a8a, 0x2a9fb0, 0xd8c89a, 0xf2f6ff),
             props: false, clouds: true, atm: [0x5aa0ff, 0x8ec6ff, 0xc7e8ff], orbit: { dir: [-0.2, 0.55, -0.81], dist: 16000 }
         };
@@ -183,23 +185,26 @@
         const sat = clamp(biome.sat + (rng() - 0.5) * 0.18, 0.12, 0.9);
         const drift = (rng() - 0.5) * 0.14; // slight hue drift across bands
 
-        // Size: bias toward smaller, occasional giant.
+        // Size: real walkable worlds (not tiny balls), occasional bigger giant. These
+        // still build as finite whole globes (FACE_N caps the tile count); only the
+        // colossal `streamed` curated worlds skip that. Bias toward the smaller end.
         let R;
         if (rng() < 0.15) {
-            R = lerp(150, 200, rng()); // rare giant
+            R = lerp(240, 300, rng()); // rare bigger giant
         } else {
             const t = rng();
-            R = lerp(60, 140, t * t);  // squared → small bias
+            R = lerp(130, 220, t * t);  // squared → small bias
         }
         R = Math.round(R);
 
         // Bigger → lower gravity (loose correlation), then jitter.
-        const sizeT = clamp01((R - 60) / (200 - 60));
-        let gravity = lerp(34, 14, sizeT) + (rng() - 0.5) * 6;
-        gravity = Math.round(clamp(gravity, 14, 34) * 10) / 10;
+        const sizeT = clamp01((R - 130) / (300 - 130));
+        let gravity = lerp(32, 14, sizeT) + (rng() - 0.5) * 6;
+        gravity = Math.round(clamp(gravity, 12, 34) * 10) / 10;
 
         const noiseScale = Math.round(lerp(1.2, 3.0, rng()) * 100) / 100;
-        const amp = Math.round(clamp(lerp(biome.ampB[0], biome.ampB[1], rng()), 8, 45));
+        // Relief scaled up for the bigger radii so mountains/valleys read at ground level.
+        const amp = Math.round(clamp(lerp(biome.ampB[0], biome.ampB[1], rng()) * 1.6, 12, 64));
         const seaBias = Math.round(clamp(lerp(biome.seaB[0], biome.seaB[1], rng()), 0.25, 0.60) * 100) / 100;
 
         const bands = buildBands(hue, sat, drift); // [deep, low, mid, high, peak]

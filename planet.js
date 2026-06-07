@@ -95,6 +95,15 @@
     // Quad-sphere grid cells per face edge (6·N² tiles). Mutable: scales with the
     // active world's radius (set by setActivePlanet) so big planets keep small blocks.
     let FACE_N = 56;
+    // Coarse whole-globe resolution for STREAMED giants: the active globe renders as a
+    // cheap ~6·NBASE² shell (instant) as the far field; fine near-player detail streams
+    // on top in chunks. Physics is analytic (groundRadius/quantElev sample the direction,
+    // not tiles), so the coarse shell + a sparse fine ring is fully walkable.
+    const NBASE = 48;
+    const NFINE_CAP = 4096;       // safety cap on a streamed world's fine grid resolution
+    const SURF_CHUNK = 16;        // fine cells per streamed surface chunk edge
+    const SURF_TERRAIN_R = 2;     // ring radius (in chunks) of fine terrain kept around the player
+    const STREAM_ALT = 160;       // build fine chunks only within this altitude of the surface
     const ELEV_STEP = 2;       // elevation quantization (block step height)
     const TILE_H = ELEV_STEP * 3; // tile thickness (overlaps inward to hide cliff gaps)
     const MAX_DIG = 3;         // max terrain steps you can dig per cell (= one tile depth, walls stay sealed)
@@ -146,7 +155,13 @@
         // clamped so the tile count stays sane (24..320 → up to ~615k tiles). Only the
         // ACTIVE world builds at full res (on landing); distant props stay coarse.
         // Crisp up to ~R515; bigger worlds get progressively chunkier blocks.
-        FACE_N = Math.max(24, Math.min(320, Math.round(R * (56 / 90))));
+        // STREAMED giants never build the whole globe at this resolution — FACE_N is the
+        // FINE grid used by the streamed near-player chunks (and by cellOf/groundRadius/
+        // mining), uncapped so blocks stay crisp at R≈5000; the far-field is a separate
+        // coarse NBASE shell. Non-streamed worlds build one finite globe (capped count).
+        FACE_N = def.streamed
+            ? Math.max(64, Math.min(NFINE_CAP, Math.round(R * (56 / 90))))
+            : Math.max(24, Math.min(320, Math.round(R * (56 / 90))));
     }
 
     // Signed land elevation for a unit surface direction.
@@ -224,6 +239,9 @@
             this._placedKeys = [];          // instanceId → cell key (for mining)
             this._dugDepth = new Map();     // surface-cell key → terrain steps dug down
             this._holes = new Set();        // cells dug clean through → open shaft to the core
+            this._streamed = false;         // giant world: coarse shell + streamed fine chunks
+            this._surfChunks = new Map();   // "face,cu,cv" → { mesh, keyByInstance } (streamed only)
+            this._lastSurfKey = null;       // player's last chunk key (restream only on crossing)
             this._editsDirty = false;       // pending player edits to persist
             this._lastSave = 0;
             this._inSpace = false;          // past the gravity sphere of influence (weightless)
@@ -359,6 +377,7 @@
             this._activeKey = this._activeDef.key;
             this._targetDef = PLANETS[Object.keys(PLANETS).find((k) => k !== this._activeKey)] || PLANETS.home;
             setActivePlanet(this._activeDef);
+            this._streamed = !!this._activeDef.streamed; // giant → coarse shell + (later) streamed detail
             this._initOrbits();         // orbital params (used by _orbitOf for props/flight)
             this._buildPlanet();
             this._setupScene();
@@ -398,6 +417,7 @@
 
         exit() {
             const g = this.game;
+            this._clearSurfChunks();
             if (this._planet) g.scene.remove(this._planet);
             if (this._placedMesh) g.scene.remove(this._placedMesh);
             if (this._preview) { g.scene.remove(this._preview); this._preview = null; }
@@ -457,6 +477,8 @@
             if (this._stars) this._stars.position.copy(g.camera.position);
             // Distance-based LOD: build terrain + fade the cheap sphere out to reveal it.
             this._updatePropLOD(dt);
+            // Streamed giants: keep a ring of fine surface chunks around the player.
+            if (this._streamed) this._streamSurface();
             if (this._dust) {
                 this._dust.t += (dt || 0.016);
                 const k = this._dust.t / this._dust.life;
@@ -555,37 +577,51 @@
 
         _buildPlanet() {
             this._ensureCubeGeo();
-            // One oriented tile per quad-sphere grid cell — each block lies LEVEL on
-            // the surface (its up = the radial normal), so the planet stays round.
-            const count = 6 * FACE_N * FACE_N;
-            const mesh = new THREE.InstancedMesh(this._cubeGeo, this._cubeMat, count);
-            mesh.receiveShadow = true;
-            this._cellKeyByInstance = new Array(count);
-            const m = new THREE.Matrix4(), q = new THREE.Quaternion(), basis = new THREE.Matrix4();
-            const pos = new THREE.Vector3(), scl = new THREE.Vector3(), col = new THREE.Color();
-            let i = 0;
-            for (let face = 0; face < 6; face++) {
-                for (let iu = 0; iu < FACE_N; iu++) {
-                    for (let iv = 0; iv < FACE_N; iv++) {
-                        const fr = cellFrame(face, iu, iv);
-                        basis.makeBasis(fr.tU, fr.n, fr.tV);   // local x→tU, y→up(normal), z→tV
-                        q.setFromRotationMatrix(basis);
-                        pos.copy(fr.c).multiplyScalar(fr.baseRR - TILE_H / 2); // top face at baseRR
-                        scl.set(fr.cellW, TILE_H, fr.cellW);
-                        m.compose(pos, q, scl);
-                        mesh.setMatrixAt(i, m);
-                        col.setHex(colorHex(fr.baseRR - R));
-                        mesh.setColorAt(i, col);
-                        this._cellKeyByInstance[i] = fr.key;
-                        i++;
+            if (!this._surfChunks) this._surfChunks = new Map();
+            this._clearSurfChunks();
+            this._lastSurfKey = null;
+            if (this._streamed) {
+                // Far-field: a cheap coarse whole-globe shell. The walkable fine detail
+                // streams in around the player as chunks (see _streamSurface). The shell
+                // is never mined directly — the fine chunks carry the edits.
+                this._planet = this._buildCoarseShell();
+                this._planet.receiveShadow = true;
+                this._planet.frustumCulled = false;
+                this._cellKeyByInstance = null;
+                this.game.scene.add(this._planet);
+            } else {
+                // One oriented tile per quad-sphere grid cell — each block lies LEVEL on
+                // the surface (its up = the radial normal), so the planet stays round.
+                const count = 6 * FACE_N * FACE_N;
+                const mesh = new THREE.InstancedMesh(this._cubeGeo, this._cubeMat, count);
+                mesh.receiveShadow = true;
+                this._cellKeyByInstance = new Array(count);
+                const m = new THREE.Matrix4(), q = new THREE.Quaternion(), basis = new THREE.Matrix4();
+                const pos = new THREE.Vector3(), scl = new THREE.Vector3(), col = new THREE.Color();
+                let i = 0;
+                for (let face = 0; face < 6; face++) {
+                    for (let iu = 0; iu < FACE_N; iu++) {
+                        for (let iv = 0; iv < FACE_N; iv++) {
+                            const fr = cellFrame(face, iu, iv);
+                            basis.makeBasis(fr.tU, fr.n, fr.tV);   // local x→tU, y→up(normal), z→tV
+                            q.setFromRotationMatrix(basis);
+                            pos.copy(fr.c).multiplyScalar(fr.baseRR - TILE_H / 2); // top face at baseRR
+                            scl.set(fr.cellW, TILE_H, fr.cellW);
+                            m.compose(pos, q, scl);
+                            mesh.setMatrixAt(i, m);
+                            col.setHex(colorHex(fr.baseRR - R));
+                            mesh.setColorAt(i, col);
+                            this._cellKeyByInstance[i] = fr.key;
+                            i++;
+                        }
                     }
                 }
+                mesh.instanceMatrix.needsUpdate = true;
+                if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+                this._planet = mesh;
+                this._planet.frustumCulled = false;
+                this.game.scene.add(mesh);
             }
-            mesh.instanceMatrix.needsUpdate = true;
-            if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-            this._planet = mesh;
-            this._planet.frustumCulled = false;
-            this.game.scene.add(mesh);
 
             // Player-placed blocks layer (starts empty, grows as you build).
             // frustumCulled off: its bounding sphere starts at the origin (count 0)
@@ -630,13 +666,195 @@
             this._editsDirty = false;
         }
 
+        // ---- streamed surface (giant worlds): coarse shell + fine near-player chunks ----
+
+        // Cheap whole-globe far-field shell at NBASE resolution. Recessed a hair so the
+        // streamed fine chunks always sit proudly over it (no z-fight / no peeking gaps).
+        _buildCoarseShell() {
+            this._ensureCubeGeo();
+            const N = NBASE, count = 6 * N * N;
+            const mesh = new THREE.InstancedMesh(this._cubeGeo, this._cubeMat, count);
+            const m = new THREE.Matrix4(), q = new THREE.Quaternion(), basis = new THREE.Matrix4();
+            const pos = new THREE.Vector3(), scl = new THREE.Vector3(), col = new THREE.Color();
+            let i = 0;
+            for (let face = 0; face < 6; face++)
+                for (let iu = 0; iu < N; iu++)
+                    for (let iv = 0; iv < N; iv++) {
+                        const fr = cellFrame(face, iu, iv, N);
+                        basis.makeBasis(fr.tU, fr.n, fr.tV);
+                        q.setFromRotationMatrix(basis);
+                        // Recess a small ABSOLUTE amount (not a fraction of R, which would be
+                        // a huge ledge on a giant) so fine chunks sit just over the shell
+                        // where they overlap — no z-fight, no floating shelf at the ring edge.
+                        const rr = fr.baseRR - 2;
+                        pos.copy(fr.c).multiplyScalar(rr - TILE_H / 2);
+                        scl.set(fr.cellW, TILE_H, fr.cellW);
+                        m.compose(pos, q, scl);
+                        mesh.setMatrixAt(i, m);
+                        col.setHex(colorHex(fr.baseRR - R));
+                        mesh.setColorAt(i, col);
+                        i++;
+                    }
+            mesh.instanceMatrix.needsUpdate = true;
+            if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+            return mesh;
+        }
+
+        // Per-frame driver: keep a ring of fine chunks around the player; drop the rest.
+        // Restreams only when the player crosses a chunk boundary (or alt band).
+        _streamSurface() {
+            if (!this._streamed) return;
+            const g = this.game;
+            const p = g.player.position;
+            const rel = this._dir.copy(p).sub(this._center);
+            const dist = rel.length();
+            if (dist < 1e-3) return;
+            rel.divideScalar(dist);
+            const groundR = this.groundRadius(rel);
+            const alt = dist - (groundR > 0 ? groundR : R);
+            // High above the surface (cruise/space) → no fine detail; the coarse shell
+            // (and clouds/atmosphere) carry the look. Drop everything once.
+            if (alt > STREAM_ALT) {
+                if (this._surfChunks.size) this._clearSurfChunks();
+                this._lastSurfKey = null;
+                return;
+            }
+            const c = cellOf(rel);
+            const cu = Math.floor(c.iu / SURF_CHUNK), cv = Math.floor(c.iv / SURF_CHUNK);
+            const skey = c.face + ',' + cu + ',' + cv;
+            if (skey === this._lastSurfKey) return;   // same chunk → nothing to do
+            this._lastSurfKey = skey;
+            // Direction-space ring: sample a window of directions around the player in its
+            // tangent basis and resolve each to a (face,cu,cv) chunk. This wraps across
+            // cube faces for free (no edge-rotation bookkeeping). Half-chunk steps so the
+            // contiguous neighbourhood is fully covered with no gaps.
+            const want = this._wantChunks || (this._wantChunks = new Set());
+            want.clear();
+            const fr = cellFrame(c.face, c.iu, c.iv);
+            const stepAng = SURF_CHUNK * (2 / FACE_N) * 0.5; // half a chunk, in tangent units
+            const sdir = new THREE.Vector3();
+            for (let du = -2 * SURF_TERRAIN_R; du <= 2 * SURF_TERRAIN_R; du++)
+                for (let dv = -2 * SURF_TERRAIN_R; dv <= 2 * SURF_TERRAIN_R; dv++) {
+                    sdir.copy(rel).addScaledVector(fr.tU, du * stepAng).addScaledVector(fr.tV, dv * stepAng).normalize();
+                    const cc = cellOf(sdir);
+                    want.add(cc.face + ',' + Math.floor(cc.iu / SURF_CHUNK) + ',' + Math.floor(cc.iv / SURF_CHUNK));
+                }
+            for (const k of want) if (!this._surfChunks.has(k)) {
+                const pp = k.split(',');
+                this._ensureSurfChunk(+pp[0], +pp[1], +pp[2]);
+            }
+            for (const k of Array.from(this._surfChunks.keys())) if (!want.has(k)) this._dropSurfChunk(k);
+        }
+
+        // Build one fine chunk (an InstancedMesh of its in-range cells), applying any
+        // dug/hole edits for those cells so player changes show on the streamed tiles.
+        _ensureSurfChunk(face, cu, cv) {
+            const ckey = face + ',' + cu + ',' + cv;
+            if (this._surfChunks.has(ckey)) return;
+            const N = FACE_N;
+            const iu0 = cu * SURF_CHUNK, iv0 = cv * SURF_CHUNK;
+            if (iu0 >= N || iv0 >= N || iu0 < 0 || iv0 < 0) return;
+            const iuEnd = Math.min(N, iu0 + SURF_CHUNK), ivEnd = Math.min(N, iv0 + SURF_CHUNK);
+            const maxTiles = (iuEnd - iu0) * (ivEnd - iv0);
+            if (maxTiles <= 0) return;
+            const mesh = new THREE.InstancedMesh(this._cubeGeo, this._cubeMat, maxTiles);
+            mesh.receiveShadow = true;
+            mesh.frustumCulled = false;
+            const keyByInstance = new Array(maxTiles);
+            const m = new THREE.Matrix4(), q = new THREE.Quaternion(), basis = new THREE.Matrix4();
+            const pos = new THREE.Vector3(), scl = new THREE.Vector3(), col = new THREE.Color();
+            let i = 0;
+            for (let iu = iu0; iu < iuEnd; iu++)
+                for (let iv = iv0; iv < ivEnd; iv++) {
+                    const key = face + ',' + iu + ',' + iv;
+                    if (this._holes.has(key)) continue;                // open shaft — no tile here
+                    const fr = cellFrame(face, iu, iv);
+                    const dug = this._dugDepth.get(key) || 0;
+                    basis.makeBasis(fr.tU, fr.n, fr.tV);
+                    q.setFromRotationMatrix(basis);
+                    pos.copy(fr.c).multiplyScalar(fr.baseRR - TILE_H / 2 - dug * ELEV_STEP);
+                    scl.set(fr.cellW, TILE_H, fr.cellW);
+                    m.compose(pos, q, scl);
+                    mesh.setMatrixAt(i, m);
+                    col.setHex(dug > 0 ? (dug <= 1 ? 0x6b4f2a : 0x70726f) : colorHex(fr.baseRR - R));
+                    mesh.setColorAt(i, col);
+                    keyByInstance[i] = key;
+                    i++;
+                }
+            mesh.count = i;
+            mesh.instanceMatrix.needsUpdate = true;
+            if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+            this.game.scene.add(mesh);
+            this._surfChunks.set(ckey, { mesh, keyByInstance });
+        }
+
+        _dropSurfChunk(ckey) {
+            const rec = this._surfChunks.get(ckey);
+            if (!rec) return;
+            this.game.scene.remove(rec.mesh);
+            if (rec.mesh.dispose) rec.mesh.dispose(); // frees instance buffers (geo/mat are shared)
+            this._surfChunks.delete(ckey);
+        }
+
+        _clearSurfChunks() {
+            if (!this._surfChunks) { this._surfChunks = new Map(); return; }
+            for (const rec of this._surfChunks.values()) {
+                this.game.scene.remove(rec.mesh);
+                if (rec.mesh.dispose) rec.mesh.dispose();
+            }
+            this._surfChunks.clear();
+        }
+
+        _chunkOfMesh(mesh) {
+            for (const rec of this._surfChunks.values()) if (rec.mesh === mesh) return rec;
+            return null;
+        }
+
+        // Dig a streamed fine tile (mirror of _digTerrain, scoped to a chunk mesh).
+        _digSurfChunk(rec, inst) {
+            const key = rec.keyByInstance[inst];
+            if (key == null || this._holes.has(key)) return;
+            const parts = key.split(',');
+            const fr = cellFrame(+parts[0], +parts[1], +parts[2]);
+            const dug = this._dugDepth.get(key) || 0;
+            if (dug >= MAX_DIG) {
+                this._holes.add(key);
+                rec.mesh.setMatrixAt(inst, new THREE.Matrix4().makeScale(0, 0, 0));
+                rec.mesh.instanceMatrix.needsUpdate = true;
+                this.game.audio && this.game.audio.play && this.game.audio.play('explosion');
+                this._markDirty();
+                return;
+            }
+            const nd = dug + 1;
+            this._dugDepth.set(key, nd);
+            const q = new THREE.Quaternion().setFromRotationMatrix(
+                new THREE.Matrix4().makeBasis(fr.tU, fr.n, fr.tV));
+            const pos = fr.c.clone().multiplyScalar(fr.baseRR - TILE_H / 2 - nd * ELEV_STEP);
+            const m = new THREE.Matrix4().compose(pos, q, new THREE.Vector3(fr.cellW, TILE_H, fr.cellW));
+            rec.mesh.setMatrixAt(inst, m);
+            rec.mesh.instanceMatrix.needsUpdate = true;
+            rec.mesh.setColorAt(inst, new THREE.Color(nd <= 1 ? 0x6b4f2a : 0x70726f));
+            if (rec.mesh.instanceColor) rec.mesh.instanceColor.needsUpdate = true;
+            this.game.audio && this.game.audio.play && this.game.audio.play('swordHit');
+            this._markDirty();
+        }
+
         // ---- build / mine on the surface (radial stacking) ----
 
         _rayHit() {
             const g = this.game;
             if (!this._raycaster) this._raycaster = new THREE.Raycaster();
             this._raycaster.setFromCamera({ x: 0, y: 0 }, g.camera); // screen center
-            const objs = [this._planet, this._placedMesh].filter(Boolean);
+            // Streamed worlds: target the live fine chunks (within arm's reach, so always
+            // present near the player), not the far-field coarse shell. Else the one globe.
+            let objs;
+            if (this._streamed) {
+                objs = [];
+                for (const rec of this._surfChunks.values()) objs.push(rec.mesh);
+                if (this._placedMesh) objs.push(this._placedMesh);
+            } else {
+                objs = [this._planet, this._placedMesh].filter(Boolean);
+            }
             const hits = this._raycaster.intersectObjects(objs, false);
             for (const h of hits) { if (h.distance <= 14) return h; }
             return null;
@@ -688,7 +906,12 @@
                 return;
             }
             // Otherwise dig the planet surface itself, one step down at this cell.
-            if (hit.object === this._planet) this._digTerrain(hit.instanceId);
+            if (this._streamed) {
+                const rec = this._chunkOfMesh(hit.object);
+                if (rec) this._digSurfChunk(rec, hit.instanceId);
+            } else if (hit.object === this._planet) {
+                this._digTerrain(hit.instanceId);
+            }
         }
 
         // Lower one terrain cell by a block-step (exposes dirt then stone).
@@ -763,27 +986,32 @@
             const m = new THREE.Matrix4(), q = new THREE.Quaternion(), pos = new THREE.Vector3();
             const zero = new THREE.Matrix4().makeScale(0, 0, 0);
 
-            // Dug terrain — lower the tile and recolour to match _digTerrain.
-            for (const [key, depth] of (data.dug || [])) {
-                this._dugDepth.set(key, depth);
-                const inst = this._instOfKey(key);
-                if (inst < 0) continue;
-                const p = key.split(',');
-                const fr = cellFrame(+p[0], +p[1], +p[2]);
-                q.setFromRotationMatrix(new THREE.Matrix4().makeBasis(fr.tU, fr.n, fr.tV));
-                pos.copy(fr.c).multiplyScalar(fr.baseRR - TILE_H / 2 - depth * ELEV_STEP);
-                m.compose(pos, q, new THREE.Vector3(fr.cellW, TILE_H, fr.cellW));
-                this._planet.setMatrixAt(inst, m);
-                this._planet.setColorAt(inst, new THREE.Color(depth <= 1 ? 0x6b4f2a : 0x70726f));
+            // Always populate the edit maps (groundRadius + chunk builds read these).
+            for (const [key, depth] of (data.dug || [])) this._dugDepth.set(key, depth);
+            for (const key of (data.holes || [])) this._holes.add(key);
+
+            // Non-streamed: apply the dug/hole visuals to the single full globe now.
+            // Streamed: the fine chunks bake these in as they build (_ensureSurfChunk),
+            // and the coarse far-field shell is intentionally left pristine.
+            if (!this._streamed && this._planet) {
+                for (const [key, depth] of (data.dug || [])) {
+                    const inst = this._instOfKey(key);
+                    if (inst < 0) continue;
+                    const p = key.split(',');
+                    const fr = cellFrame(+p[0], +p[1], +p[2]);
+                    q.setFromRotationMatrix(new THREE.Matrix4().makeBasis(fr.tU, fr.n, fr.tV));
+                    pos.copy(fr.c).multiplyScalar(fr.baseRR - TILE_H / 2 - depth * ELEV_STEP);
+                    m.compose(pos, q, new THREE.Vector3(fr.cellW, TILE_H, fr.cellW));
+                    this._planet.setMatrixAt(inst, m);
+                    this._planet.setColorAt(inst, new THREE.Color(depth <= 1 ? 0x6b4f2a : 0x70726f));
+                }
+                for (const key of (data.holes || [])) {
+                    const inst = this._instOfKey(key);
+                    if (inst >= 0) this._planet.setMatrixAt(inst, zero);
+                }
+                this._planet.instanceMatrix.needsUpdate = true;
+                if (this._planet.instanceColor) this._planet.instanceColor.needsUpdate = true;
             }
-            // Holes — remove the tile entirely.
-            for (const key of (data.holes || [])) {
-                this._holes.add(key);
-                const inst = this._instOfKey(key);
-                if (inst >= 0) this._planet.setMatrixAt(inst, zero);
-            }
-            this._planet.instanceMatrix.needsUpdate = true;
-            if (this._planet.instanceColor) this._planet.instanceColor.needsUpdate = true;
 
             // Player-placed blocks — restore exact transforms/colours and rebuild stacks.
             const placed = data.placed || [];
@@ -2268,6 +2496,7 @@
             this._activeDef = newActive;
             this._activeKey = newActive.key;
             setActivePlanet(newActive);
+            this._streamed = !!newActive.streamed;
             if (this._planet) g.scene.remove(this._planet);
             if (this._placedMesh) g.scene.remove(this._placedMesh);
             if (this._preview) { g.scene.remove(this._preview); this._preview = null; }
