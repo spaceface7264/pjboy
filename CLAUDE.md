@@ -49,8 +49,8 @@ GLTF/GLB models live at the repo root and under `assets/Blocks/` (Characters, en
 
 ## Deployment (GitHub Pages)
 
-`.github/workflows/pages.yml` deploys to GitHub Pages on push to **`main`**. The build step copies a **fixed allowlist** of files into `_site` (top-level `*.js`, `*.glb`, `*.gltf`, `*.bin`, `index.html`, the two CSS files, plus `inmaze/` and `assets/` directories).
+GitHub Pages is configured as **legacy / "deploy from a branch"**, serving the **root of `main` directly** (`gh api repos/<owner>/pjboy/pages` → `build_type: legacy`, `source: {branch: "main", path: "/"}`). So **whatever is in `main`'s root is the live site** — there is no `_site` build step or `gh-pages` branch in the live path. Pushing to `main` triggers GitHub's automatic "pages build and deployment".
 
-⚠️ **New top-level files that aren't covered by the existing copy globs must be added to `pages.yml`, or they will 404 on the live site.** (The directory copies of `assets/` and `inmaze/` are recursive, so new files inside those are fine.)
+⚠️ Because Pages serves `main`'s root as-is, **every committed top-level file is published** — no allowlist to maintain. (Note: `.github/workflows/pages.yml` contains an `actions/deploy-pages` workflow that builds a `_site` allowlist, but it is **ignored** while the Pages source is the legacy branch. A separate legacy "CI/CD Pipeline" job tries to `git push origin gh-pages` and fails with 403 — harmless dead noise, since no `gh-pages` branch is used.)
 
-Note: the default branch for PRs in this repo is **`gameplay`**, but the live-deploy branch is **`main`**. `.github/workflows/ci.yml` runs the `node -c` syntax check on push/PR to `main`/`develop`.
+Note: **`main`** is the single primary branch — it is the GitHub default (PR base), the live-deploy branch, and where bump-and-ship work lands. `.github/workflows/ci.yml` runs the `node -c` syntax check on push/PR to `main`/`develop`. After changing a JS file, bump its `?v=N` in `index.html` (see "Cache-busting" above) so the live site doesn't serve a stale cached copy.
