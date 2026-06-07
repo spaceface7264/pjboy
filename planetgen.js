@@ -131,16 +131,17 @@
         return {
             key: 'home',
             name: 'Terra',
-            R: 150,
+            R: 2000,            // a real, huge planet — streamed surface (can't see all of it from the ground)
             gravity: 26,
             noiseScale: 1.9,
-            amp: 24,
+            amp: 110,           // dramatic mountain ranges & deep valleys at this scale
             seaBias: 0.46,
             seed: 9123,
             daySec: 360, axisTilt: 0.35, weather: 'rain',
+            streamed: true,     // coarse far-field shell + fine chunks streamed near the player
             sea: 0x2a6fb0,
             sky: 0x6fae3a,
-            pal: makePalette(24, 0x8a7b50, 0xe6d6a8, 0x6fae3a, 0x8a8d92, 0xeaf2f7),
+            pal: makePalette(110, 0x8a7b50, 0xe6d6a8, 0x6fae3a, 0x8a8d92, 0xeaf2f7),
             props: true,
             clouds: true,
             atm: [0x6db4ff, 0x8ec6ff, 0xbfe0ff],

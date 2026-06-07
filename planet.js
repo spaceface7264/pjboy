@@ -54,7 +54,7 @@
     const PROP_ANIMALS = ['Sheep', 'Chicken', 'Pig', 'Cat'].map(ani);
     const PROP_PATHS = [].concat(PROP_TREES, PROP_DEAD, PROP_SMALL, PROP_ROCKS, PROP_ANIMALS);
     const CLOUD_PATHS = [1, 2, 3, 4].map((n) => ROOT + 'sky/Cloud_' + n + '.glb');
-    const SHIP_PATH = 'assets/Spaceship_Rodin.glb';   // grounded spaceship landmark
+    const SHIP_PATH = 'assets/Spaceship_shaded.glb';  // imported spaceship (self-contained baked materials)
     const pick = (arr, rng) => arr[(rng() * arr.length) | 0];
 
     // --- deterministic noise / rng -----------------------------------------
@@ -328,9 +328,19 @@
             this._lastYaw = 0;
             this._onGround = false;
             // rocket landmark / launch state
-            this._rocket = null;
+            this._rocket = null;          // invisible flight-transform carrier (physics)
             this._rocketDir = null;       // unit dir of the rocket's pad
             this._rocketBase = null;      // world pos of the pad (fin contact point)
+            this._cockpit = true;         // cockpit POV (vs chase/ISO) while flying
+            this._grounded = false;       // boarded but idling on the pad — flight starts on manual throttle
+            this._shipHalf = 8;           // half the visible ship length (set on placement)
+            // Maps the imported ship model's axes into the flight frame (nose +Y, up +Z).
+            // Model is up=+Y (sits belly-down grounded) with forward=+Z, so: rotate +90°
+            // about X (up +Y → flight up +Z) then 180° about Y so the NOSE faces forward
+            // (not tail-first). If it still points wrong, adjust these two angles.
+            this._shipFix = new THREE.Quaternion()
+                .setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 2)
+                .multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI));
             this._nearRocket = false;     // player is within boarding range
             this._riding = false;         // player is piloting the rocket
             this._launching = false;      // on the pad, charging a launch
@@ -413,6 +423,10 @@
                     if (e.code === 'KeyE') this._onInteract();
                     else if (e.code === 'KeyG' && this._riding && !this._launching) this._toggleCourse();
                     else if (e.code === 'KeyM' && this._riding && !this._launching) this._toggleMap();
+                    else if (e.code === 'KeyV' && this._riding) {
+                        this._cockpit = !this._cockpit;
+                        g.showMessage && g.showMessage(this._cockpit ? '🪟 Cockpit view' : '🛰 Chase view', 1200);
+                    }
                 };
                 window.addEventListener('keydown', this._onKeyDown);
             }
@@ -455,9 +469,11 @@
 
             // Spawn the player on land near a fixed direction.
             const spawn = this._findLandDir();
-            // Plant the rocket landmark a short walk from spawn.
-            this._placeRocket(this._findLandNear(spawn));
-            this._placeShip(spawn);   // grounded starship landmark nearby
+            // Plant the ship (visible vehicle) + its invisible flight pad at one spot
+            // a short walk from spawn, so walking to the ship is what boards it.
+            const padDir = this._findLandNear(spawn);
+            this._placeRocket(padDir);
+            this._placeShip(padDir);
             const p = g.player.position;
             p.copy(spawn).multiplyScalar(this.groundRadius(spawn) + 0.5);
             g.player.velocity.set(0, 0, 0);
@@ -487,6 +503,7 @@
             if (this._rocket) { g.scene.remove(this._rocket); this._rocket = null; }
             if (this._ship) { g.scene.remove(this._ship); this._ship = null; }
             if (this._reGlow) { g.scene.remove(this._reGlow); this._reGlow = null; }
+            if (this._thr) { g.scene.remove(this._thr); this._thr = null; }
             this._clearPlanetProps();
             if (this._dust) { g.scene.remove(this._dust.ring); this._dust = null; }
             this._landed = false;
@@ -502,6 +519,7 @@
             if (this._riding && g.player.model) g.player.model.visible = true;
             this._riding = false;
             this._launching = false;
+            this._grounded = false;
             this._autopilot = false;
             this._nearRocket = false;
             this._rocketBase = null;
@@ -532,8 +550,9 @@
                 const f = 1 - Math.min(1, Math.max(0, (camR - cloudR) / Math.max(1, SOI_OUTER - cloudR)));
                 this._clouds.traverse((o) => { if (o.isMesh && o.material) o.material.opacity = 0.92 * f; });
             }
-            // Drop the reentry glow when not piloting.
+            // Drop the reentry glow + thruster when not piloting.
             if (!this._riding && this._reGlow) this._reGlow.visible = false;
+            if (!this._riding && this._thr) this._thr.visible = false;
             // Day/night: advance the sun around the planet, move the disk + light,
             // recolour sky/atmosphere/ambient and fade the stars in at night.
             this._updateDayNight(dt);
@@ -1887,6 +1906,7 @@
         // Build the rocket once and stand it on the surface at `dir`.
         _placeRocket(dir) {
             this._rocket = this._buildRocket();
+            this._rocket.visible = false;   // invisible flight-transform carrier; the imported ship is what you see
             this.game.scene.add(this._rocket);
             this._plantRocketAt(dir);
         }
@@ -1914,7 +1934,7 @@
             tan.projectOnPlane(base).normalize();
             const out = new THREE.Vector3();
             for (let i = 0; i < 64; i++) {
-                const ang = (14 + (i % 8) * 2.5) * Math.PI / 180;       // 14°..32° away
+                const ang = (16 + (i % 8) * 3) / R;                     // ~16..37 WORLD UNITS away (arc/R), any planet size
                 const axis = tan.clone().applyAxisAngle(base, i * 1.37); // vary azimuth
                 out.copy(base).applyAxisAngle(axis, ang).normalize();
                 if (this.elevationAt(out) > 3) return out.clone();
@@ -1930,23 +1950,14 @@
             const g = this.game;
             if (!this.loader) this.loader = new THREE.GLTFLoader();
             if (this._ship) { g.scene.remove(this._ship); this._ship = null; }
-            const tan = new THREE.Vector3(0, 1, 0);
-            if (Math.abs(base.dot(tan)) > 0.9) tan.set(1, 0, 0);
-            tan.projectOnPlane(base).normalize();
-            let dir = base.clone();
-            for (let i = 0; i < 48; i++) {
-                const ang = (12 + (i % 6) * 3) * Math.PI / 180;
-                const axis = tan.clone().applyAxisAngle(base, 2.4 + i * 0.8);
-                const cand = base.clone().applyAxisAngle(axis, ang).normalize();
-                if (this.elevationAt(cand) > 3) { dir = cand; break; }
-            }
+            const dir = base.clone().normalize();   // sit exactly on the flight pad
             const place = (gltf) => {
                 if (g.activeModeId !== 'planet') return;     // mode changed mid-load
                 const src = gltf.scene || (gltf.scenes && gltf.scenes[0]);
                 if (!src) return;
                 const obj = src.clone(true);
-                const mat = this._shipMaterial();
-                obj.traverse((o) => { if (o.isMesh) { o.material = mat; o.castShadow = false; o.receiveShadow = false; o.frustumCulled = false; } });
+                // Keep the GLB's own baked ("shaded") materials — don't override.
+                obj.traverse((o) => { if (o.isMesh) { o.castShadow = false; o.receiveShadow = false; o.frustumCulled = false; } });
                 const box = new THREE.Box3().setFromObject(obj);
                 const size = new THREE.Vector3(); box.getSize(size);
                 const longest = Math.max(size.x, size.y, size.z) || 1;
@@ -1960,6 +1971,8 @@
                 g.scene.add(obj);
                 obj.updateMatrixWorld(true);
                 this._ship = obj;
+                this._shipHalf = Math.max(size.x, size.y, size.z) * scale * 0.5; // ~8u; for cam/thruster offsets
+                this._ship.visible = !this._riding || !this._cockpit;            // hidden in cockpit POV
             };
             const cached = this.assetCache.get(SHIP_PATH);
             if (cached) { place(cached); return; }
@@ -2021,30 +2034,42 @@
             else if (this._nearRocket) this._boardRocket();
         }
 
-        // Board → sit on the pad in the charge state (hold Space to charge).
+        // Board the ship → smooth cockpit takeoff (no charge): engines spool via the
+        // liftoff ramp and it climbs out forward+up like a ship, not a vertical rocket.
         _boardRocket() {
             const g = this.game;
             this._riding = true;
-            this._launching = true;
+            this._launching = false;      // no charge phase — straight into flight
             this._charge = 0;
-            this._spacePrev = false;
             this._autopilot = false;
             this._arrived = false;
             this._landed = false;
             this._nearRocket = false;
+            this._cockpit = true;          // start inside the cockpit
+            this._grounded = true;         // idle on the pad — no auto-launch; fly on manual throttle
             this._showPrompt('');
-            // Seed a launch-frame forward tangent (used for the hero cam + heading).
-            this._fwd.copy(this._rocketDir).cross(new THREE.Vector3(0, 1, 0));
-            if (this._fwd.lengthSq() < 1e-4) this._fwd.set(1, 0, 0);
-            this._fwd.projectOnPlane(this._rocketDir).normalize();
-            this._lastUp.copy(this._rocketDir);
-            g.player.position.copy(this._rocketBase);
+            this._showCharge(false);
+            // Launch frame: a horizontal forward tangent + the surface normal as "up".
+            const up = this._rocketDir;
+            const fwd = this._fwd.copy(this._rocketDir).cross(new THREE.Vector3(0, 1, 0));
+            if (fwd.lengthSq() < 1e-4) fwd.set(1, 0, 0);
+            fwd.projectOnPlane(up).normalize();
+            this._refUp.copy(up); this._refFwd.copy(fwd);
+            this._lastUp.copy(up);
+            // Nose pre-aimed up-and-forward so a throttle press climbs out (banked, not vertical).
+            const nose = this._wish.copy(up).multiplyScalar(0.62).addScaledVector(fwd, 0.78).normalize();
+            this._quatLookNoseUp(this._shipQuat, nose, up);
+            this._heading.copy(this._AXY).applyQuaternion(this._shipQuat).normalize();
+            this._shipUp.copy(this._AXZ).applyQuaternion(this._shipQuat).normalize();
+            // Sit on the pad, engines idle. No initial velocity / liftoff ramp.
+            g.player.position.copy(up).multiplyScalar(R + quantElev(up) + this._shipHalf * 0.5 + 1);
             g.player.velocity.set(0, 0, 0);
+            this._liftoffT = 0; this._liftoffMax = 0;
+            this._mouseDX = 0; this._mouseDY = 0;
+            this._camBlendT = 0;           // cockpit cam takes over immediately
             if (g.player.model) g.player.model.visible = false; // pilot is inside
             g.flyMode = false;
-            this._showCharge(true);
-            this._updateChargeUI(0);
-            g.showMessage && g.showMessage('🚀 Hold SPACE to charge launch — release to blast off', 3200);
+            g.showMessage && g.showMessage('🪑 In the cockpit — Space/W to take off · V cockpit/chase · E step out', 4600);
         }
 
         _tryDisembark() {
@@ -2060,8 +2085,11 @@
                 this._autopilot = false;
                 this._arrived = false;
                 this._charge = 0;
+                this._cockpit = false;
+                this._grounded = false;
                 this._showCharge(false);
-                this._plantRocketAt(dir);                 // settle the rocket on the pad
+                this._plantRocketAt(dir);                 // settle the flight pad here
+                this._placeShip(dir);                     // re-ground the ship where you landed
                 const side = this._fwd.clone().cross(dir).normalize();
                 g.player.position.copy(dir).multiplyScalar(groundR + 0.5).addScaledVector(side, 3);
                 g.player.velocity.set(0, 0, 0);
@@ -2080,7 +2108,7 @@
                 const name = this._targetDef.name;
                 this._swapWorlds();
                 this._riding = false; this._launching = false; this._autopilot = false;
-                this._arrived = false; this._charge = 0;
+                this._arrived = false; this._charge = 0; this._cockpit = false; this._grounded = false;
                 this._showCharge(false);
                 const spawn = this._findLandDir();
                 this._plantRocketAt(spawn);
@@ -2143,7 +2171,26 @@
             if (dist > 0.5) up.divideScalar(dist); else up.copy(this._lastUp);
             this._lastUp.copy(up);
             if (this._launching) { this._updateCharging(dt, up, dist); return; }
+            if (this._grounded) { this._idleOnPad(dt); return; }
             this._flyRocket(dt, p, up, dist);
+        }
+
+        // Boarded but parked: hold the ship on the pad (cockpit POV), engines idle, until
+        // the player throttles up — then begin flight with a gentle spool-up (manual takeoff).
+        _idleOnPad(dt) {
+            const g = this.game;
+            const up = this._rocketDir;
+            g.player.position.copy(up).multiplyScalar(R + quantElev(up) + this._shipHalf * 0.5 + 1);
+            g.player.velocity.set(0, 0, 0);
+            this._seatRocket(g.player.position, this._heading);
+            this._updateExhaust(dt, false, 0);
+            this._showPrompt('🚀 Space/W to take off · V cockpit/chase · E step out');
+            if (g.keys['Space'] || g.keys['KeyW']) {       // manual lift-off
+                this._grounded = false;
+                this._liftoffMax = 2.6; this._liftoffT = this._liftoffMax;  // smooth spool-up
+                g.player.velocity.copy(this._heading).multiplyScalar(6);
+                g.showMessage && g.showMessage('🚀 Lift-off!', 1500);
+            }
         }
 
         // Pad charge phase: build charge while Space is held; launch on release.
@@ -2256,15 +2303,17 @@
             if (this._liftoffT > 0) {
                 // Auto-thrust just after liftoff, eased in so speed builds gradually.
                 this._liftoffT -= dt;
-                const ramp = Math.min(1, (this._liftoffMax - this._liftoffT) / 0.5);
+                const ramp = Math.min(1, (this._liftoffMax - this._liftoffT) / 1.5); // gentle spool-up
                 if (throttle < ramp) throttle = ramp;
             }
 
             // Atmospheric envelope (reentry): density rises toward a body's surface
             // (nearest of home / target wins). In thick air the top speed drops and drag
             // stiffens — so flight is fast in vacuum and draggy on descent (two-tier feel).
-            const homeAtmD = Math.max(0, Math.min(1, 1 - (dist - R) / (1.6 * R)));
-            const destAtmD = Math.max(0, Math.min(1, 1 - (destDist - this._destRadius) / (1.6 * this._destRadius)));
+            // A thick band (1.8R) makes leaving/entering a planet a gradual climb rather
+            // than an instant pop into space.
+            const homeAtmD = Math.max(0, Math.min(1, 1 - (dist - R) / (1.8 * R)));
+            const destAtmD = Math.max(0, Math.min(1, 1 - (destDist - this._destRadius) / (1.8 * this._destRadius)));
             const atmD = Math.max(homeAtmD, destAtmD);
 
             if (autoLanding) {
@@ -2277,7 +2326,7 @@
             } else {
                 // Forces: nose thrust, home gravity, a gentle pull near the sister planet.
                 const THRUST = 400;
-                const MAXSP = 800 + (220 - 800) * atmD;            // 800 vacuum → ~220 deep atmosphere
+                const MAXSP = 800 + (150 - 800) * atmD;            // 800 vacuum → ~150 deep atmosphere (slow climb out)
                 if (throttle) vel.addScaledVector(H, throttle * THRUST * dt);
                 vel.addScaledVector(up, -GRAVITY * gravityScale(dist) * dt);
                 if (destDist < this._destRadius * 3.2) {
@@ -2379,6 +2428,27 @@
             this._seatRocket(p, H);
             this._updateExhaust(dt, throttle > 0.05, Math.max(0, throttle));
             this._updateReentryGlow(p, H);
+            this._updateThruster(p, H, throttle);
+        }
+
+        // Additive engine glow behind the ship while thrusting (the invisible carrier's
+        // exhaust never renders, so this is the visible thruster). Sprite → orientation-safe.
+        _updateThruster(p, H, throttle) {
+            const g = this.game;
+            if (throttle <= 0.05) { if (this._thr) this._thr.visible = false; return; }
+            if (!this._thr) {
+                const tex = this._reGlowTex || (this._reGlowTex = this._sunGlowTex(['rgba(255,245,225,1)', 'rgba(255,140,60,0.55)', 'rgba(255,90,30,0)']));
+                const mat = new THREE.SpriteMaterial({ map: tex, color: 0x9fdcff, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
+                this._thr = new THREE.Sprite(mat);
+                this._thr.frustumCulled = false;
+                g.scene.add(this._thr);
+            }
+            this._thr.visible = true;
+            const half = this._shipHalf || 6;
+            const s = half * (0.7 + 0.7 * throttle) * (0.85 + Math.random() * 0.3);
+            this._thr.scale.set(s, s, 1);
+            this._thr.position.copy(p).addScaledVector(H, -half * 0.95);
+            this._thr.material.opacity = 0.45 + 0.45 * throttle;
         }
 
         // Additive heat glow at the nose during fast atmospheric reentry (intensity =
@@ -2404,10 +2474,20 @@
         // Orient the rocket so its nose (+Y) points along the heading H.
         _seatRocket(p, H) {
             const rocket = this._rocket;
-            if (!rocket) return;
-            rocket.position.copy(p);
-            rocket.quaternion.copy(this._shipQuat); // full orientation incl. roll
-            rocket.updateMatrixWorld(true);
+            if (rocket) {
+                rocket.position.copy(p);
+                rocket.quaternion.copy(this._shipQuat); // invisible carrier holds the physics frame
+                rocket.updateMatrixWorld(true);
+            }
+            // Seat the visible imported ship onto the same flight transform. Hidden in
+            // cockpit POV (camera looks forward from inside, so the hull would occlude).
+            if (this._ship) {
+                // Hidden only during active cockpit flight; shown for chase + landing shots.
+                this._ship.visible = (this._landed || this._autoLanding) ? true : !this._cockpit;
+                this._ship.position.copy(p);
+                this._ship.quaternion.copy(this._shipQuat).multiply(this._shipFix);
+                this._ship.updateMatrixWorld(true);
+            }
         }
 
         // Expanding dust ring on the surface at touchdown (animated in update()).
@@ -2484,6 +2564,25 @@
             cam.lookAt(this._camTarget);
         }
 
+        // Cockpit POV: sit just inside the nose looking down the heading. The ship hull
+        // is hidden (see _seatRocket) so the view is clear; up rolls with the ship.
+        _cockpitCamera() {
+            const g = this.game;
+            const cam = g.camera;
+            const p = g.player.position;
+            const H = this._heading, sUp = this._shipUp;
+            cam.up.copy(sUp);
+            cam.position.copy(p).addScaledVector(H, this._shipHalf * 0.35).addScaledVector(sUp, this._shipHalf * 0.16);
+            cam.lookAt(p.clone().addScaledVector(H, 140));
+            const shake = this._reentry || 0;   // reentry shudder
+            if (shake > 0.05) {
+                const s = shake * 0.7;
+                cam.position.x += (Math.random() - 0.5) * s;
+                cam.position.y += (Math.random() - 0.5) * s;
+                cam.position.z += (Math.random() - 0.5) * s;
+            }
+        }
+
         // Chase cam: low hero angle while charging, behind-the-nose while flying.
         _rocketCamera() {
             const g = this.game;
@@ -2496,6 +2595,7 @@
             }
             if (this._landed) { this._landedCamera(); return; }
             if (this._autoLanding) { this._autoLandCamera(); return; }
+            if (this._cockpit) { this._cockpitCamera(); return; }
             const p = g.player.position;
             const H = this._heading;
             const shipUp = this._shipUp; // rolls with the ship
@@ -3099,6 +3199,20 @@
                 model.up.copy(dir);
                 model.lookAt(p.clone().add(fwd));
             }
+
+            // Drive the character animation. Planet mode bypasses the flat-world
+            // updatePlayer (which normally advances the mixer + picks Idle/Walk/Jump),
+            // so do it here: choose a clip from ground state + tangential speed, advance.
+            if (g.player.mixer && g.player.clips) {
+                const rv = up.dot(vel);
+                const tsp = Math.hypot(vel.x - up.x * rv, vel.y - up.y * rv, vel.z - up.z * rv);
+                let clip = 'Idle';
+                if (!this._onGround && g.player.clips['Jump']) clip = 'Jump';
+                else if (tsp > 7 && g.player.clips['Run']) clip = 'Run';
+                else if (tsp > 0.7 && g.player.clips['Walk']) clip = 'Walk';
+                if (g.setPlayerAnimation) g.setPlayerAnimation(clip);
+                g.player.mixer.update(dt);
+            }
         }
 
         // ---- camera (called from game.js updateCamera) ----
@@ -3147,13 +3261,20 @@
                 cam.position.copy(eye);
                 cam.lookAt(eye.clone().add(look));
             } else {
-                // Third-person chase that pulls back with altitude (frames the globe).
+                // Over-the-shoulder 3rd-person. Mouse yaw rotates `fwd` (via the
+                // controller); pitch tilts the look up/down (non-inverted, matching FPV);
+                // pulls back with altitude so high flights still frame the globe.
                 const dir = this._dir.copy(p).sub(center).normalize();
                 const alt = Math.max(0, p.length() - this.groundRadius(dir));
-                const dist = 9 + Math.min(160, alt * 1.6);
-                const height = 4 + Math.min(80, alt * 0.7);
-                cam.position.copy(p).addScaledVector(up, height).addScaledVector(fwd, -dist);
-                cam.lookAt(p);
+                const dist = 7 + Math.min(140, alt * 1.5);
+                const pitch = Math.max(-0.9, Math.min(0.9, g.fpvPitch || 0));
+                // Look direction tilts with pitch exactly like FPV (mouse up → look up).
+                const lookDir = fwd.clone().multiplyScalar(Math.cos(pitch)).addScaledVector(up, Math.sin(pitch)).normalize();
+                const rightV = fwd.clone().cross(up).normalize();   // shoulder offset axis
+                const eyeH = EYE * 0.9;
+                const focus = p.clone().addScaledVector(up, eyeH);
+                cam.position.copy(focus).addScaledVector(lookDir, -dist).addScaledVector(rightV, dist * 0.22 + 1.0);
+                cam.lookAt(focus.addScaledVector(lookDir, 12));
             }
         }
     }

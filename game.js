@@ -3349,6 +3349,9 @@ class Game3D {
         this.characters = {
             pjboy:    { label: 'PJBoy',    path: 'assets/Blocks/Characters/Character_PJBoy.glb',
                         grip: { position: [0, 0.06, 0], rotation: [0, 0, 0] } },
+            hero:     { label: 'Hero',     path: 'assets/Blocks/Characters/Character_Hero.glb',
+                        scale: 0.56,  // ~1.4u tall (shorter than trees)
+                        grip: { position: [0, 0.06, 0], rotation: [0, 0, 0] } },
             skeleton: { label: 'Skeleton', path: 'assets/Blocks/enemies/Skeleton_Armor.gltf' },
             female1:  { label: 'Female 1', path: 'assets/Blocks/Characters/Character_Female_1.gltf' },
             female2:  { label: 'Female 2', path: 'assets/Blocks/Characters/Character_Female_2.gltf' },
@@ -3481,7 +3484,10 @@ class Game3D {
             const box = new THREE.Box3().setFromObject(character);
             const height = box.max.y - box.min.y;
             if (height > 0) {
-                const targetHeight = 2.5;
+                // Per-character size multiplier (full-body human rigs read taller than the
+                // stylized characters at the same 2.5 box height, so they can opt to scale down).
+                const charScale = (this.characters[this.currentCharacterKey] || {}).scale || 1;
+                const targetHeight = 2.5 * charScale;
                 const s = targetHeight / height;
                 character.scale.setScalar(s);
             }
@@ -9033,7 +9039,10 @@ class Game3D {
                         this.playMode.mouseNDC.y - event.movementY * scaleY,
                         -1, 1
                     );
-                    if (this.viewMode === 'fpv' && !this.playMode.orbitEnabled) {
+                    // Planet mode also drives yaw/pitch from the mouse in 3rd-person/ISO
+                    // (its camera orbits the avatar), not just FPV.
+                    const planetLook = this.activeModeId === 'planet' && this.planetWorld && !this.planetWorld._riding;
+                    if ((this.viewMode === 'fpv' || planetLook) && !this.playMode.orbitEnabled) {
                         this.fpvPitch = (this.fpvPitch || 0) - event.movementY * 0.0025;
                         this.characterRotation -= event.movementX * this.fpvYawSensitivity;
                         const limit = Math.PI / 2 - 0.01; // full up/down, tiny epsilon to avoid lookAt flip
