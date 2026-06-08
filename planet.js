@@ -33,6 +33,10 @@
     const MOVE_SPEED = 9;
     const JUMP = 12;
     const EYE = 2.6; // raised: surface blocks (ELEV_STEP tall) sit higher than flat-world ones
+    // The rigged character's animated pose floats a touch above its rest-pose
+    // bounding box (what the load-time "feet → y=0" drop measures), so sink the
+    // model into the surface by this much along the local up. Tune to taste.
+    const FOOT_DROP = 0.35;
 
     // Gravity sphere of influence (recomputed per world from its R). Full pull near
     // the surface, fading to zero by SOI_OUTER (the weightless "space" gap).
@@ -515,6 +519,9 @@
             this._clearProps();
             this._clearAtmosphere();
             this._restoreScene();
+            // Undo the radial orientation we baked into the model so other modes
+            // (Open World / flat) don't inherit the globe-surface tilt.
+            if (g.player.model) { g.player.model.up.set(0, 1, 0); g.player.model.rotation.set(0, g.player.model.rotation.y, 0); }
             // tear down rocket / launch state
             if (this._riding && g.player.model) g.player.model.visible = true;
             this._riding = false;
@@ -3121,12 +3128,10 @@
                 vel.addScaledVector(up, -GRAVITY * gravityScale(dist) * dt);
             }
 
-            // Horizontal: WASD along the tangent plane. On foot you WALK by default and
-            // RUN while holding Shift (the animation picks Walk vs Run from the speed).
+            // Horizontal: WASD along the tangent plane. On foot you always RUN.
             const f = (g.keys['KeyW'] ? 1 : 0) - (g.keys['KeyS'] ? 1 : 0);
             const s = (g.keys['KeyD'] ? 1 : 0) - (g.keys['KeyA'] ? 1 : 0);
-            const running = !g.flyMode && (g.keys['ShiftLeft'] || g.keys['ShiftRight']);
-            const baseSpd = g.flyMode ? MOVE_SPEED : (running ? 12 : 5.5);
+            const baseSpd = g.flyMode ? MOVE_SPEED : 12;
             const moveSpeed = baseSpd * (g.getSpeedBoostMultiplier ? g.getSpeedBoostMultiplier() : 1);
             const wish = this._wish.set(0, 0, 0).addScaledVector(fwd, f).addScaledVector(right, s);
             const r2 = up.dot(vel);                 // radial after gravity/fly
@@ -3198,9 +3203,9 @@
             // Orient the player model to stand on the surface.
             const model = g.player.model;
             if (model) {
-                model.position.copy(p);
+                model.position.copy(p).addScaledVector(dir, -FOOT_DROP); // glue feet to the surface
                 model.up.copy(dir);
-                model.lookAt(p.clone().add(fwd));
+                model.lookAt(model.position.clone().add(fwd));
             }
 
             // Drive the character animation. Planet mode bypasses the flat-world
@@ -3212,8 +3217,7 @@
                 let clip = 'Idle';
                 if (g.flyMode && g.player.clips['Fly']) clip = 'Fly';
                 else if (!this._onGround && g.player.clips['Jump']) clip = 'Jump';
-                else if (tsp > 7 && g.player.clips['Run']) clip = 'Run';
-                else if (tsp > 0.7 && g.player.clips['Walk']) clip = 'Walk';
+                else if (tsp > 0.7 && g.player.clips['Run']) clip = 'Run';
                 if (g.setPlayerAnimation) g.setPlayerAnimation(clip);
                 g.player.mixer.update(dt);
             }
@@ -3270,15 +3274,15 @@
                 // pulls back with altitude so high flights still frame the globe.
                 const dir = this._dir.copy(p).sub(center).normalize();
                 const alt = Math.max(0, p.length() - this.groundRadius(dir));
-                const dist = 7 + Math.min(140, alt * 1.5);
+                const dist = 4 + Math.min(140, alt * 1.5);
                 const pitch = Math.max(-0.9, Math.min(0.9, g.fpvPitch || 0));
                 // Look direction tilts with pitch exactly like FPV (mouse up → look up).
                 const lookDir = fwd.clone().multiplyScalar(Math.cos(pitch)).addScaledVector(up, Math.sin(pitch)).normalize();
                 const rightV = fwd.clone().cross(up).normalize();   // shoulder offset axis
                 const eyeH = EYE * 0.9;
                 const focus = p.clone().addScaledVector(up, eyeH);
-                cam.position.copy(focus).addScaledVector(lookDir, -dist).addScaledVector(rightV, dist * 0.22 + 1.0);
-                cam.lookAt(focus.addScaledVector(lookDir, 12));
+                cam.position.copy(focus).addScaledVector(lookDir, -dist).addScaledVector(rightV, dist * 0.30 + 1.4);
+                cam.lookAt(focus.addScaledVector(lookDir, 10));
             }
         }
     }

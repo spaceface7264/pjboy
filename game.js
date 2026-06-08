@@ -9801,7 +9801,10 @@ class Game3D {
 
         if (this.player.model) {
             this.player.model.position.copy(this.player.position);
-            this.player.model.rotation.y = this.characterRotation + (this.modelYawOffset || 0);
+            // Set the FULL rotation (not just .y): Tiny Planet orients the model via
+            // lookAt(), which leaves a tilt baked into .rotation.x/.z. Assigning only
+            // .y would preserve that tilt, so zero x/z here to stay upright.
+            this.player.model.rotation.set(0, this.characterRotation + (this.modelYawOffset || 0), 0);
             // Keep the drop-shadow disc glued to ground level instead of riding
             // along with the character (otherwise it floats up during jumps).
             if (this.player.bodyShadow) {
