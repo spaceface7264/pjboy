@@ -3121,10 +3121,13 @@
                 vel.addScaledVector(up, -GRAVITY * gravityScale(dist) * dt);
             }
 
-            // Horizontal: WASD along the tangent plane.
+            // Horizontal: WASD along the tangent plane. On foot you WALK by default and
+            // RUN while holding Shift (the animation picks Walk vs Run from the speed).
             const f = (g.keys['KeyW'] ? 1 : 0) - (g.keys['KeyS'] ? 1 : 0);
             const s = (g.keys['KeyD'] ? 1 : 0) - (g.keys['KeyA'] ? 1 : 0);
-            const moveSpeed = MOVE_SPEED * (g.getSpeedBoostMultiplier ? g.getSpeedBoostMultiplier() : 1);
+            const running = !g.flyMode && (g.keys['ShiftLeft'] || g.keys['ShiftRight']);
+            const baseSpd = g.flyMode ? MOVE_SPEED : (running ? 12 : 5.5);
+            const moveSpeed = baseSpd * (g.getSpeedBoostMultiplier ? g.getSpeedBoostMultiplier() : 1);
             const wish = this._wish.set(0, 0, 0).addScaledVector(fwd, f).addScaledVector(right, s);
             const r2 = up.dot(vel);                 // radial after gravity/fly
             const tang = this._tang.copy(vel).addScaledVector(up, -r2); // tangential part
@@ -3207,7 +3210,8 @@
                 const rv = up.dot(vel);
                 const tsp = Math.hypot(vel.x - up.x * rv, vel.y - up.y * rv, vel.z - up.z * rv);
                 let clip = 'Idle';
-                if (!this._onGround && g.player.clips['Jump']) clip = 'Jump';
+                if (g.flyMode && g.player.clips['Fly']) clip = 'Fly';
+                else if (!this._onGround && g.player.clips['Jump']) clip = 'Jump';
                 else if (tsp > 7 && g.player.clips['Run']) clip = 'Run';
                 else if (tsp > 0.7 && g.player.clips['Walk']) clip = 'Walk';
                 if (g.setPlayerAnimation) g.setPlayerAnimation(clip);

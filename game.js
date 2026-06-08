@@ -3510,14 +3510,25 @@ class Game3D {
             wrap.add(character);
             wrap.position.copy(this.player.position);
 
-            // Soft round shadow disc — same as lion archer
+            // Soft radial contact shadow (gradient blob, sized to the character's footprint).
+            if (!this._shadowTex) {
+                const c = document.createElement('canvas'); c.width = c.height = 64;
+                const cx = c.getContext('2d');
+                const grd = cx.createRadialGradient(32, 32, 0, 32, 32, 32);
+                grd.addColorStop(0, 'rgba(0,0,0,0.5)');
+                grd.addColorStop(0.55, 'rgba(0,0,0,0.28)');
+                grd.addColorStop(1, 'rgba(0,0,0,0)');
+                cx.fillStyle = grd; cx.fillRect(0, 0, 64, 64);
+                this._shadowTex = new THREE.CanvasTexture(c);
+            }
+            const footW = Math.max(0.55, (scaledBox.max.x - scaledBox.min.x), (scaledBox.max.z - scaledBox.min.z));
+            const sr = footW * 1.5; // a touch wider than the body for a grounded look
             const shadowMat = new THREE.MeshBasicMaterial({
-                color: 0x000000, transparent: true, opacity: 0.45,
-                depthWrite: false, side: THREE.DoubleSide
+                map: this._shadowTex, transparent: true, depthWrite: false, side: THREE.DoubleSide
             });
-            const shadow = new THREE.Mesh(new THREE.CircleGeometry(0.85, 24), shadowMat);
+            const shadow = new THREE.Mesh(new THREE.PlaneGeometry(sr, sr), shadowMat);
             shadow.rotation.x = -Math.PI / 2;
-            shadow.position.y = 0.02;
+            shadow.position.y = 0.04;
             shadow.renderOrder = -1;
             wrap.add(shadow);
 

@@ -188,6 +188,11 @@ recordings/
 *.mp4
 *.webm
 
+# ...but DO keep model/asset textures
+!assets/**/*.png
+!assets/**/*.jpg
+!assets/**/*.jpeg
+
 # Development notes
 notes.md
 todo.md
