@@ -38,10 +38,66 @@
     // model into the surface by this much along the local up. Tune to taste.
     const FOOT_DROP = 0.35;
 
+    // Tiny-Planet-only per-character tweaks, applied to the SHARED player model while
+    // the planet owns it and reverted in exit() — so other modes are never affected.
+    //   scaleMul: extra size multiplier on the model wrap (1 = no change)
+    //   footDrop: how far to sink the model along the surface normal (defaults FOOT_DROP)
+    const PLANET_CHAR = {
+        hero: { scaleMul: 0.86, footDrop: 0.8 }, // a touch smaller; rigged feet float otherwise
+    };
+
     // Gravity sphere of influence (recomputed per world from its R). Full pull near
     // the surface, fading to zero by SOI_OUTER (the weightless "space" gap).
     let SOI_INNER = R * 1.6;
     let SOI_OUTER = R * 2.6;
+    // Square-planet support: when true the shell is a CUBE (half-extent R) instead of a
+    // sphere. Gravity stays radial — on a giant world the radial dir barely tilts across
+    // a walkable patch, so faces feel flat locally while the silhouette reads as a cube.
+    let CUBE_SHAPE = false;
+    // Roundness of a cube planet: 2 = sphere, ~4 = rounded cube (seamless edges, the
+    // Cubic-Odyssey look), 8+ = sharper edges. Tune to taste.
+    const CUBE_P = 4;
+
+    // --- Toroidal flat surface ------------------------------------------------
+    // When def.surface === 'flat', the walkable surface is a FLAT plane (Open-World
+    // feel: up = +Y, gravity straight down) whose terrain is PERIODIC over TORUS_L,
+    // so walking far enough wraps the look back to where you started. Fog hides the
+    // horizon + the repeat so it reads as a finite flat map. (The cube-from-space
+    // view + transition are a later phase; this is the on-foot world.)
+    let FLAT_SURFACE = false;
+    let TORUS_L = 2400;          // world period (units) — the terrain repeats every TORUS_L
+    const BS = 3;                // voxel block size (world units)
+    const FCELLS = 60;           // blocks per streamed flat chunk edge (bigger = fewer draw calls)
+    const FCHUNK = BS * FCELLS;  // chunk size in world units (180)
+    const FTH = BS * 6;          // block tile thickness — extends down to hide cliff gaps
+
+    // Seamless periodic 2D value noise: integer lattice wrapped at `period`, so the
+    // field tiles perfectly (no seam across the torus boundary).
+    function pvalue2(x, z, period, seed) {
+        const ix = Math.floor(x), iz = Math.floor(z);
+        const sx = smooth(x - ix), sz = smooth(z - iz);
+        const wp = (i) => ((i % period) + period) % period;
+        const h = (dx, dz) => hash3(wp(ix + dx), wp(iz + dz), 0, seed);
+        const L = (a, b, t) => a + (b - a) * t;
+        const x0 = L(h(0, 0), h(1, 0), sx), x1 = L(h(0, 1), h(1, 1), sx);
+        return L(x0, x1, sz);
+    }
+    // Flat-world terrain height at (x,z), periodic over TORUS_L. Octaves of pvalue2.
+    function flatHeight(x, z) {
+        const K = 24;            // base feature count across the torus
+        let e = 0, amp = 1, freq = 1, norm = 0;
+        for (let o = 0; o < 4; o++) {
+            e += amp * pvalue2(x / TORUS_L * K * freq, z / TORUS_L * K * freq, K * freq, (SEED + o * 131) | 0);
+            norm += amp; amp *= 0.5; freq *= 2;
+        }
+        return ((e / norm) - 0.5) * 2 * AMP;
+    }
+    // Block-quantised top-face Y of the voxel column containing world (x,z). Sampled at
+    // the cell CENTRE and snapped to BS so collision and the rendered cube always agree.
+    function flatTopAt(x, z) {
+        const cx = Math.floor(x / BS), cz = Math.floor(z / BS);
+        return Math.round(flatHeight((cx + 0.5) * BS, (cz + 0.5) * BS) / BS) * BS;
+    }
     // Smooth gravity multiplier (1 near the surface → 0 in space) for a radius r.
     function gravityScale(r) {
         if (r <= SOI_INNER) return 1;
@@ -207,6 +263,9 @@
         SOI_INNER = R * 1.6; SOI_OUTER = R * 2.6;
         NOISE_SCALE = def.noiseScale; AMP = def.amp; SEA_BIAS = def.seaBias;
         SEED = def.seed; SEA_COLOR = def.sea; PAL = def.pal;
+        CUBE_SHAPE = def.shape === 'cube';
+        FLAT_SURFACE = def.surface === 'flat';
+        TORUS_L = def.torusL || 2400;
         // Resolution scales with radius to keep ~constant block size (Terra: R90→56),
         // clamped so the tile count stays sane (24..320 → up to ~615k tiles). Only the
         // ACTIVE world builds at full res (on landing); distant props stay coarse.
@@ -235,6 +294,22 @@
         return (e - SEA_BIAS) * AMP * 2;
     }
     function quantElev(dir) { return Math.round(elevation(dir) / ELEV_STEP) * ELEV_STEP; }
+    // Base shell radius (sea level) in a unit direction. Sphere → constant R. Cube →
+    // a ROUNDED cube (superquadric), the Cubic-Odyssey trick: faces read as a cube but the
+    // edges are smoothly rounded, so with radial gravity you walk seamlessly from one face
+    // to the next — no crease, no wall, "up" just rotates gradually. The shape is the unit
+    // Lp-ball: p=2 is a sphere, p→∞ a hard cube; CUBE_P≈4 is a nicely rounded cube.
+    function shellR(dir) {
+        if (!CUBE_SHAPE) return R;
+        const ax = Math.abs(dir.x), ay = Math.abs(dir.y), az = Math.abs(dir.z);
+        const n = Math.pow(Math.pow(ax, CUBE_P) + Math.pow(ay, CUBE_P) + Math.pow(az, CUBE_P), 1 / CUBE_P);
+        return R / (n || 1e-6);
+    }
+    // Continuous surface radius in a direction — the smooth low-poly terrain is the shell
+    // displaced by elevation(dir), so this IS the rendered surface. Collision, prop/ship
+    // placement and the shaft test all go through this so they can never diverge from the
+    // mesh. (quantElev is now only used for snapping player-placed decorative blocks.)
+    function tileTopR(dir) { return shellR(dir) + elevation(dir); }
 
     // Cube → sphere mapping. (a,b) ∈ [-1,1] on a cube face → unit direction.
     function faceDir(face, a, b) {
@@ -283,7 +358,7 @@
         if (tU.lengthSq() < 1e-8) tU.set(1, 0, 0).addScaledVector(n, -n.dot(new THREE.Vector3(1, 0, 0)));
         tU.normalize();
         const tV = tU.clone().cross(n).normalize(); // right-handed (tU × n) so tiles aren't reflected
-        const baseRR = R + quantElev(c);
+        const baseRR = shellR(c) + elevation(c); // continuous surface height (sphere or cube shell)
         const cellW = c.distanceTo(cu) * baseRR * 1.18; // overlap a touch to seal seams
         return { c, n, tU, tV, baseRR, cellW, key: face + ',' + iu + ',' + iv };
     }
@@ -400,14 +475,17 @@
         elevationAt(dir) { return elevation(dir); }
         surfaceRadius(dir) { return R + elevation(dir); }
 
-        // Walkable top radius in a direction = quantized surface + placed stack.
+        // Walkable top radius in a direction = continuous smooth surface + placed stack.
+        // Uses elevation(dir) — the exact formula the smooth terrain mesh is displaced by —
+        // so the collision surface IS the visible surface (no float, no fall-through, no
+        // stairs). Player-placed decorative blocks add ELEV_STEP each on top.
         groundRadius(dir) {
             const c = cellOf(dir);
             const key = c.face + ',' + c.iu + ',' + c.iv;
             if (this._holes.has(key)) return -1; // open shaft to the core — no floor here
             const stack = this._placedStacks.get(key) || 0;
             const dug = this._dugDepth.get(key) || 0;
-            return R + quantElev(dir) + (stack - dug) * ELEV_STEP;
+            return shellR(dir) + elevation(dir) + (stack - dug) * ELEV_STEP;
         }
 
         // ---- lifecycle ----
@@ -415,6 +493,13 @@
         enter() {
             const g = this.game;
             if (!this.loader) this.loader = new THREE.GLTFLoader();
+            // Tiny Planet is a Hero-only mode: remember whatever character the
+            // player had and force the Hero for the duration. exit() restores it,
+            // and setPlayerCharacter() ignores switches while we're here.
+            this._prevCharKey = g.currentCharacterKey;
+            if (g.currentCharacterKey !== 'hero' && g.setPlayerCharacter) {
+                g.setPlayerCharacter('hero');
+            }
             // Persist edits if the tab is closed/reloaded mid-session.
             if (!this._beforeUnload) {
                 this._beforeUnload = () => { if (this._editsDirty) this._saveEdits(); };
@@ -458,40 +543,49 @@
             setActivePlanet(this._activeDef);
             this._streamed = !!this._activeDef.streamed; // giant → coarse shell + (later) streamed detail
             this._initOrbits();         // orbital params (used by _orbitOf for props/flight)
-            this._buildPlanet();
-            this._setupScene();
-            this._buildAtmosphere();
-            if (this._activeDef.clouds) this._buildClouds();
-            this._buildPlanetProps();
-            this._buildSun();
-            this._buildStars();
-            this._configureDayNight();
-            this._configureWeather();
-            this._buildWeather();
-            this._preloadProps();
-            if (g.clearEnemies) g.clearEnemies();
 
-            // Spawn the player on land near a fixed direction.
-            const spawn = this._findLandDir();
-            // Plant the ship (visible vehicle) + its invisible flight pad at one spot
-            // a short walk from spawn, so walking to the ship is what boards it.
-            const padDir = this._findLandNear(spawn);
-            this._placeRocket(padDir);
-            this._placeShip(padDir);
-            const p = g.player.position;
-            p.copy(spawn).multiplyScalar(this.groundRadius(spawn) + 0.5);
-            g.player.velocity.set(0, 0, 0);
-            // Seed a tangent forward and sync the yaw tracker.
-            const up = this._up.copy(spawn).normalize();
-            this._lastUp.copy(up);
-            this._inside = false;
-            this._inSpace = false;
-            this._ensureAltUI().style.display = 'block';
-            this._fwd.set(0, 1, 0);
-            if (Math.abs(this._fwd.dot(up)) > 0.9) this._fwd.set(1, 0, 0);
-            this._fwd.projectOnPlane(up).normalize();
-            this._lastYaw = g.characterRotation || 0;
-            this._onGround = true;
+            if (FLAT_SURFACE) {
+                // Toroidal flat world (Phase 1): flat terrain + fog, no radial sphere setup.
+                this._enterFlatWorld();
+                if (g.clearEnemies) g.clearEnemies();
+                this._inSpace = false;
+                this._ensureAltUI().style.display = 'block';
+            } else {
+                this._buildPlanet();
+                this._setupScene();
+                this._buildAtmosphere();
+                if (this._activeDef.clouds) this._buildClouds();
+                this._buildPlanetProps();
+                this._buildSun();
+                this._buildStars();
+                this._configureDayNight();
+                this._configureWeather();
+                this._buildWeather();
+                this._preloadProps();
+                if (g.clearEnemies) g.clearEnemies();
+
+                // Spawn the player on land near a fixed direction.
+                const spawn = this._findLandDir();
+                // Plant the ship (visible vehicle) + its invisible flight pad at one spot
+                // a short walk from spawn, so walking to the ship is what boards it.
+                const padDir = this._findLandNear(spawn);
+                this._placeRocket(padDir);
+                this._placeShip(padDir);
+                const p = g.player.position;
+                p.copy(spawn).multiplyScalar(this.groundRadius(spawn) + 0.5);
+                g.player.velocity.set(0, 0, 0);
+                // Seed a tangent forward and sync the yaw tracker.
+                const up = this._up.copy(spawn).normalize();
+                this._lastUp.copy(up);
+                this._inside = false;
+                this._inSpace = false;
+                this._ensureAltUI().style.display = 'block';
+                this._fwd.set(0, 1, 0);
+                if (Math.abs(this._fwd.dot(up)) > 0.9) this._fwd.set(1, 0, 0);
+                this._fwd.projectOnPlane(up).normalize();
+                this._lastYaw = g.characterRotation || 0;
+                this._onGround = true;
+            }
             if (g.applyViewModeToPlayerModel) g.applyViewModeToPlayerModel();
             this.updateCamera();
             g.scene.updateMatrixWorld(true); // flush transforms of everything just added
@@ -500,6 +594,11 @@
         exit() {
             const g = this.game;
             this._clearSurfChunks();
+            // Flat-world teardown (Phase 1). (Lights/sky are restored by _restoreScene,
+            // which also handles this._sun / this._ambient below.)
+            this._clearFlatChunks();
+            g.scene.fog = (this._saved && this._saved.fog) || null;
+            if (this._savedBg !== undefined) { g.scene.background = this._savedBg; this._savedBg = undefined; }
             if (this._planet) g.scene.remove(this._planet);
             if (this._placedMesh) g.scene.remove(this._placedMesh);
             if (this._preview) { g.scene.remove(this._preview); this._preview = null; }
@@ -519,9 +618,13 @@
             this._clearProps();
             this._clearAtmosphere();
             this._restoreScene();
-            // Undo the radial orientation we baked into the model so other modes
-            // (Open World / flat) don't inherit the globe-surface tilt.
-            if (g.player.model) { g.player.model.up.set(0, 1, 0); g.player.model.rotation.set(0, g.player.model.rotation.y, 0); }
+            // Undo the planet-only model tweaks so other modes inherit a clean model:
+            // the radial orientation (tilt) AND the planet size multiplier.
+            if (g.player.model) {
+                g.player.model.up.set(0, 1, 0);
+                g.player.model.rotation.set(0, g.player.model.rotation.y, 0);
+                g.player.model.scale.setScalar(1);
+            }
             // tear down rocket / launch state
             if (this._riding && g.player.model) g.player.model.visible = true;
             this._riding = false;
@@ -535,6 +638,11 @@
             this._mapOpen = false;
             if (this._mapEl) this._mapEl.style.display = 'none';
             if (this._chargeEl) this._chargeEl.style.display = 'none';
+            // Restore the player's chosen character (Tiny Planet forced Hero on enter).
+            if (this._prevCharKey && this._prevCharKey !== 'hero' && g.setPlayerCharacter) {
+                g.setPlayerCharacter(this._prevCharKey);
+            }
+            this._prevCharKey = null;
             if (this._editsDirty) this._saveEdits(); // flush pending edits on the way out
             if (this._beforeUnload) { window.removeEventListener('beforeunload', this._beforeUnload); this._beforeUnload = null; }
             if (this._onKeyDown) { window.removeEventListener('keydown', this._onKeyDown); this._onKeyDown = null; }
@@ -547,13 +655,15 @@
             const g = this.game;
             // Advance orbital time (always — planets keep revolving even in space).
             this._orbitT = (this._orbitT || 0) + (dt || 0.016);
+            // Toroidal flat world (Phase 1): just stream flat chunks; skip all sphere upkeep.
+            if (FLAT_SURFACE) { this._streamFlat(false); return; }
             // Slowly drift the cloud layer for a living sky.
             if (this._clouds) {
                 this._clouds.rotation.y += (dt || 0.016) * 0.006;
                 // Altitude-driven fade: clouds dissolve as you climb past them into space
                 // (the Cubic Odyssey "terrain & clouds melt away" cue on ascent/descent).
                 const camR = g.camera.position.distanceTo(this._center);
-                const cloudR = R * 1.4;
+                const cloudR = R * (CUBE_SHAPE ? 1.85 : 1.4);
                 const f = 1 - Math.min(1, Math.max(0, (camR - cloudR) / Math.max(1, SOI_OUTER - cloudR)));
                 this._clouds.traverse((o) => { if (o.isMesh && o.material) o.material.opacity = 0.92 * f; });
             }
@@ -675,6 +785,77 @@
             return this._placedMat;
         }
 
+        // ---- smooth low-poly terrain ----------------------------------------------
+        // The walkable surface is a sphere displaced by elevation(dir): a faceted
+        // low-poly mesh, NOT cubes. Flat shading + per-vertex colour give the stylised
+        // look; double-sided so winding never matters. groundRadius() uses the same
+        // elevation() so collision is exactly this surface.
+        _ensureTerrainMat() {
+            if (!this._terrainMat) {
+                this._terrainMat = new THREE.MeshLambertMaterial({
+                    vertexColors: true, flatShading: true, side: THREE.DoubleSide,
+                });
+            }
+            return this._terrainMat;
+        }
+
+        // Append one cube-sphere face patch [iu0..iuEnd]×[iv0..ivEnd] (cell indices on a
+        // grid of resolution N) into the given vertex/colour/index arrays, displaced to
+        // R + elevation + recess. Returns the new vertex base. Adjacent patches share
+        // boundary corners (same direction → same point) so they tile seamlessly.
+        _appendPatch(face, iu0, iv0, iuEnd, ivEnd, N, recess, positions, colors, indices, vbase) {
+            const nu = iuEnd - iu0, nv = ivEnd - iv0;
+            const vpu = nu + 1;
+            const col = new THREE.Color();
+            for (let jv = 0; jv <= nv; jv++) {
+                const b = (iv0 + jv) / N * 2 - 1;
+                for (let ju = 0; ju <= nu; ju++) {
+                    const a = (iu0 + ju) / N * 2 - 1;
+                    const dir = faceDir(face, a, b); // unit direction
+                    const e = elevation(dir);
+                    const rr = shellR(dir) + e + recess;
+                    positions.push(dir.x * rr, dir.y * rr, dir.z * rr);
+                    col.setHex(colorHex(dir, e));
+                    colors.push(col.r, col.g, col.b);
+                }
+            }
+            for (let jv = 0; jv < nv; jv++)
+                for (let ju = 0; ju < nu; ju++) {
+                    const i0 = vbase + jv * vpu + ju, i1 = i0 + 1, i2 = i0 + vpu, i3 = i2 + 1;
+                    indices.push(i0, i1, i2, i1, i3, i2);
+                }
+            return vbase + (nv + 1) * (nu + 1);
+        }
+
+        _geoToMesh(positions, colors, indices) {
+            const geo = new THREE.BufferGeometry();
+            geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+            geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+            geo.setIndex(indices);
+            geo.computeVertexNormals();
+            geo.computeBoundingSphere();
+            const mesh = new THREE.Mesh(geo, this._ensureTerrainMat());
+            mesh.frustumCulled = false;
+            mesh.receiveShadow = true;
+            return mesh;
+        }
+
+        // One streamed fine patch (a chunk's worth of cells) as a smooth mesh.
+        _buildSmoothPatchMesh(face, iu0, iv0, iuEnd, ivEnd) {
+            const positions = [], colors = [], indices = [];
+            this._appendPatch(face, iu0, iv0, iuEnd, ivEnd, FACE_N, 0, positions, colors, indices, 0);
+            return this._geoToMesh(positions, colors, indices);
+        }
+
+        // The whole globe at resolution N (coarse far-field shell, or a small world).
+        _buildSmoothGlobe(N, recess) {
+            const positions = [], colors = [], indices = [];
+            let vbase = 0;
+            for (let face = 0; face < 6; face++)
+                vbase = this._appendPatch(face, 0, 0, N, N, N, recess, positions, colors, indices, vbase);
+            return this._geoToMesh(positions, colors, indices);
+        }
+
         _buildPlanet() {
             this._ensureCubeGeo();
             if (!this._surfChunks) this._surfChunks = new Map();
@@ -690,37 +871,10 @@
                 this._cellKeyByInstance = null;
                 this.game.scene.add(this._planet);
             } else {
-                // One oriented tile per quad-sphere grid cell — each block lies LEVEL on
-                // the surface (its up = the radial normal), so the planet stays round.
-                const count = 6 * FACE_N * FACE_N;
-                const mesh = new THREE.InstancedMesh(this._cubeGeo, this._cubeMat, count);
-                mesh.receiveShadow = true;
-                this._cellKeyByInstance = new Array(count);
-                const m = new THREE.Matrix4(), q = new THREE.Quaternion(), basis = new THREE.Matrix4();
-                const pos = new THREE.Vector3(), scl = new THREE.Vector3(), col = new THREE.Color();
-                let i = 0;
-                for (let face = 0; face < 6; face++) {
-                    for (let iu = 0; iu < FACE_N; iu++) {
-                        for (let iv = 0; iv < FACE_N; iv++) {
-                            const fr = cellFrame(face, iu, iv);
-                            basis.makeBasis(fr.tU, fr.n, fr.tV);   // local x→tU, y→up(normal), z→tV
-                            q.setFromRotationMatrix(basis);
-                            pos.copy(fr.c).multiplyScalar(fr.baseRR - TILE_H / 2); // top face at baseRR
-                            scl.set(fr.cellW, TILE_H, fr.cellW);
-                            m.compose(pos, q, scl);
-                            mesh.setMatrixAt(i, m);
-                            col.setHex(colorHex(fr.c, fr.baseRR - R));
-                            mesh.setColorAt(i, col);
-                            this._cellKeyByInstance[i] = fr.key;
-                            i++;
-                        }
-                    }
-                }
-                mesh.instanceMatrix.needsUpdate = true;
-                if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-                this._planet = mesh;
-                this._planet.frustumCulled = false;
-                this.game.scene.add(mesh);
+                // Small worlds: one smooth low-poly globe at the full walkable resolution.
+                this._planet = this._buildSmoothGlobe(FACE_N, 0);
+                this._cellKeyByInstance = null;
+                this.game.scene.add(this._planet);
             }
 
             // Player-placed blocks layer (starts empty, grows as you build).
@@ -753,12 +907,13 @@
             this._preview.visible = false;
             this.game.scene.add(this._preview);
 
-            // Sea-level water shell.
+            // Sea-level water shell — a box for a cube planet, a sphere otherwise.
             this._water = new THREE.Mesh(
-                new THREE.SphereGeometry(R, 64, 48),
+                CUBE_SHAPE ? new THREE.BoxGeometry(2 * R, 2 * R, 2 * R)
+                          : new THREE.SphereGeometry(R, 64, 48),
                 new THREE.MeshLambertMaterial({ color: SEA_COLOR, transparent: true, opacity: 0.72 })
             );
-            this._water.frustumCulled = false; // camera sits on this giant sphere — cull math misfires
+            this._water.frustumCulled = false; // camera sits on this giant shell — cull math misfires
             this.game.scene.add(this._water);
 
             // Replay any saved player edits onto the freshly-built (deterministic) planet.
@@ -768,36 +923,10 @@
 
         // ---- streamed surface (giant worlds): coarse shell + fine near-player chunks ----
 
-        // Cheap whole-globe far-field shell at NBASE resolution. Recessed a hair so the
-        // streamed fine chunks always sit proudly over it (no z-fight / no peeking gaps).
+        // Cheap whole-globe far-field smooth shell at NBASE resolution. Recessed a couple
+        // of units so the streamed fine chunks always sit proudly over it (no z-fight).
         _buildCoarseShell() {
-            this._ensureCubeGeo();
-            const N = NBASE, count = 6 * N * N;
-            const mesh = new THREE.InstancedMesh(this._cubeGeo, this._cubeMat, count);
-            const m = new THREE.Matrix4(), q = new THREE.Quaternion(), basis = new THREE.Matrix4();
-            const pos = new THREE.Vector3(), scl = new THREE.Vector3(), col = new THREE.Color();
-            let i = 0;
-            for (let face = 0; face < 6; face++)
-                for (let iu = 0; iu < N; iu++)
-                    for (let iv = 0; iv < N; iv++) {
-                        const fr = cellFrame(face, iu, iv, N);
-                        basis.makeBasis(fr.tU, fr.n, fr.tV);
-                        q.setFromRotationMatrix(basis);
-                        // Recess a small ABSOLUTE amount (not a fraction of R, which would be
-                        // a huge ledge on a giant) so fine chunks sit just over the shell
-                        // where they overlap — no z-fight, no floating shelf at the ring edge.
-                        const rr = fr.baseRR - 2;
-                        pos.copy(fr.c).multiplyScalar(rr - TILE_H / 2);
-                        scl.set(fr.cellW, TILE_H, fr.cellW);
-                        m.compose(pos, q, scl);
-                        mesh.setMatrixAt(i, m);
-                        col.setHex(colorHex(fr.c, fr.baseRR - R));
-                        mesh.setColorAt(i, col);
-                        i++;
-                    }
-            mesh.instanceMatrix.needsUpdate = true;
-            if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-            return mesh;
+            return this._buildSmoothGlobe(NBASE, -2);
         }
 
         // Per-frame driver: keep a ring of fine chunks around the player; drop the rest.
@@ -846,8 +975,9 @@
             for (const k of Array.from(this._surfChunks.keys())) if (!want.has(k)) this._dropSurfChunk(k);
         }
 
-        // Build one fine chunk (an InstancedMesh of its in-range cells), applying any
-        // dug/hole edits for those cells so player changes show on the streamed tiles.
+        // Build one fine chunk as a smooth low-poly patch mesh covering its cells.
+        // (Terrain is no longer mineable, so there are no per-cell instances/edits here —
+        // player edits are decorative blocks in _placedMesh; see the build/mine note.)
         _ensureSurfChunk(face, cu, cv) {
             const ckey = face + ',' + cu + ',' + cv;
             if (this._surfChunks.has(ckey)) return;
@@ -855,44 +985,17 @@
             const iu0 = cu * SURF_CHUNK, iv0 = cv * SURF_CHUNK;
             if (iu0 >= N || iv0 >= N || iu0 < 0 || iv0 < 0) return;
             const iuEnd = Math.min(N, iu0 + SURF_CHUNK), ivEnd = Math.min(N, iv0 + SURF_CHUNK);
-            const maxTiles = (iuEnd - iu0) * (ivEnd - iv0);
-            if (maxTiles <= 0) return;
-            const mesh = new THREE.InstancedMesh(this._cubeGeo, this._cubeMat, maxTiles);
-            mesh.receiveShadow = true;
-            mesh.frustumCulled = false;
-            const keyByInstance = new Array(maxTiles);
-            const m = new THREE.Matrix4(), q = new THREE.Quaternion(), basis = new THREE.Matrix4();
-            const pos = new THREE.Vector3(), scl = new THREE.Vector3(), col = new THREE.Color();
-            let i = 0;
-            for (let iu = iu0; iu < iuEnd; iu++)
-                for (let iv = iv0; iv < ivEnd; iv++) {
-                    const key = face + ',' + iu + ',' + iv;
-                    if (this._holes.has(key)) continue;                // open shaft — no tile here
-                    const fr = cellFrame(face, iu, iv);
-                    const dug = this._dugDepth.get(key) || 0;
-                    basis.makeBasis(fr.tU, fr.n, fr.tV);
-                    q.setFromRotationMatrix(basis);
-                    pos.copy(fr.c).multiplyScalar(fr.baseRR - TILE_H / 2 - dug * ELEV_STEP);
-                    scl.set(fr.cellW, TILE_H, fr.cellW);
-                    m.compose(pos, q, scl);
-                    mesh.setMatrixAt(i, m);
-                    col.setHex(dug > 0 ? (dug <= 1 ? 0x6b4f2a : 0x70726f) : colorHex(fr.c, fr.baseRR - R));
-                    mesh.setColorAt(i, col);
-                    keyByInstance[i] = key;
-                    i++;
-                }
-            mesh.count = i;
-            mesh.instanceMatrix.needsUpdate = true;
-            if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+            if (iuEnd <= iu0 || ivEnd <= iv0) return;
+            const mesh = this._buildSmoothPatchMesh(face, iu0, iv0, iuEnd, ivEnd);
             this.game.scene.add(mesh);
-            this._surfChunks.set(ckey, { mesh, keyByInstance });
+            this._surfChunks.set(ckey, { mesh, keyByInstance: null });
         }
 
         _dropSurfChunk(ckey) {
             const rec = this._surfChunks.get(ckey);
             if (!rec) return;
             this.game.scene.remove(rec.mesh);
-            if (rec.mesh.dispose) rec.mesh.dispose(); // frees instance buffers (geo/mat are shared)
+            if (rec.mesh.geometry) rec.mesh.geometry.dispose(); // per-chunk geo; material is shared
             this._surfChunks.delete(ckey);
         }
 
@@ -900,7 +1003,7 @@
             if (!this._surfChunks) { this._surfChunks = new Map(); return; }
             for (const rec of this._surfChunks.values()) {
                 this.game.scene.remove(rec.mesh);
-                if (rec.mesh.dispose) rec.mesh.dispose();
+                if (rec.mesh.geometry) rec.mesh.geometry.dispose();
             }
             this._surfChunks.clear();
         }
@@ -908,6 +1011,189 @@
         _chunkOfMesh(mesh) {
             for (const rec of this._surfChunks.values()) if (rec.mesh === mesh) return rec;
             return null;
+        }
+
+        // ---- toroidal flat surface (Phase 1) --------------------------------------
+
+        _enterFlatWorld() {
+            const g = this.game;
+            this._setupScene(); // camera near/far, base lights (this._sun + this._ambient), space sky
+            // Daytime sky + matching fog: the fog hides the horizon AND the world's repeat,
+            // so it reads as a finite flat map. (_setupScene's space-black sky is for the
+            // radial 'see the planet from space' look — wrong for an on-foot flat world.)
+            const skyCol = (this._activeDef.atm && this._activeDef.atm[0]) || 0x8ec6ff;
+            if (g.sky) g.sky.material.color.setHex(skyCol);
+            // Solid sky: set the scene background too, so everything above the fogged
+            // horizon is sky-coloured (the space-black dome alone left the sky mostly black).
+            this._savedBg = g.scene.background;
+            g.scene.background = new THREE.Color(skyCol);
+            if (this._ambient) { this._ambient.color.setHex(0x9fb4d8); this._ambient.intensity = 0.85; }
+            if (this._sun) { this._sun.position.set(0.4 * 1000, 1000, 0.3 * 1000); }
+            // Render distance: how far you can see (streaming ring auto-follows). Kept
+            // under TORUS_L/2 so the world's repeat stays hidden. Raise for more view.
+            this._fogFar = 950;
+            g.scene.fog = new THREE.Fog(skyCol, this._fogFar * 0.62, this._fogFar); // crisp near, haze only far out
+            // Flat sea plane that follows the player. Its surface sits HALF A BLOCK above
+            // y=0 so it never lands coplanar with a block top (tops are multiples of BS) —
+            // that coincidence was the flicker. depthWrite off keeps the transparency clean.
+            this._water = new THREE.Mesh(
+                new THREE.PlaneGeometry(this._fogFar * 3, this._fogFar * 3),
+                new THREE.MeshLambertMaterial({ color: SEA_COLOR, transparent: true, opacity: 0.82, depthWrite: false })
+            );
+            this._water.rotation.x = -Math.PI / 2;
+            this._water.position.y = BS * 0.5;
+            this._water.renderOrder = 1;
+            this._water.frustumCulled = false;
+            g.scene.add(this._water);
+            this._flatChunks = new Map();
+            this._lastFlatKey = null;
+            this._placedMesh = null; this._placedCount = 0; // building deferred on flat
+            // Spawn at the origin, on the ground.
+            const p = g.player.position;
+            p.set(0, flatTopAt(0, 0) + 0.5, 0);
+            g.player.velocity.set(0, 0, 0);
+            this._onGround = true;
+            this._lastYaw = g.characterRotation || 0;
+            this._streamFlat(true);
+        }
+
+        _streamFlat(force) {
+            const g = this.game;
+            if (!this._flatChunks) return;
+            const p = g.player.position;
+            if (this._water) { this._water.position.x = p.x; this._water.position.z = p.z; }
+            const cx = Math.floor(p.x / FCHUNK), cz = Math.floor(p.z / FCHUNK);
+            const key = cx + ',' + cz;
+            if (!force && key === this._lastFlatKey) return;
+            this._lastFlatKey = key;
+            const ring = Math.ceil((this._fogFar || 600) / FCHUNK) + 1;
+            const want = this._wantFlat || (this._wantFlat = new Set());
+            want.clear();
+            for (let du = -ring; du <= ring; du++)
+                for (let dv = -ring; dv <= ring; dv++) want.add((cx + du) + ',' + (cz + dv));
+            for (const k of want) if (!this._flatChunks.has(k)) { const pp = k.split(','); this._buildFlatChunk(+pp[0], +pp[1]); }
+            for (const k of Array.from(this._flatChunks.keys())) if (!want.has(k)) this._dropFlatChunk(k);
+        }
+
+        _buildFlatChunk(cx, cz) {
+            const key = cx + ',' + cz;
+            if (this._flatChunks.has(key)) return;
+            this._ensureCubeGeo();
+            const x0 = cx * FCHUNK, z0 = cz * FCHUNK;
+            const count = FCELLS * FCELLS;
+            const mesh = new THREE.InstancedMesh(this._cubeGeo, this._cubeMat, count);
+            mesh.receiveShadow = true; mesh.frustumCulled = false;
+            const m = new THREE.Matrix4(), q = new THREE.Quaternion(); // axis-aligned cubes
+            const pos = new THREE.Vector3(), scl = new THREE.Vector3(BS, FTH, BS), col = new THREE.Color();
+            let i = 0;
+            for (let bz = 0; bz < FCELLS; bz++)
+                for (let bx = 0; bx < FCELLS; bx++) {
+                    const sx = x0 + (bx + 0.5) * BS, sz = z0 + (bz + 0.5) * BS;
+                    const top = flatTopAt(sx, sz);
+                    pos.set(sx, top - FTH / 2, sz); // top face at `top`
+                    m.compose(pos, q, scl);
+                    mesh.setMatrixAt(i, m);
+                    col.setHex(PAL(top));
+                    mesh.setColorAt(i, col);
+                    i++;
+                }
+            mesh.instanceMatrix.needsUpdate = true;
+            if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+            this.game.scene.add(mesh);
+            this._flatChunks.set(key, mesh);
+        }
+
+        _dropFlatChunk(key) {
+            const mesh = this._flatChunks.get(key);
+            if (!mesh) return;
+            this.game.scene.remove(mesh);
+            if (mesh.dispose) mesh.dispose(); // frees instance buffers (geo/mat are shared)
+            this._flatChunks.delete(key);
+        }
+
+        _clearFlatChunks() {
+            if (!this._flatChunks) return;
+            for (const mesh of this._flatChunks.values()) {
+                this.game.scene.remove(mesh);
+                if (mesh.dispose) mesh.dispose();
+            }
+            this._flatChunks.clear();
+        }
+
+        // Flat (Open-World-style) controller: up = +Y, gravity straight down.
+        _updateFlatPlayer(dt) {
+            const g = this.game, p = g.player.position, vel = g.player.velocity;
+            const boost = g.getSpeedBoostMultiplier ? g.getSpeedBoostMultiplier() : 1;
+            const yaw = g.characterRotation || 0;
+            const fwd = this._fwd.set(Math.sin(yaw), 0, Math.cos(yaw));
+            const right = this._right.set(-fwd.z, 0, fwd.x); // D strafes right, A left
+            const f = (g.keys['KeyW'] ? 1 : 0) - (g.keys['KeyS'] ? 1 : 0);
+            const s = (g.keys['KeyD'] ? 1 : 0) - (g.keys['KeyA'] ? 1 : 0);
+            let wx = fwd.x * f + right.x * s, wz = fwd.z * f + right.z * s;
+            const wl = Math.hypot(wx, wz);
+            const spd = 12 * boost;
+            let tx = 0, tz = 0; if (wl > 1e-4) { tx = wx / wl * spd; tz = wz / wl * spd; }
+            const k = Math.min(1, 12 * dt);
+            vel.x += (tx - vel.x) * k; vel.z += (tz - vel.z) * k;
+            if (g.flyMode) {
+                let vy = 0;
+                if (g.keys['Space']) vy += 1;
+                if (g.keys['ShiftLeft'] || g.keys['ShiftRight'] || g.keys['ControlLeft']) vy -= 1;
+                vel.y = vy * 30 * boost;
+            } else {
+                vel.y -= GRAVITY * dt;
+                if (g.keys['Space'] && this._onGround) { vel.y = 14; this._onGround = false; }
+            }
+            p.x += vel.x * dt; p.y += vel.y * dt; p.z += vel.z * dt;
+            // Keep coordinates bounded to one torus tile (terrain is periodic, so this is
+            // invisible) — walking far enough genuinely returns you to the start.
+            p.x = ((p.x % TORUS_L) + TORUS_L) % TORUS_L;
+            p.z = ((p.z % TORUS_L) + TORUS_L) % TORUS_L;
+            const h = flatTopAt(p.x, p.z); // block-quantised floor — matches the rendered cubes
+            this._onGround = false;
+            if (!g.flyMode && p.y <= h) { p.y = h; if (vel.y < 0) vel.y = 0; this._onGround = true; }
+            else if (g.flyMode && p.y < h) { p.y = h; }
+            // Model
+            const model = g.player.model;
+            if (model) {
+                const ov = PLANET_CHAR[g.currentCharacterKey] || {};
+                const drop = (typeof ov.footDrop === 'number') ? ov.footDrop : FOOT_DROP;
+                model.scale.setScalar(ov.scaleMul || 1);
+                model.up.set(0, 1, 0);
+                model.position.set(p.x, p.y - drop, p.z);
+                model.rotation.set(0, yaw + (g.modelYawOffset || 0), 0);
+            }
+            // Animation
+            if (g.player.mixer && g.player.clips) {
+                const tsp = Math.hypot(vel.x, vel.z);
+                let clip = 'Idle';
+                if (g.flyMode && g.player.clips['Fly']) clip = 'Fly';
+                else if (!this._onGround && g.player.clips['Jump']) clip = 'Jump';
+                else if (tsp > 0.7 && g.player.clips['Run']) clip = 'Run';
+                if (g.setPlayerAnimation) g.setPlayerAnimation(clip);
+                g.player.mixer.update(dt);
+            }
+            // camera is driven by updateCamera() → _flatCamera()
+        }
+
+        _flatCamera() {
+            const g = this.game, p = g.player.position, cam = g.camera;
+            cam.up.set(0, 1, 0);
+            const yaw = g.characterRotation || 0;
+            const pitch = Math.max(-0.9, Math.min(0.9, g.fpvPitch || 0));
+            const fx = Math.sin(yaw), fz = Math.cos(yaw);
+            const lx = fx * Math.cos(pitch), ly = Math.sin(pitch), lz = fz * Math.cos(pitch);
+            if (g.viewMode === 'fpv') {
+                cam.position.set(p.x, p.y + EYE, p.z);
+                cam.lookAt(p.x + lx, p.y + EYE + ly, p.z + lz);
+            } else {
+                const dist = 4, rx = -fz, rz = fx; // shoulder axis (over the right shoulder)
+                const fy = p.y + EYE * 0.9;
+                cam.position.set(p.x - lx * dist + rx * (dist * 0.30 + 1.4),
+                                 fy - ly * dist,
+                                 p.z - lz * dist + rz * (dist * 0.30 + 1.4));
+                cam.lookAt(p.x + lx * 10, fy + ly * 10, p.z + lz * 10);
+            }
         }
 
         // Dig a streamed fine tile (mirror of _digTerrain, scoped to a chunk mesh).
@@ -962,6 +1248,7 @@
 
         placeBlock() {
             const g = this.game;
+            if (FLAT_SURFACE) return; // building on the flat world is a later phase
             if (this._placedCount >= MAXP) return;
             const hit = this._rayHit();
             if (!hit) return;
@@ -989,6 +1276,7 @@
         }
 
         mineBlock() {
+            if (FLAT_SURFACE) return; // building on the flat world is a later phase
             const hit = this._rayHit();
             if (!hit || hit.instanceId == null) return;
             // A player-placed block takes priority (it's what the ray hits first).
@@ -1090,10 +1378,10 @@
             for (const [key, depth] of (data.dug || [])) this._dugDepth.set(key, depth);
             for (const key of (data.holes || [])) this._holes.add(key);
 
-            // Non-streamed: apply the dug/hole visuals to the single full globe now.
-            // Streamed: the fine chunks bake these in as they build (_ensureSurfChunk),
-            // and the coarse far-field shell is intentionally left pristine.
-            if (!this._streamed && this._planet) {
+            // Terrain is smooth low-poly and no longer mineable, so dug/hole edits have no
+            // visual on it (kept in the maps only for back-compat with old saves). The
+            // legacy per-instance dig visuals only applied to the old cube globe.
+            if (!this._streamed && this._planet && this._planet.isInstancedMesh) {
                 for (const [key, depth] of (data.dug || [])) {
                     const inst = this._instOfKey(key);
                     if (inst < 0) continue;
@@ -1246,7 +1534,7 @@
             if (!obj) return;
             obj.scale.setScalar(scale);
             const minY = this.modelMinY.get(path) || 0;
-            const rr = R + quantElev(dir) - minY * scale; // base sits on the tile top
+            const rr = tileTopR(dir) - minY * scale; // base sits on the tile top
             obj.position.copy(dir).multiplyScalar(rr);
             obj.quaternion.setFromUnitVectors(this._UPY || (this._UPY = new THREE.Vector3(0, 1, 0)), dir);
             obj.rotateY(rng() * Math.PI * 2); // spin about the surface normal
@@ -1278,7 +1566,7 @@
                 im.frustumCulled = false; im.castShadow = false; im.receiveShadow = false;
                 for (let i = 0; i < placements.length; i++) {
                     const pl = placements[i], s = pl.scale;
-                    pos.copy(pl.dir).multiplyScalar(R + quantElev(pl.dir) - minY * s);
+                    pos.copy(pl.dir).multiplyScalar(tileTopR(pl.dir) - minY * s);
                     q.setFromUnitVectors(UPY, pl.dir);
                     qs.setFromAxisAngle(UPY, pl.spin);
                     q.multiply(qs);
@@ -1399,7 +1687,7 @@
                 side: THREE.BackSide,
                 depthWrite: false,
             });
-            const s = new THREE.Mesh(new THREE.SphereGeometry(R * 1.5, 64, 48), mat);
+            const s = new THREE.Mesh(new THREE.SphereGeometry(R * (CUBE_SHAPE ? 1.95 : 1.5), 64, 48), mat);
             s.frustumCulled = false;
             g.scene.add(s);
             this._atm = [s];
@@ -1425,7 +1713,7 @@
         _scatterClouds() {
             if (!this._clouds) return;
             const rng = mulberry32(SEED + 7);
-            const CLOUD_R = R * 1.4;  // well above the highest peaks (~105)
+            const CLOUD_R = R * (CUBE_SHAPE ? 1.85 : 1.4);  // above the peaks (and the cube's corners)
             const NC = 60;
             const ga = Math.PI * (3 - Math.sqrt(5));
             const UPY = new THREE.Vector3(0, 1, 0);
@@ -1929,7 +2217,7 @@
             const rocket = this._rocket;
             if (!rocket) return;
             rocket.scale.setScalar(ROCKET_SCALE);
-            const top = R + quantElev(dir);
+            const top = tileTopR(dir);
             rocket.position.copy(dir).multiplyScalar(top - ROCKET_LOWEST * ROCKET_SCALE);
             rocket.quaternion.setFromUnitVectors(this._UPY || (this._UPY = new THREE.Vector3(0, 1, 0)), dir);
             rocket.updateMatrixWorld(true);
@@ -1976,7 +2264,7 @@
                 const scale = 16 / longest;                  // ~16u-long landmark
                 obj.scale.setScalar(scale);
                 const minY = box.min.y * scale;
-                const rr = R + quantElev(dir) - minY;        // base rests on the tile top
+                const rr = tileTopR(dir) - minY;        // base rests on the tile top
                 obj.position.copy(dir).multiplyScalar(rr);
                 obj.quaternion.setFromUnitVectors(this._UPY || (this._UPY = new THREE.Vector3(0, 1, 0)), dir);
                 obj.rotateY(0.6);                            // a pleasing heading
@@ -2074,7 +2362,7 @@
             this._heading.copy(this._AXY).applyQuaternion(this._shipQuat).normalize();
             this._shipUp.copy(this._AXZ).applyQuaternion(this._shipQuat).normalize();
             // Sit on the pad, engines idle. No initial velocity / liftoff ramp.
-            g.player.position.copy(up).multiplyScalar(R + quantElev(up) + this._shipHalf * 0.5 + 1);
+            g.player.position.copy(up).multiplyScalar(tileTopR(up) + this._shipHalf * 0.5 + 1);
             g.player.velocity.set(0, 0, 0);
             this._liftoffT = 0; this._liftoffMax = 0;
             this._mouseDX = 0; this._mouseDY = 0;
@@ -2192,7 +2480,7 @@
         _idleOnPad(dt) {
             const g = this.game;
             const up = this._rocketDir;
-            g.player.position.copy(up).multiplyScalar(R + quantElev(up) + this._shipHalf * 0.5 + 1);
+            g.player.position.copy(up).multiplyScalar(tileTopR(up) + this._shipHalf * 0.5 + 1);
             g.player.velocity.set(0, 0, 0);
             this._seatRocket(g.player.position, this._heading);
             this._updateExhaust(dt, false, 0);
@@ -2233,7 +2521,7 @@
             this._mouseDX = 0; this._mouseDY = 0;
             // Start from the planted origin so the mesh doesn't pop on launch.
             const DELTA = -ROCKET_LOWEST * ROCKET_SCALE;
-            g.player.position.copy(this._rocketDir).multiplyScalar(R + quantElev(this._rocketDir) + DELTA);
+            g.player.position.copy(this._rocketDir).multiplyScalar(tileTopR(this._rocketDir) + DELTA);
             // Gentle initial nudge; the auto-thrust ramp builds speed gradually.
             g.player.velocity.copy(this._refUp).multiplyScalar(3 + this._charge * 4);
             this._liftoffMax = 1.5 + this._charge * 0.8;
@@ -3078,6 +3366,8 @@
 
         updatePlayer(dt) {
             const g = this.game;
+            // Toroidal flat world (Phase 1): flat controller, no radial/rocket logic.
+            if (FLAT_SURFACE) { this._updateFlatPlayer(dt); return; }
             const p = g.player.position;
             const vel = g.player.velocity;
             const center = this._center;
@@ -3151,50 +3441,70 @@
                 this._onGround = false;
             }
 
-            // Integrate, then resolve against the shell. The shell is solid from
-            // BOTH sides; a dug HOLE cell is the only passage. `_inside` tracks
-            // whether we're in the hollow interior and only flips while over a hole,
-            // so solid cells block in EVERY mode (walk, fall, fly): from outside you
-            // stand on the outer face, from inside you stop at the inner face. This
-            // stops flying out through rock and the "toggle fly → snap outside" jump.
+            // ---- Resolve against the shell (axis-separated) ----
+            // The shell is solid from BOTH sides; a dug HOLE cell is the only passage.
+            // `_inside` tracks the hollow interior and only flips while over a hole, so
+            // solid columns block in EVERY mode. Resolution does the tangent first
+            // (block walls) then the radial (settle onto the floor), which keeps ground
+            // contact consistent: you climb small steps, stop at cliffs instead of
+            // teleporting up them, and stay glued walking down — no jitter.
+            const MAX_STEP = ELEV_STEP * 2 + 0.1; // tallest step we auto-climb; taller = wall
+            const STICK = ELEV_STEP * 1.5;        // stay glued to the floor within this radial gap
+
+            // 1) Wall block: if our tangential motion this frame would carry us onto a
+            //    column more than MAX_STEP above our current footing, cancel it (keep
+            //    the radial part so gravity/jump still resolve). Walking + on foot only.
+            if (!g.flyMode && !this._inside) {
+                const tv = (this._tmpTang || (this._tmpTang = new THREE.Vector3()))
+                    .copy(vel).addScaledVector(up, -up.dot(vel));
+                if (tv.lengthSq() > 1e-9) {
+                    const hereDir = (this._tmpDir || (this._tmpDir = new THREE.Vector3()))
+                        .copy(p).sub(center).normalize();
+                    const floorHere = this.groundRadius(hereDir);
+                    const aheadDir = (this._tmpPos || (this._tmpPos = new THREE.Vector3()))
+                        .copy(p).addScaledVector(tv, dt).sub(center).normalize();
+                    const floorAhead = this.groundRadius(aheadDir);
+                    if (floorAhead > 0 && floorHere > 0 && floorAhead - floorHere > MAX_STEP) {
+                        vel.addScaledVector(tv, -1); // stop at the wall
+                    }
+                }
+            }
+
+            // 2) Integrate.
             p.addScaledVector(vel, dt);
             const dir = this._dir.copy(p).sub(center);
             const pr = dir.length() || 1;
             dir.divideScalar(pr);
-            const outerR = this.groundRadius(dir); // -1 over an open shaft
+            const floorR = this.groundRadius(dir); // -1 over an open shaft
             this._onGround = false;
 
-            if (outerR > 0) {                       // solid cell
+            // 3) Radial resolve.
+            if (floorR > 0) {                       // solid column
                 if (this._inside) {                 // hollow side → blocked at the inner face
-                    const innerR = outerR - TILE_H;
+                    const innerR = floorR - TILE_H;
                     if (pr > innerR) {
                         p.copy(dir).multiplyScalar(innerR);
                         const pen = dir.dot(vel);
                         if (pen > 0) vel.addScaledVector(dir, -pen); // kill push into the shell
                     }
-                } else {                            // outside → stand / land / climb on the outer face
-                    // Step-up look-ahead: sample the ground a little ahead along
-                    // horizontal motion so we rise onto a small step BEFORE the body
-                    // clips into its side. Capped to ~2 blocks so tall walls still block.
-                    let groundR = outerR;
-                    const h = this._stepH || (this._stepH = new THREE.Vector3());
-                    h.copy(vel).addScaledVector(dir, -dir.dot(vel)); // tangential velocity
-                    const hl = h.length();
-                    if (hl > 0.001) {
-                        const ahead = this._stepA || (this._stepA = new THREE.Vector3());
-                        ahead.copy(p).addScaledVector(h, 1.3 / hl).normalize(); // ~1.3u ahead
-                        const ag = this.groundRadius(ahead);
-                        if (ag > groundR && ag - groundR <= ELEV_STEP * 2 + 0.1) groundR = ag;
+                } else if (g.flyMode) {             // flying outside → only stop sinking into rock
+                    if (pr < floorR) {
+                        p.copy(dir).multiplyScalar(floorR);
+                        const inw = dir.dot(vel);
+                        if (inw < 0) vel.addScaledVector(dir, -inw);
                     }
-                    if (pr < groundR) {
-                        p.copy(dir).multiplyScalar(groundR);
-                        const inward = dir.dot(vel);
-                        if (inward < 0) vel.addScaledVector(dir, -inward);
-                        if (!g.flyMode) this._onGround = true;
+                } else {                            // walking outside → land / climb / stick
+                    const rad = dir.dot(vel);       // radial velocity (+ = rising, e.g. mid-jump)
+                    // Land when at/below the floor; glue down small steps/slopes when just
+                    // above it and not climbing. The rad gate lets jumps leave the ground.
+                    if (pr <= floorR || (pr <= floorR + STICK && rad <= 0.5)) {
+                        p.copy(dir).multiplyScalar(floorR);
+                        if (rad < 0) vel.addScaledVector(dir, -rad); // kill downward into ground
+                        this._onGround = true;
                     }
                 }
             } else {                                // open shaft — the only crossing of the shell
-                const surfR = R + quantElev(dir);
+                const surfR = tileTopR(dir);
                 if (!this._inside && pr < surfR - TILE_H) {
                     this._inside = true;            // entered the interior — freeze the camera up
                     this._coreUp.copy(up);
@@ -3208,7 +3518,10 @@
             // Orient the player model to stand on the surface.
             const model = g.player.model;
             if (model) {
-                model.position.copy(p).addScaledVector(dir, -FOOT_DROP); // glue feet to the surface
+                const ov = PLANET_CHAR[g.currentCharacterKey] || {};
+                const drop = (typeof ov.footDrop === 'number') ? ov.footDrop : FOOT_DROP;
+                model.scale.setScalar(ov.scaleMul || 1); // planet-only size; exit() restores 1
+                model.position.copy(p).addScaledVector(dir, -drop); // glue feet to the surface
                 model.up.copy(dir);
                 model.lookAt(model.position.clone().add(fwd));
             }
@@ -3232,6 +3545,8 @@
 
         updateCamera() {
             const g = this.game;
+            // Toroidal flat world (Phase 1): flat over-the-shoulder camera.
+            if (FLAT_SURFACE) { this._flatCamera(); return; }
             const p = g.player.position;
             const center = this._center;
             const cam0 = g.camera;

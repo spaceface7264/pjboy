@@ -3351,6 +3351,9 @@ class Game3D {
                         grip: { position: [0, 0.06, 0], rotation: [0, 0, 0] } },
             hero:     { label: 'Hero',     path: 'assets/Blocks/Characters/Character_Hero.glb',
                         scale: 0.56,  // ~1.4u tall (shorter than trees)
+                        // NOTE: Tiny-Planet-specific size/grounding tweaks live in planet.js
+                        // (PLANET_CHAR), applied on enter() and reverted on exit() — keep them
+                        // out of here so other modes are unaffected.
                         grip: { position: [0, 0.06, 0], rotation: [0, 0, 0] } },
             skeleton: { label: 'Skeleton', path: 'assets/Blocks/enemies/Skeleton_Armor.gltf' },
             female1:  { label: 'Female 1', path: 'assets/Blocks/Characters/Character_Female_1.gltf' },
@@ -3445,6 +3448,8 @@ class Game3D {
 
     setPlayerCharacter(key) {
         if (!this.characters || !this.characters[key]) return;
+        // Tiny Planet is a Hero-only mode — ignore attempts to switch while there.
+        if (this.activeModeId === 'planet' && key !== 'hero') return;
         if (this.currentCharacterKey === key && this.player && this.player.model && this.player.mixer) return;
         this.currentCharacterKey = key;
         this.loadPlayerModel(this.characters[key].path);
@@ -8930,10 +8935,11 @@ class Game3D {
                 return;
             }
 
-            // B: cycle explore speed (open world only) — 1× → 2× → 4×.
-            if (event.code === 'KeyB' && !event.repeat && this.activeModeId === 'open_world'
+            // B: cycle explore speed (open world + planet) — 1× → 2× → 4× → 8×.
+            if (event.code === 'KeyB' && !event.repeat
+                && (this.activeModeId === 'open_world' || this.activeModeId === 'planet')
                 && !this.modalOpen && !this.isDrawerOpen) {
-                const steps = [1, 2, 4];
+                const steps = [1, 2, 4, 8];
                 const next = steps[(steps.indexOf(this.exploreSpeedMult) + 1) % steps.length];
                 this.exploreSpeedMult = next;
                 this.showMessage(`Explore speed ${next}×`);
@@ -9436,8 +9442,9 @@ class Game3D {
 
     getSpeedBoostMultiplier() {
         const boost = (this.powerUps.speedBoostTimer > 0) ? (this.SPEED_BOOST_MOVE_MULT || 1.45) : 1;
-        // Open-world explore speed stacks on top of any power-up boost.
-        const explore = (this.activeModeId === 'open_world') ? (this.exploreSpeedMult || 1) : 1;
+        // Explore speed (B key) stacks on top of any power-up boost — open world + planet.
+        const explore = (this.activeModeId === 'open_world' || this.activeModeId === 'planet')
+            ? (this.exploreSpeedMult || 1) : 1;
         return boost * explore;
     }
 

@@ -134,10 +134,14 @@
             R: 2000,            // a real, huge planet — streamed surface (can't see all of it from the ground)
             gravity: 26,
             noiseScale: 1.9,
-            amp: 110,           // dramatic mountain ranges & deep valleys at this scale
+            amp: 22,            // gentle rolling terrain — reads as a flat roamable map on foot
+                                // (the cube silhouette comes from the shell shape, not this)
             seaBias: 0.46,
             seed: 9123,
             daySec: 360, axisTilt: 0.35, weather: 'rain',
+            shape: 'cube',      // square planet — rendered as a cube from space (later phase)
+            surface: 'flat',    // on foot: a flat toroidal world (walk far → wraps back), fogged
+            torusL: 2400,       // world period — terrain repeats every 2400 units
             streamed: true,     // coarse far-field shell + fine chunks streamed near the player
             sea: 0x2a6fb0,
             sky: 0x6fae3a,
