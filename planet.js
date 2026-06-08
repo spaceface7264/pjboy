@@ -597,6 +597,7 @@
             // Flat-world teardown (Phase 1). (Lights/sky are restored by _restoreScene,
             // which also handles this._sun / this._ambient below.)
             this._clearFlatChunks();
+            if (this._flatClouds) { g.scene.remove(this._flatClouds); this._flatClouds = null; }
             g.scene.fog = (this._saved && this._saved.fog) || null;
             if (this._savedBg !== undefined) { g.scene.background = this._savedBg; this._savedBg = undefined; }
             if (this._planet) g.scene.remove(this._planet);
@@ -656,7 +657,7 @@
             // Advance orbital time (always — planets keep revolving even in space).
             this._orbitT = (this._orbitT || 0) + (dt || 0.016);
             // Toroidal flat world: stream chunks + advance the living sky; skip sphere upkeep.
-            if (FLAT_SURFACE) { this._streamFlat(false); this._updateFlatSky(dt); return; }
+            if (FLAT_SURFACE) { this._streamFlat(false); this._updateFlatSky(dt); this._updateWeather(dt); return; }
             // Slowly drift the cloud layer for a living sky.
             if (this._clouds) {
                 this._clouds.rotation.y += (dt || 0.016) * 0.006;
@@ -1048,6 +1049,7 @@
             // Living sky: day/night cycle + stars + sun.
             this._buildStars();
             this._buildFlatSun();
+            this._buildFlatClouds();
             this._dayLen = (this._activeDef.daySec || 360) * 3; // Terra ~18 min/cycle
             this._dayT = this._dayLen * 0.28;                   // start mid-morning
             this._skyDay = new THREE.Color(skyCol);
@@ -1055,6 +1057,9 @@
             this._skyDusk = new THREE.Color(0xff7a3a);
             this._cWarm = new THREE.Color(0xff7a3a); this._cDaySun = new THREE.Color(0xfff4e0);
             this._cGlow = new THREE.Color(0xffd9a0); this._cGlowWarm = new THREE.Color(0xff5a1e);
+            // Weather (this planet's precipitation type: rain / snow / ash / dust).
+            this._configureWeather();
+            this._buildWeather();
 
             this._flatChunks = new Map();
             this._lastFlatKey = null;
@@ -1203,6 +1208,42 @@
             this._sunMesh = grp; // cleared by _clearSun() on exit
         }
 
+        // Cloud layer for the flat world: soft billboards overhead that rain falls out of.
+        // Cover/shade are driven by the weather (see _updateFlatClouds).
+        _buildFlatClouds() {
+            const tex = this._sunGlowTex(['rgba(255,255,255,1)', 'rgba(255,255,255,0.5)', 'rgba(255,255,255,0)']);
+            const grp = new THREE.Group();
+            const rng = mulberry32(SEED + 555);
+            grp._sprites = [];
+            for (let i = 0; i < 46; i++) {
+                const m = new THREE.SpriteMaterial({ map: tex, color: 0xffffff, transparent: true, opacity: 0, depthWrite: false });
+                const s = new THREE.Sprite(m);
+                const r = 60 + rng() * 640, th = rng() * Math.PI * 2;
+                s.position.set(Math.cos(th) * r, 74 + rng() * 22, Math.sin(th) * r); // just above the rain column top
+                const sc = 70 + rng() * 110;
+                s.scale.set(sc * 1.7, sc, 1);
+                s.frustumCulled = false; s.renderOrder = 2;
+                grp.add(s); grp._sprites.push(s);
+            }
+            this.game.scene.add(grp);
+            this._flatClouds = grp;
+        }
+
+        // vis = current precipitation visibility 0..1, day = daylight amount 0..1.
+        _updateFlatClouds(dt, vis, day) {
+            const grp = this._flatClouds;
+            if (!grp) return;
+            const p = this.game.player.position;
+            grp.position.x = p.x; grp.position.z = p.z;     // stay overhead
+            grp.rotation.y += dt * 0.02;                    // slow drift
+            const cover = Math.min(1, 0.16 + vis * 0.95);   // a few puffs when clear → overcast in rain
+            const shade = (0.5 + 0.5 * day) * (1 - 0.5 * vis); // grey when stormy, dark at night
+            for (const s of grp._sprites) {
+                s.material.opacity = cover * 0.85;
+                s.material.color.setScalar(shade);
+            }
+        }
+
         // Day/night for the flat world: arc the sun, drive light + sky/fog colour + stars.
         _updateFlatSky(dt) {
             const g = this.game;
@@ -1212,6 +1253,7 @@
             const sy = Math.sin(a);                            // sun altitude -1..1
             const sunDir = (this._sunNow || (this._sunNow = new THREE.Vector3())).set(Math.cos(a), sy, 0.25).normalize();
             const day = Math.max(0, Math.min(1, (sy + 0.12) / 0.32));
+            this._dayAmt = day; // shared with cloud shading
             const night = 1 - day;
             const horizon = 1 - Math.min(1, Math.abs(sy) / 0.22); // peaks at sunrise/sunset
             if (this._sun) {
@@ -1888,11 +1930,17 @@
             if (!r) return;
             const g = this.game;
             const p = g.player.position;
-            const up = this._dnUp ? this._dnUp : (this._dnUp = new THREE.Vector3());
-            up.copy(p).sub(this._center);
-            const ul = up.length() || 1; up.divideScalar(ul);
-            // Weather only near a surface (fades out with altitude / in space).
-            const alt = Math.max(0, ul - this.groundRadius(up));
+            let up, alt;
+            if (FLAT_SURFACE) {
+                up = this._UPY || (this._UPY = new THREE.Vector3(0, 1, 0));
+                alt = Math.max(0, p.y - flatTopAt(p.x, p.z));
+            } else {
+                up = this._dnUp ? this._dnUp : (this._dnUp = new THREE.Vector3());
+                up.copy(p).sub(this._center);
+                const ul = up.length() || 1; up.divideScalar(ul);
+                // Weather only near a surface (fades out with altitude / in space).
+                alt = Math.max(0, ul - this.groundRadius(up));
+            }
             const near = Math.max(0, 1 - alt / 160);
 
             // Fronts: every ~20–70s pick a new target (clear spells or active weather).
@@ -1925,6 +1973,8 @@
             if (this._ambient && this._wxFlash > 0) this._ambient.intensity += this._wxFlash * 1.4;
             // Overcast: dim the cloud layer a touch as weather builds.
             if (this._clouds) this._clouds.traverse((o) => { if (o.isMesh && o.material) { o.material.color && o.material.color.setScalar(1 - 0.45 * vis); } });
+            // Flat world: drive the overhead cloud layer (rain falls out of it).
+            if (FLAT_SURFACE) this._updateFlatClouds(dt, vis, this._dayAmt != null ? this._dayAmt : 1);
         }
 
         // ---- the sun: solar-system center + primary light source ----
