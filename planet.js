@@ -655,8 +655,8 @@
             const g = this.game;
             // Advance orbital time (always — planets keep revolving even in space).
             this._orbitT = (this._orbitT || 0) + (dt || 0.016);
-            // Toroidal flat world (Phase 1): just stream flat chunks; skip all sphere upkeep.
-            if (FLAT_SURFACE) { this._streamFlat(false); return; }
+            // Toroidal flat world: stream chunks + advance the living sky; skip sphere upkeep.
+            if (FLAT_SURFACE) { this._streamFlat(false); this._updateFlatSky(dt); return; }
             // Slowly drift the cloud layer for a living sky.
             if (this._clouds) {
                 this._clouds.rotation.y += (dt || 0.016) * 0.006;
@@ -1045,6 +1045,17 @@
             this._water.renderOrder = 1;
             this._water.frustumCulled = false;
             g.scene.add(this._water);
+            // Living sky: day/night cycle + stars + sun.
+            this._buildStars();
+            this._buildFlatSun();
+            this._dayLen = (this._activeDef.daySec || 360) * 3; // Terra ~18 min/cycle
+            this._dayT = this._dayLen * 0.28;                   // start mid-morning
+            this._skyDay = new THREE.Color(skyCol);
+            this._skyNight = new THREE.Color(0x0a1430);
+            this._skyDusk = new THREE.Color(0xff7a3a);
+            this._cWarm = new THREE.Color(0xff7a3a); this._cDaySun = new THREE.Color(0xfff4e0);
+            this._cGlow = new THREE.Color(0xffd9a0); this._cGlowWarm = new THREE.Color(0xff5a1e);
+
             this._flatChunks = new Map();
             this._lastFlatKey = null;
             this._placedMesh = null; this._placedCount = 0; // building deferred on flat
@@ -1054,6 +1065,7 @@
             g.player.velocity.set(0, 0, 0);
             this._onGround = true;
             this._lastYaw = g.characterRotation || 0;
+            this._updateFlatSky(0);
             this._streamFlat(true);
         }
 
@@ -1174,6 +1186,57 @@
                 g.player.mixer.update(dt);
             }
             // camera is driven by updateCamera() → _flatCamera()
+        }
+
+        // A simple billboard sun for the flat sky (follows the camera in the sun's dir).
+        _buildFlatSun() {
+            const tex = this._sunGlowTex(['rgba(255,255,250,1)', 'rgba(255,235,170,0.7)', 'rgba(255,196,90,0)']);
+            const grp = new THREE.Group();
+            const mk = (scale, color) => {
+                const m = new THREE.SpriteMaterial({ map: tex, color, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false });
+                const s = new THREE.Sprite(m); s.scale.setScalar(scale); grp.add(s); return m;
+            };
+            this._sunGlowMat = mk(95, 0xffd9a0); // corona
+            this._sunCoreMat = mk(34, 0xffffff); // disk
+            grp.traverse((o) => { o.frustumCulled = false; o.renderOrder = 4; });
+            this.game.scene.add(grp);
+            this._sunMesh = grp; // cleared by _clearSun() on exit
+        }
+
+        // Day/night for the flat world: arc the sun, drive light + sky/fog colour + stars.
+        _updateFlatSky(dt) {
+            const g = this.game;
+            this._dayT = (this._dayT + (dt || 0)) % this._dayLen;
+            const phase = this._dayT / this._dayLen;          // 0.25 sunrise, 0.5 noon, 0.75 sunset
+            const a = phase * Math.PI * 2 - Math.PI / 2;
+            const sy = Math.sin(a);                            // sun altitude -1..1
+            const sunDir = (this._sunNow || (this._sunNow = new THREE.Vector3())).set(Math.cos(a), sy, 0.25).normalize();
+            const day = Math.max(0, Math.min(1, (sy + 0.12) / 0.32));
+            const night = 1 - day;
+            const horizon = 1 - Math.min(1, Math.abs(sy) / 0.22); // peaks at sunrise/sunset
+            if (this._sun) {
+                this._sun.position.set(sunDir.x * 1000, Math.max(60, sunDir.y * 1000), sunDir.z * 1000);
+                this._sun.intensity = 0.15 + 1.05 * day;
+                this._sun.color.copy(this._cWarm).lerp(this._cDaySun, Math.min(1, day * 0.7 + 0.3));
+            }
+            if (this._ambient) this._ambient.intensity = 0.22 + 0.6 * day;
+            // Sky + fog colour: night → day, with a sunset tint near the horizon.
+            const sky = this._tmpSky || (this._tmpSky = new THREE.Color());
+            sky.copy(this._skyNight).lerp(this._skyDay, day);
+            sky.lerp(this._skyDusk, horizon * 0.45);
+            if (g.scene.background && g.scene.background.copy) g.scene.background.copy(sky);
+            if (g.scene.fog) g.scene.fog.color.copy(sky);
+            if (g.sky) g.sky.material.color.copy(sky);
+            if (this._stars) {
+                this._stars.position.copy(g.camera.position);
+                this._stars.material.color.setScalar(night);
+                this._stars.visible = night > 0.02;
+            }
+            if (this._sunMesh) {
+                this._sunMesh.position.copy(g.camera.position).addScaledVector(sunDir, 380);
+                this._sunMesh.visible = sy > -0.05;
+                if (this._sunGlowMat) this._sunGlowMat.color.copy(this._cGlow).lerp(this._cGlowWarm, horizon);
+            }
         }
 
         _flatCamera() {
