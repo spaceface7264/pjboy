@@ -264,7 +264,7 @@
         NOISE_SCALE = def.noiseScale; AMP = def.amp; SEA_BIAS = def.seaBias;
         SEED = def.seed; SEA_COLOR = def.sea; PAL = def.pal;
         CUBE_SHAPE = def.shape === 'cube';
-        FLAT_SURFACE = def.surface === 'flat';
+        FLAT_SURFACE = def.surface !== 'sphere'; // all planets are flat toroidal worlds by default
         TORUS_L = def.torusL || 2400;
         // Resolution scales with radius to keep ~constant block size (Terra: R90→56),
         // clamped so the tile count stays sane (24..320 → up to ~615k tiles). Only the
@@ -509,6 +509,9 @@
             if (!this._onKeyDown) {
                 this._onKeyDown = (e) => {
                     if (e.repeat || g.activeModeId !== 'planet') return;
+                    // T: open/close the travel menu (fly to another planet). Esc closes it.
+                    if (e.code === 'KeyT' && FLAT_SURFACE) { this._toggleTravelMenu(); return; }
+                    if (e.code === 'Escape' && this._travelEl && this._travelEl.style.display !== 'none') { this._toggleTravelMenu(false); return; }
                     if (e.code === 'KeyE') this._onInteract();
                     else if (e.code === 'KeyG' && this._riding && !this._launching) this._toggleCourse();
                     else if (e.code === 'KeyM' && this._riding && !this._launching) this._toggleMap();
@@ -598,6 +601,7 @@
             // which also handles this._sun / this._ambient below.)
             this._clearFlatChunks();
             if (this._flatClouds) { g.scene.remove(this._flatClouds); this._flatClouds = null; }
+            if (this._travelEl) this._travelEl.style.display = 'none';
             g.scene.fog = (this._saved && this._saved.fog) || null;
             if (this._savedBg !== undefined) { g.scene.background = this._savedBg; this._savedBg = undefined; }
             if (this._planet) g.scene.remove(this._planet);
@@ -1018,25 +1022,24 @@
 
         _enterFlatWorld() {
             const g = this.game;
-            this._setupScene(); // camera near/far, base lights (this._sun + this._ambient), space sky
-            // Daytime sky + matching fog: the fog hides the horizon AND the world's repeat,
-            // so it reads as a finite flat map. (_setupScene's space-black sky is for the
-            // radial 'see the planet from space' look — wrong for an on-foot flat world.)
+            this._setupScene();               // camera near/far + base lights (run ONCE per visit)
+            this._savedBg = g.scene.background; // saved once, restored on exit
+            this._buildFlatScene();           // the per-planet world (rebuilt on travel)
+        }
+
+        // Build the flat toroidal world for the CURRENT this._activeDef. Safe to call again
+        // after _teardownFlatScene() to switch planets (travel). Does NOT touch _setupScene.
+        _buildFlatScene() {
+            const g = this.game;
             const skyCol = (this._activeDef.atm && this._activeDef.atm[0]) || 0x8ec6ff;
             if (g.sky) g.sky.material.color.setHex(skyCol);
-            // Solid sky: set the scene background too, so everything above the fogged
-            // horizon is sky-coloured (the space-black dome alone left the sky mostly black).
-            this._savedBg = g.scene.background;
             g.scene.background = new THREE.Color(skyCol);
             if (this._ambient) { this._ambient.color.setHex(0x9fb4d8); this._ambient.intensity = 0.85; }
-            if (this._sun) { this._sun.position.set(0.4 * 1000, 1000, 0.3 * 1000); }
-            // Render distance: how far you can see (streaming ring auto-follows). Kept
-            // under TORUS_L/2 so the world's repeat stays hidden. Raise for more view.
+            if (this._sun) { this._sun.position.set(400, 1000, 300); }
+            // Render distance (streaming ring auto-follows); kept under TORUS_L/2 to hide the wrap.
             this._fogFar = 950;
-            g.scene.fog = new THREE.Fog(skyCol, this._fogFar * 0.62, this._fogFar); // crisp near, haze only far out
-            // Flat sea plane that follows the player. Its surface sits HALF A BLOCK above
-            // y=0 so it never lands coplanar with a block top (tops are multiples of BS) —
-            // that coincidence was the flicker. depthWrite off keeps the transparency clean.
+            g.scene.fog = new THREE.Fog(skyCol, this._fogFar * 0.62, this._fogFar);
+            // Flat sea plane (half a block above y=0 so it never z-fights block tops).
             this._water = new THREE.Mesh(
                 new THREE.PlaneGeometry(this._fogFar * 3, this._fogFar * 3),
                 new THREE.MeshLambertMaterial({ color: SEA_COLOR, transparent: true, opacity: 0.82, depthWrite: false })
@@ -1046,12 +1049,12 @@
             this._water.renderOrder = 1;
             this._water.frustumCulled = false;
             g.scene.add(this._water);
-            // Living sky: day/night cycle + stars + sun.
+            // Living sky: day/night cycle + stars + sun + clouds.
             this._buildStars();
             this._buildFlatSun();
             this._buildFlatClouds();
-            this._dayLen = (this._activeDef.daySec || 360) * 3; // Terra ~18 min/cycle
-            this._dayT = this._dayLen * 0.28;                   // start mid-morning
+            this._dayLen = (this._activeDef.daySec || 360) * 3;
+            this._dayT = this._dayLen * 0.28; // start mid-morning
             this._skyDay = new THREE.Color(skyCol);
             this._skyNight = new THREE.Color(0x0a1430);
             this._skyDusk = new THREE.Color(0xff7a3a);
@@ -1072,6 +1075,74 @@
             this._lastYaw = g.characterRotation || 0;
             this._updateFlatSky(0);
             this._streamFlat(true);
+        }
+
+        // Remove everything _buildFlatScene added (keeps _setupScene's base lights/sky).
+        _teardownFlatScene() {
+            const g = this.game;
+            this._clearFlatChunks();
+            if (this._flatClouds) { g.scene.remove(this._flatClouds); this._flatClouds = null; }
+            if (this._water) { g.scene.remove(this._water); this._water = null; }
+            this._clearStars();
+            this._clearSun();
+            this._clearWeather();
+        }
+
+        // Travel to another planet: rebuild the flat world from that planet's def. The
+        // different seed/amp/sky/weather/gravity make each world feel distinct.
+        _travelTo(def) {
+            if (!def || def === this._activeDef) { this._toggleTravelMenu(false); return; }
+            const g = this.game;
+            this._teardownFlatScene();
+            this._activeDef = def; this._activeKey = def.key;
+            setActivePlanet(def);
+            this._streamed = !!def.streamed;
+            this._buildFlatScene();
+            this._toggleTravelMenu(false);
+            g.showMessage && g.showMessage('🪐 Arrived at ' + (def.name || def.key), 2400);
+            if (g.applyViewModeToPlayerModel) g.applyViewModeToPlayerModel();
+            this.updateCamera();
+            g.scene.updateMatrixWorld(true);
+        }
+
+        // ---- travel menu (pick a planet to fly to) --------------------------------
+        _ensureTravelMenu() {
+            if (this._travelEl) return this._travelEl;
+            const el = document.createElement('div');
+            el.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:100000;' +
+                'background:rgba(8,12,24,0.92);border:1px solid #3a4a6a;border-radius:12px;padding:18px 22px;' +
+                'font-family:system-ui,sans-serif;color:#dfe8ff;min-width:240px;max-height:70vh;overflow:auto;display:none;' +
+                'box-shadow:0 10px 40px rgba(0,0,0,0.6)';
+            el.innerHTML = '<div style="font-size:18px;font-weight:700;margin-bottom:12px;letter-spacing:0.5px">🚀 Travel</div>' +
+                '<div id="travel-list"></div>' +
+                '<div style="opacity:0.6;font-size:12px;margin-top:12px">T or Esc to close</div>';
+            document.body.appendChild(el);
+            this._travelEl = el;
+            this._travelListEl = el.querySelector('#travel-list');
+            return el;
+        }
+
+        _toggleTravelMenu(force) {
+            const el = this._ensureTravelMenu();
+            const open = (force === undefined) ? (el.style.display === 'none') : !!force;
+            if (open) {
+                const list = this._travelListEl;
+                list.innerHTML = '';
+                for (const key in PLANETS) {
+                    const d = PLANETS[key];
+                    const here = (d === this._activeDef);
+                    const b = document.createElement('button');
+                    b.textContent = (d.name || key) + (here ? '  • here' : '');
+                    b.style.cssText = 'display:block;width:100%;text-align:left;margin:4px 0;padding:9px 12px;border-radius:8px;cursor:pointer;' +
+                        'border:1px solid ' + (here ? '#6a8' : '#33405e') + ';background:' + (here ? 'rgba(80,160,110,0.18)' : 'rgba(255,255,255,0.04)') + ';color:#dfe8ff;font-size:15px';
+                    b.onclick = () => this._travelTo(d);
+                    list.appendChild(b);
+                }
+                el.style.display = 'block';
+                if (document.exitPointerLock) document.exitPointerLock(); // free the cursor to click
+            } else {
+                el.style.display = 'none';
+            }
         }
 
         _streamFlat(force) {
