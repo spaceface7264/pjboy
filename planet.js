@@ -70,6 +70,18 @@
     const FCELLS = 60;           // blocks per streamed flat chunk edge (bigger = fewer draw calls)
     const FCHUNK = BS * FCELLS;  // chunk size in world units (180)
     const FTH = BS * 6;          // block tile thickness — extends down to hide cliff gaps
+    const ATMO_TOP = 2600;       // top of the atmosphere — above this (climbing) you're in space
+    const SPACE_RING = 3600;     // radius the planet cubes sit at in the space view
+    const SPACE_CUBE = 620;      // planet-cube size in space (big, so it looms as you approach)
+    const ENTRY_R = SPACE_CUBE * 0.5 * 2.3; // fly within this of a planet's centre → entry begins
+    // Atmosphere layers (fractions of ATMO_TOP, ground → space) shown during entry/exit.
+    const ATMO_LAYERS = [
+        { name: 'Troposphere', top: 0.16 },
+        { name: 'Stratosphere', top: 0.40 },
+        { name: 'Mesosphere', top: 0.62 },
+        { name: 'Thermosphere', top: 0.84 },
+        { name: 'Exosphere', top: 1.01 },
+    ];
 
     // Seamless periodic 2D value noise: integer lattice wrapped at `period`, so the
     // field tiles perfectly (no seam across the torus boundary).
@@ -512,7 +524,7 @@
                     // T: open/close the travel menu (fly to another planet). Esc closes it.
                     if (e.code === 'KeyT' && FLAT_SURFACE) { this._toggleTravelMenu(); return; }
                     if (e.code === 'Escape' && this._travelEl && this._travelEl.style.display !== 'none') { this._toggleTravelMenu(false); return; }
-                    if (e.code === 'KeyE') this._onInteract();
+                    if (e.code === 'KeyE') { if (FLAT_SURFACE) this._flatInteract(); else this._onInteract(); }
                     else if (e.code === 'KeyG' && this._riding && !this._launching) this._toggleCourse();
                     else if (e.code === 'KeyM' && this._riding && !this._launching) this._toggleMap();
                     else if (e.code === 'KeyV' && this._riding) {
@@ -526,7 +538,7 @@
             // the walking controller's fpvPitch). Only accumulate while flying.
             if (!this._onMouseMove) {
                 this._onMouseMove = (e) => {
-                    if (!this._riding || this._launching) return;
+                    if (!(this._riding || this._flying) || this._launching) return;
                     this._mouseDX += e.movementX || 0;
                     this._mouseDY += e.movementY || 0;
                 };
@@ -552,7 +564,7 @@
                 this._enterFlatWorld();
                 if (g.clearEnemies) g.clearEnemies();
                 this._inSpace = false;
-                this._ensureAltUI().style.display = 'block';
+                this._ensureAltUI().style.display = 'none'; // shown only while flying
             } else {
                 this._buildPlanet();
                 this._setupScene();
@@ -601,6 +613,8 @@
             // which also handles this._sun / this._ambient below.)
             this._clearFlatChunks();
             if (this._flatClouds) { g.scene.remove(this._flatClouds); this._flatClouds = null; }
+            this._clearSpacePlanets();
+            this._flying = false; this._space = false;
             if (this._travelEl) this._travelEl.style.display = 'none';
             g.scene.fog = (this._saved && this._saved.fog) || null;
             if (this._savedBg !== undefined) { g.scene.background = this._savedBg; this._savedBg = undefined; }
@@ -660,8 +674,9 @@
             const g = this.game;
             // Advance orbital time (always — planets keep revolving even in space).
             this._orbitT = (this._orbitT || 0) + (dt || 0.016);
-            // Toroidal flat world: stream chunks + advance the living sky; skip sphere upkeep.
-            if (FLAT_SURFACE) { this._streamFlat(false); this._updateFlatSky(dt); this._updateWeather(dt); return; }
+            // Toroidal flat world: world upkeep when on foot; flight handles its own
+            // sky/atmosphere/space in _updateFlatFlight, so skip here while flying.
+            if (FLAT_SURFACE) { if (!this._flying) { this._streamFlat(false); this._updateFlatSky(dt); this._updateWeather(dt); } return; }
             // Slowly drift the cloud layer for a living sky.
             if (this._clouds) {
                 this._clouds.rotation.y += (dt || 0.016) * 0.006;
@@ -1038,7 +1053,9 @@
             if (this._sun) { this._sun.position.set(400, 1000, 300); }
             // Render distance (streaming ring auto-follows); kept under TORUS_L/2 to hide the wrap.
             this._fogFar = 950;
-            g.scene.fog = new THREE.Fog(skyCol, this._fogFar * 0.62, this._fogFar);
+            // Much lighter fog: clear air out to ~88% of the view, then a thin haze band
+            // only at the very edge (just enough to mask chunk pop-in + the wrap).
+            g.scene.fog = new THREE.Fog(skyCol, this._fogFar * 0.88, this._fogFar);
             // Flat sea plane (half a block above y=0 so it never z-fights block tops).
             this._water = new THREE.Mesh(
                 new THREE.PlaneGeometry(this._fogFar * 3, this._fogFar * 3),
@@ -1052,7 +1069,6 @@
             // Living sky: day/night cycle + stars + sun + clouds.
             this._buildStars();
             this._buildFlatSun();
-            this._buildFlatClouds();
             this._dayLen = (this._activeDef.daySec || 360) * 3;
             this._dayT = this._dayLen * 0.28; // start mid-morning
             this._skyDay = new THREE.Color(skyCol);
@@ -1060,6 +1076,15 @@
             this._skyDusk = new THREE.Color(0xff7a3a);
             this._cWarm = new THREE.Color(0xff7a3a); this._cDaySun = new THREE.Color(0xfff4e0);
             this._cGlow = new THREE.Color(0xffd9a0); this._cGlowWarm = new THREE.Color(0xff5a1e);
+            // Altitude → sky-colour gradient for atmospheric entry/exit (ground → space).
+            this._skyGradient = [
+                { t: 0.00, c: new THREE.Color(skyCol) },     // troposphere (this planet's sky)
+                { t: 0.30, c: new THREE.Color(0xbcd8ff) },   // pale high sky
+                { t: 0.54, c: new THREE.Color(0x3a6bd0) },   // deep blue
+                { t: 0.78, c: new THREE.Color(0x161a55) },   // indigo
+                { t: 1.00, c: new THREE.Color(0x05060d) },   // space black
+            ];
+            this._cReentry = new THREE.Color(0xff5a1e);
             // Weather (this planet's precipitation type: rain / snow / ash / dust).
             this._configureWeather();
             this._buildWeather();
@@ -1073,6 +1098,9 @@
             g.player.velocity.set(0, 0, 0);
             this._onGround = true;
             this._lastYaw = g.characterRotation || 0;
+            // Flight state + the boardable ship.
+            this._flying = false; this._space = false; this._nearShip = false; this._nearestPlanet = null;
+            this._placeFlatShip();
             this._updateFlatSky(0);
             this._streamFlat(true);
         }
@@ -1083,6 +1111,8 @@
             this._clearFlatChunks();
             if (this._flatClouds) { g.scene.remove(this._flatClouds); this._flatClouds = null; }
             if (this._water) { g.scene.remove(this._water); this._water = null; }
+            if (this._ship) { g.scene.remove(this._ship); this._ship = null; }
+            this._clearSpacePlanets();
             this._clearStars();
             this._clearSun();
             this._clearWeather();
@@ -1211,6 +1241,12 @@
         // Flat (Open-World-style) controller: up = +Y, gravity straight down.
         _updateFlatPlayer(dt) {
             const g = this.game, p = g.player.position, vel = g.player.velocity;
+            // Board prompt when standing by the ship.
+            if (this._ship) {
+                const dx = p.x - this._ship.position.x, dz = p.z - this._ship.position.z;
+                const near = (dx * dx + dz * dz) < 100;
+                if (near !== this._nearShip) { this._nearShip = near; this._showPrompt(near ? 'Press E to board 🚀' : ''); }
+            }
             const boost = g.getSpeedBoostMultiplier ? g.getSpeedBoostMultiplier() : 1;
             const yaw = g.characterRotation || 0;
             const fwd = this._fwd.set(Math.sin(yaw), 0, Math.cos(yaw));
@@ -1262,6 +1298,297 @@
                 g.player.mixer.update(dt);
             }
             // camera is driven by updateCamera() → _flatCamera()
+        }
+
+        // ---- spaceship flight: surface → atmosphere → space → land ----------------
+
+        // Place the boardable ship on the flat surface near spawn.
+        _placeFlatShip() {
+            const g = this.game;
+            if (!this.loader) this.loader = new THREE.GLTFLoader();
+            if (this._ship) { g.scene.remove(this._ship); this._ship = null; }
+            const sx = 18, sz = 0;
+            const place = (gltf) => {
+                if (g.activeModeId !== 'planet' || !FLAT_SURFACE) return;
+                const src = gltf.scene || (gltf.scenes && gltf.scenes[0]); if (!src) return;
+                const obj = src.clone(true);
+                obj.traverse((o) => { if (o.isMesh) { o.castShadow = false; o.frustumCulled = false; } });
+                const box = new THREE.Box3().setFromObject(obj); const size = new THREE.Vector3(); box.getSize(size);
+                const longest = Math.max(size.x, size.y, size.z) || 1; const scale = 16 / longest;
+                obj.scale.setScalar(scale);
+                this._shipMinY = box.min.y * scale;
+                obj.position.set(sx, flatTopAt(sx, sz) - this._shipMinY, sz);
+                g.scene.add(obj); this._ship = obj;
+                this._shipHalf = longest * scale * 0.5;
+            };
+            const cached = this.assetCache.get(SHIP_PATH);
+            if (cached) place(cached);
+            else this.loader.load(SHIP_PATH, (gltf) => { this.assetCache.set(SHIP_PATH, gltf); place(gltf); }, undefined, (e) => console.warn('[planet] ship load', e && e.message));
+        }
+
+        // E key on the flat world: board the ship / disembark once landed. (Entry into a
+        // planet from space is automatic on approach — no key.)
+        _flatInteract() {
+            if (this._flying) {
+                if (!this._space) {
+                    const gy = flatTopAt(this._shipPos.x, this._shipPos.z);
+                    if (this._shipPos.y < gy + 8) this._disembark();
+                }
+                return;
+            }
+            if (this._nearShip) this._boardShip();
+        }
+
+        _boardShip() {
+            const g = this.game;
+            if (!this._ship) return;
+            this._flying = true; this._space = false;
+            this._showPrompt('');
+            if (g.player.model) g.player.model.visible = false;
+            this._shipPos = (this._shipPos || new THREE.Vector3()).copy(this._ship.position);
+            this._shipVel = this._shipVel || new THREE.Vector3(); this._shipVel.set(0, 0, 0);
+            this._shipYaw = g.characterRotation || 0; this._shipPitch = 0.15;
+            this._mouseDX = 0; this._mouseDY = 0;
+            g.showMessage && g.showMessage('🚀 Liftoff — hold Space to climb out of the atmosphere', 3000);
+        }
+
+        _disembark() {
+            const g = this.game;
+            this._flying = false; this._showPrompt('');
+            if (g.player.model) g.player.model.visible = true;
+            if (this._altEl) this._altEl.style.display = 'none';
+            const gy = flatTopAt(this._shipPos.x, this._shipPos.z);
+            g.player.position.set(this._shipPos.x + 5, gy + 0.5, this._shipPos.z);
+            g.player.velocity.set(0, 0, 0); this._onGround = true;
+            this._lastYaw = g.characterRotation || 0;
+        }
+
+        // Ship controller (atmosphere + space). Mouse steers; W/S thrust; Space/Shift up/down.
+        _updateFlatFlight(dt) {
+            const g = this.game;
+            this._shipYaw -= (this._mouseDX || 0) * 0.0022;
+            this._shipPitch -= (this._mouseDY || 0) * 0.0022;
+            this._shipPitch = Math.max(-1.35, Math.min(1.35, this._shipPitch));
+            this._mouseDX = 0; this._mouseDY = 0;
+            const cy = Math.cos(this._shipYaw), sy = Math.sin(this._shipYaw), cp = Math.cos(this._shipPitch), sp = Math.sin(this._shipPitch);
+            const fwd = this._tmpFwd || (this._tmpFwd = new THREE.Vector3());
+            fwd.set(sy * cp, sp, cy * cp);
+            const v = this._shipVel, boost = g.getSpeedBoostMultiplier ? g.getSpeedBoostMultiplier() : 1;
+            const TH = (this._space ? 130 : 95) * boost;
+            if (g.keys['KeyW']) v.addScaledVector(fwd, TH * dt);
+            if (g.keys['KeyS']) v.addScaledVector(fwd, -TH * 0.6 * dt);
+            if (g.keys['Space']) v.y += TH * dt;
+            if (g.keys['ShiftLeft'] || g.keys['ShiftRight'] || g.keys['ControlLeft']) v.y -= TH * dt;
+            if (!this._space) v.y -= GRAVITY * 0.25 * dt; // mild gravity in atmosphere — thrust to hover/climb
+            v.multiplyScalar(1 - Math.min(1, dt * (this._space ? 0.5 : 0.9))); // drag (less in space)
+            this._shipPos.addScaledVector(v, dt);
+            if (!this._space) {
+                const gy = flatTopAt(this._shipPos.x, this._shipPos.z) + 2;
+                if (this._shipPos.y < gy) { this._shipPos.y = gy; if (v.y < 0) v.y = 0; }
+                this._showPrompt(this._shipPos.y < gy + 4 ? 'Press E to disembark' : '');
+            }
+            if (this._ship) {
+                this._ship.position.copy(this._shipPos);
+                this._ship.quaternion.setFromEuler(new THREE.Euler(this._shipPitch, this._shipYaw, 0, 'YXZ'));
+                this._ship.visible = true;
+            }
+            g.player.position.copy(this._shipPos); // anchor streaming/camera to the ship
+            if (!this._space) {
+                this._streamFlat(false);
+                this._updateFlatSky(dt);
+                this._applyAtmoLayers();
+                // Crossing the top of the atmosphere while CLIMBING → space.
+                if (this._shipPos.y >= ATMO_TOP && this._shipVel.y > 0) this._enterSpace();
+            } else {
+                this._updateSpace(dt);
+            }
+            this._flatFlightCamera();
+        }
+
+        // Blend a colour through the altitude gradient (ground → space).
+        _skyColorAt(t) {
+            const g = this._skyGradient;
+            t = Math.max(0, Math.min(1, t));
+            const out = this._tmpSky || (this._tmpSky = new THREE.Color());
+            for (let i = 1; i < g.length; i++) {
+                if (t <= g[i].t) {
+                    const a = g[i - 1], b = g[i], k = (t - a.t) / ((b.t - a.t) || 1);
+                    return out.copy(a.c).lerp(b.c, k);
+                }
+            }
+            return out.copy(g[g.length - 1].c);
+        }
+
+        // Drive sky/fog/stars + the layer readout from the ship's altitude. Used both
+        // climbing out and diving in, so entry and exit pass through every layer.
+        _applyAtmoLayers() {
+            const g = this.game;
+            const t = Math.max(0, Math.min(1.2, this._shipPos.y / ATMO_TOP));
+            const col = this._skyColorAt(t);
+            // Re-entry heat glow when diving fast through the upper-mid atmosphere.
+            const descend = -this._shipVel.y;
+            if (t > 0.5 && t < 0.9 && descend > 30) col.lerp(this._cReentry, Math.min(0.6, (descend - 30) / 140));
+            if (g.scene.background && g.scene.background.copy) g.scene.background.copy(col);
+            if (g.scene.fog) { g.scene.fog.color.copy(col); g.scene.fog.near = this._fogFar * (0.6 + t * 6); g.scene.fog.far = this._fogFar * (1 + t * 10); }
+            if (this._stars) {
+                this._stars.position.copy(g.camera.position);
+                const s = Math.max(0, (t - 0.45) / 0.55);
+                this._stars.material.color.setScalar(s); this._stars.visible = s > 0.03;
+            }
+            if (this._sunMesh) this._sunMesh.visible = true;
+            // Altitude + current layer readout.
+            let name = ATMO_LAYERS[ATMO_LAYERS.length - 1].name;
+            for (const L of ATMO_LAYERS) { if (t <= L.top) { name = L.name; break; } }
+            const alt = Math.max(0, this._shipPos.y - flatTopAt(this._shipPos.x, this._shipPos.z));
+            const el = this._ensureAltUI();
+            if (el) { el.style.display = 'block'; el.textContent = '▲ ' + alt.toFixed(0) + 'm · ' + name; }
+        }
+
+        // Climbed out of the atmosphere → space. Build the planet cubes and place the ship
+        // just outside the departed planet, facing away so it recedes behind you.
+        _enterSpace() {
+            const g = this.game;
+            this._space = true;
+            this._setFlatVisible(false);
+            g.scene.fog = null;
+            if (g.scene.background && g.scene.background.setHex) g.scene.background.setHex(0x05060d);
+            if (this._stars) { this._stars.material.color.setScalar(1); this._stars.visible = true; }
+            if (this._sun) this._sun.intensity = 1.0;
+            if (this._ambient) this._ambient.intensity = 0.4;
+            if (this._altEl) this._altEl.style.display = 'none';
+            this._buildSpacePlanets();
+            const depart = (this._spacePlanets || []).find((c) => c.userData.def === this._activeDef);
+            if (depart) {
+                const out = depart.position.clone().normalize(); // outward from the system centre
+                this._shipPos.copy(depart.position).addScaledVector(out, ENTRY_R + 260); // outside the entry shell
+                this._shipYaw = Math.atan2(out.x, out.z);
+                this._shipPitch = Math.asin(Math.max(-1, Math.min(1, out.y)));
+            } else {
+                this._shipPos.set(0, 0, -(ENTRY_R + 260)); this._shipYaw = 0; this._shipPitch = 0;
+            }
+            this._shipVel.set(0, 0, 0);
+            if (this._ship) this._ship.position.copy(this._shipPos);
+            g.player.position.copy(this._shipPos);
+            g.showMessage && g.showMessage('🌌 Space — fly toward a planet to enter it', 3500);
+        }
+
+        // A planet as seen from space: a rounded cube (the game's identity) coloured with
+        // its own seas / continents / snow caps from a cheap noise seeded per planet.
+        _makeSpacePlanetMesh(def) {
+            const S = SPACE_CUBE;
+            const geo = new THREE.BoxGeometry(S, S, S, 9, 9, 9);
+            const pa = geo.attributes.position, cnt = pa.count;
+            const colors = new Float32Array(cnt * 3);
+            const v = new THREE.Vector3(), n = new THREE.Vector3(), col = new THREE.Color();
+            const sea = new THREE.Color(def.sea || 0x2a6fb0);
+            const sand = new THREE.Color(0xcdba84);
+            const land = new THREE.Color(def.sky || 0x6f9e4a);
+            const snow = new THREE.Color(0xeef4fb);
+            const ns = (def.noiseScale || 1.6) * 2.4, bias = def.seaBias || 0.5, seed = (def.seed || 0) | 0;
+            for (let i = 0; i < cnt; i++) {
+                v.fromBufferAttribute(pa, i);
+                n.copy(v).normalize();
+                v.lerp(n.clone().multiplyScalar(S * 0.62), 0.4); // box → rounded cube
+                pa.setXYZ(i, v.x, v.y, v.z);
+                n.copy(v).normalize();
+                const e = valueNoise3(n.x * ns, n.y * ns, n.z * ns, seed) - bias;
+                if (e < 0) col.copy(sea);
+                else if (e < 0.04) col.copy(sand);
+                else if (e < 0.32) col.copy(land);
+                else col.copy(snow);
+                colors[i * 3] = col.r; colors[i * 3 + 1] = col.g; colors[i * 3 + 2] = col.b;
+            }
+            pa.needsUpdate = true;
+            geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+            geo.computeVertexNormals();
+            const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }));
+            mesh.frustumCulled = false;
+            mesh.rotation.z = def.axisTilt || 0.3; // a little tilt
+            return mesh;
+        }
+
+        _buildSpacePlanets() {
+            const g = this.game;
+            this._clearSpacePlanets();
+            this._spacePlanets = [];
+            const glowTex = this._sunGlowTex(['rgba(255,255,255,0.5)', 'rgba(255,255,255,0.12)', 'rgba(255,255,255,0)']);
+            const keys = Object.keys(PLANETS), n = keys.length;
+            let i = 0;
+            for (const key of keys) {
+                const d = PLANETS[key];
+                const ang = (i / n) * Math.PI * 2;
+                const grp = new THREE.Group();
+                const planet = this._makeSpacePlanetMesh(d);
+                grp.add(planet);
+                // Soft atmosphere halo, tinted by the planet's sky colour.
+                const halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color: (d.atm && d.atm[0]) || 0x88bbff, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
+                halo.scale.setScalar(SPACE_CUBE * 2.2);
+                halo.frustumCulled = false;
+                grp.add(halo);
+                grp.position.set(Math.cos(ang) * SPACE_RING, ((i % 3) - 1) * 420, Math.sin(ang) * SPACE_RING);
+                grp.userData.def = d; grp._cube = planet;
+                g.scene.add(grp);
+                this._spacePlanets.push(grp);
+                i++;
+            }
+        }
+
+        _clearSpacePlanets() {
+            if (!this._spacePlanets) return;
+            for (const grp of this._spacePlanets) {
+                this.game.scene.remove(grp);
+                grp.traverse((o) => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
+            }
+            this._spacePlanets = null;
+        }
+
+        _setFlatVisible(v) {
+            if (this._flatChunks) for (const m of this._flatChunks.values()) m.visible = v;
+            if (this._water) this._water.visible = v;
+            if (this._sunMesh) this._sunMesh.visible = v;
+        }
+
+        _updateSpace(dt) {
+            let nearest = null, nd = 1e9;
+            for (const grp of this._spacePlanets || []) {
+                if (grp._cube) grp._cube.rotation.y += dt * 0.12;
+                const d = grp.position.distanceTo(this._shipPos);
+                if (d < nd) { nd = d; nearest = grp; }
+            }
+            // Fly close enough → entry begins automatically (planet looms via perspective).
+            if (nearest && nd < ENTRY_R) { this._beginEntry(nearest.userData.def); return; }
+            this._showPrompt('Fly toward a planet to enter it');
+        }
+
+        // Entry: build the destination's flat world, then drop the ship in high above it so
+        // you fly DOWN through the layers and land manually.
+        _beginEntry(def) {
+            const g = this.game;
+            this._clearSpacePlanets();
+            this._nearestPlanet = null;
+            this._space = false;
+            this._teardownFlatScene();
+            this._activeDef = def; this._activeKey = def.key; setActivePlanet(def); this._streamed = !!def.streamed;
+            this._buildFlatScene();              // builds the world (also resets pose) ...
+            this._flying = true;                 // ... but we stay in the ship, high up:
+            if (g.player.model) g.player.model.visible = false;
+            this._shipPos.set(0, ATMO_TOP * 1.04, 0);
+            this._shipVel.set(0, -45, 0);        // initial downward drift into the atmosphere
+            this._shipPitch = -0.55;             // nose down
+            if (this._ship) this._ship.position.copy(this._shipPos);
+            g.player.position.copy(this._shipPos);
+            this._streamFlat(true);
+            g.showMessage && g.showMessage('🔥 Entering ' + (def.name || def.key) + ' — fly down to land', 3600);
+        }
+
+        _flatFlightCamera() {
+            const g = this.game, cam = g.camera;
+            cam.up.set(0, 1, 0);
+            const cy = Math.cos(this._shipYaw), sy = Math.sin(this._shipYaw), cp = Math.cos(this._shipPitch), sp = Math.sin(this._shipPitch);
+            const fx = sy * cp, fy = sp, fz = cy * cp;
+            const dist = (this._shipHalf || 8) * 3 + 14, p = this._shipPos;
+            cam.position.set(p.x - fx * dist, p.y - fy * dist + 7, p.z - fz * dist);
+            cam.lookAt(p.x + fx * 10, p.y + fy * 10, p.z + fz * 10);
         }
 
         // A simple billboard sun for the flat sky (follows the camera in the sun's dir).
@@ -2044,8 +2371,6 @@
             if (this._ambient && this._wxFlash > 0) this._ambient.intensity += this._wxFlash * 1.4;
             // Overcast: dim the cloud layer a touch as weather builds.
             if (this._clouds) this._clouds.traverse((o) => { if (o.isMesh && o.material) { o.material.color && o.material.color.setScalar(1 - 0.45 * vis); } });
-            // Flat world: drive the overhead cloud layer (rain falls out of it).
-            if (FLAT_SURFACE) this._updateFlatClouds(dt, vis, this._dayAmt != null ? this._dayAmt : 1);
         }
 
         // ---- the sun: solar-system center + primary light source ----
@@ -3550,8 +3875,8 @@
 
         updatePlayer(dt) {
             const g = this.game;
-            // Toroidal flat world (Phase 1): flat controller, no radial/rocket logic.
-            if (FLAT_SURFACE) { this._updateFlatPlayer(dt); return; }
+            // Toroidal flat world: ship flight when boarded, otherwise the walker.
+            if (FLAT_SURFACE) { if (this._flying) this._updateFlatFlight(dt); else this._updateFlatPlayer(dt); return; }
             const p = g.player.position;
             const vel = g.player.velocity;
             const center = this._center;
@@ -3729,8 +4054,8 @@
 
         updateCamera() {
             const g = this.game;
-            // Toroidal flat world (Phase 1): flat over-the-shoulder camera.
-            if (FLAT_SURFACE) { this._flatCamera(); return; }
+            // Toroidal flat world: ship chase-cam when flying, else over-the-shoulder.
+            if (FLAT_SURFACE) { if (this._flying) this._flatFlightCamera(); else this._flatCamera(); return; }
             const p = g.player.position;
             const center = this._center;
             const cam0 = g.camera;
