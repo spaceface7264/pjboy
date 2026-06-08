@@ -122,7 +122,7 @@
     const SUN_DIST = 100000;        // true distance of the star (light source)
     const SUN_RENDER_DIST = 380;    // where the disk is drawn from the camera (inside the 500 sky)
     const SUN_RADIUS = 16;          // apparent disk radius at the render distance (~2.4°)
-    const DAY_SPEED = 1;            // day/night time multiplier (1 = real per-planet day lengths; >1 for testing)
+    const DAY_SPEED = 0.1;          // day/night time multiplier (1 = real per-planet day lengths; 0.1 = days/nights 10x longer)
     const ECLIPTIC_AXIS = new THREE.Vector3(0.06, 0.998, 0).normalize(); // shared spin + orbital pole
     const ORBIT_K = 0.00046;       // orbital period (s) = ORBIT_K · radius^1.5 (Kepler-ish; ~4–15 min)
     // The walkable worlds — built from the procedural catalog (planetgen.js). The
@@ -1686,7 +1686,12 @@
             // (so the sun drifts relative to the stars over the "year"); daily spin θ
             // wheels everything on top.
             const ao = this._orbits && this._orbits[this._activeKey];
-            const yearDrift = ao ? ao.omega * (this._orbitT || 0) : 0;
+            // Scale the orbital drift by DAY_SPEED too: the sun's apparent sweep is
+            // th + yearDrift, and on close-in worlds the orbital term actually
+            // dominates the daily spin — so without this, slowing DAY_SPEED barely
+            // changes the perceived day length. (Real planet positions in _orbitOf
+            // still use the unscaled _orbitT, so flight/map timing is unaffected.)
+            const yearDrift = ao ? ao.omega * (this._orbitT || 0) * DAY_SPEED : 0;
             const sun = this._sunNow.copy(this._sunBase).applyAxisAngle(this._spinAxis, th + yearDrift); // unit dir to the sun
 
             // True planetary spin: the whole celestial sphere wheels together (only while
