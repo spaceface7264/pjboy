@@ -42,8 +42,13 @@
     // the planet owns it and reverted in exit() — so other modes are never affected.
     //   scaleMul: extra size multiplier on the model wrap (1 = no change)
     //   footDrop: how far to sink the model along the surface normal (defaults FOOT_DROP)
+    // Scale reference: a block is 1/4 the player's height, so the player is 4 blocks tall.
+    // Block size is set per-world later (BS); the planet character is scaled to ~2*BS.
+    const PLAYER_H = 6;             // planet character height (= 2 blocks at BS=3)
+    const PLAYER_EYE = PLAYER_H * 0.88; // first-person / camera eye height
     const PLANET_CHAR = {
-        hero: { scaleMul: 0.86, footDrop: 0.0 }, // grounding is correct now (upright-bbox fix in loadPlayerModel); no drop hack needed
+        // scaleMul chosen so the Hero (base ~1.4u tall) ends up PLAYER_H tall (6 / 1.4).
+        hero: { scaleMul: 4.29, footDrop: 0.0 }, // grounding handled by the upright-bbox fix in loadPlayerModel
     };
 
     // Gravity sphere of influence (recomputed per world from its R). Full pull near
@@ -626,6 +631,7 @@
             this._flying = false; this._space = false;
             this._fx = null;
             this._setUnderwater(false);
+            this._clearWaterFx();
             if (this._fadeEl) this._fadeEl.style.opacity = '0';
             if (this._cockpitEl) this._cockpitEl.style.display = 'none';
             if (this._thruster) { g.scene.remove(this._thruster); this._thruster = null; }
@@ -1141,6 +1147,7 @@
             if (this._farTerrain) { g.scene.remove(this._farTerrain); if (this._farTerrain.geometry) this._farTerrain.geometry.dispose(); this._farTerrain = null; }
             if (this._water) { g.scene.remove(this._water); this._water = null; }
             if (this._ship) { g.scene.remove(this._ship); this._ship = null; }
+            this._clearWaterFx();
             this._clearSpacePlanets();
             this._clearStars();
             this._clearSun();
@@ -1434,6 +1441,74 @@
             }
         }
 
+        // ---- water splash / ripple FX -------------------------------------------------
+        // A flat expanding ring on the surface (used for both the impact splash and the
+        // continuous swim wake). r0 = start scale, grow = how far it expands, op = peak alpha.
+        _spawnRipple(x, z, r0, grow, op) {
+            const ring = new THREE.Mesh(
+                new THREE.RingGeometry(0.6, 1.0, 24),
+                new THREE.MeshBasicMaterial({ color: 0xdff1ff, transparent: true, opacity: op, side: THREE.DoubleSide, depthWrite: false }));
+            ring.rotation.x = -Math.PI / 2;
+            ring.position.set(x, WATER_LEVEL + 0.06, z);
+            ring.renderOrder = 2; // over the water surface
+            ring.frustumCulled = false;
+            this.game.scene.add(ring);
+            (this._ripples || (this._ripples = [])).push({ ring, t: 0, life: 0.9, r0, grow, op });
+        }
+
+        // Impact splash: a ripple ring + a short-lived burst of droplet points.
+        _spawnSplash(x, z, strength) {
+            strength = Math.max(0.4, Math.min(2.0, strength || 1));
+            this._spawnRipple(x, z, 0.6 * strength, 3.5 * strength, 0.6);
+            const n = Math.round(10 + 8 * strength);
+            const arr = new Float32Array(n * 3), vel = new Float32Array(n * 3);
+            for (let j = 0; j < n; j++) {
+                arr[j * 3] = x; arr[j * 3 + 1] = WATER_LEVEL + 0.1; arr[j * 3 + 2] = z;
+                const a = Math.random() * Math.PI * 2, out = (1.0 + Math.random() * 2.0) * strength;
+                vel[j * 3] = Math.cos(a) * out; vel[j * 3 + 1] = (3 + Math.random() * 4) * strength; vel[j * 3 + 2] = Math.sin(a) * out;
+            }
+            const geo = new THREE.BufferGeometry();
+            geo.setAttribute('position', new THREE.BufferAttribute(arr, 3));
+            const mat = new THREE.PointsMaterial({ map: this._wxTex(false), color: 0xcfe8ff, size: 0.5, transparent: true, opacity: 1, depthWrite: false, blending: THREE.AdditiveBlending });
+            const pts = new THREE.Points(geo, mat);
+            pts.frustumCulled = false; pts.renderOrder = 2;
+            this.game.scene.add(pts);
+            (this._splashes || (this._splashes = [])).push({ pts, vel, n, t: 0, life: 0.7 });
+        }
+
+        _tickWaterFx(dt) {
+            dt = dt || 0.016;
+            const g = this.game;
+            if (this._ripples) {
+                for (let i = this._ripples.length - 1; i >= 0; i--) {
+                    const r = this._ripples[i]; r.t += dt; const k = r.t / r.life;
+                    if (k >= 1) { g.scene.remove(r.ring); r.ring.geometry.dispose(); r.ring.material.dispose(); this._ripples.splice(i, 1); continue; }
+                    const sc = r.r0 + k * r.grow; r.ring.scale.set(sc, sc, sc);
+                    r.ring.material.opacity = r.op * (1 - k);
+                }
+            }
+            if (this._splashes) {
+                for (let i = this._splashes.length - 1; i >= 0; i--) {
+                    const s = this._splashes[i]; s.t += dt; const k = s.t / s.life;
+                    if (k >= 1) { g.scene.remove(s.pts); s.pts.geometry.dispose(); s.pts.material.dispose(); this._splashes.splice(i, 1); continue; }
+                    const a = s.pts.geometry.attributes.position.array;
+                    for (let j = 0; j < s.n; j++) {
+                        s.vel[j * 3 + 1] -= GRAVITY * 0.5 * dt; // droplets arc back down
+                        a[j * 3] += s.vel[j * 3] * dt; a[j * 3 + 1] += s.vel[j * 3 + 1] * dt; a[j * 3 + 2] += s.vel[j * 3 + 2] * dt;
+                    }
+                    s.pts.geometry.attributes.position.needsUpdate = true;
+                    s.pts.material.opacity = 1 - k;
+                }
+            }
+        }
+
+        _clearWaterFx() {
+            const g = this.game;
+            if (this._ripples) { for (const r of this._ripples) { g.scene.remove(r.ring); r.ring.geometry.dispose(); r.ring.material.dispose(); } this._ripples.length = 0; }
+            if (this._splashes) { for (const s of this._splashes) { g.scene.remove(s.pts); s.pts.geometry.dispose(); s.pts.material.dispose(); } this._splashes.length = 0; }
+            this._wasInWater = false;
+        }
+
         _buildFlatChunk(cx, cz) {
             const key = cx + ',' + cz;
             if (this._flatChunks.has(key)) return;
@@ -1522,7 +1597,21 @@
                 const dz = torusDelta(this._shipHomeZ, p.z, TORUS_L);
                 this._ship.position.x = p.x + dx;
                 this._ship.position.z = p.z + dz;
-                const near = (dx * dx + dz * dz) < 100;
+                // Buoyancy: if parked over water, ride the surface (a little draft) with a
+                // gentle bob + roll; on land, sit on the ground, level.
+                const floorH = flatTopAt(this._shipHomeX, this._shipHomeZ);
+                if (floorH < WATER_LEVEL - 0.01) {
+                    this._shipBobT = (this._shipBobT || 0) + (dt || 0.016);
+                    const t = this._shipBobT;
+                    this._ship.position.y = (WATER_LEVEL - 0.25 + Math.sin(t * 1.4) * 0.18) - (this._shipMinY || 0);
+                    this._ship.rotation.set(Math.sin(t * 1.1 + 0.5) * 0.03, 0, Math.sin(t * 1.3) * 0.05); // lazy pitch/roll
+                    this._shipRipT = (this._shipRipT || 0) - (dt || 0.016); // occasional ring lapping the hull
+                    if (this._shipRipT <= 0) { this._spawnRipple(this._ship.position.x, this._ship.position.z, 0.9, 1.6, 0.22); this._shipRipT = 1.3; }
+                } else {
+                    this._ship.position.y = floorH - (this._shipMinY || 0);
+                    this._ship.rotation.set(0, 0, 0);
+                }
+                const near = (dx * dx + dz * dz) < (PLAYER_H * 2) * (PLAYER_H * 2); // board within ~2 player-lengths
                 if (near !== this._nearShip) { this._nearShip = near; this._showPrompt(near ? 'Press E to board 🚀' : ''); }
             }
             const boost = g.getSpeedBoostMultiplier ? g.getSpeedBoostMultiplier() : 1;
@@ -1538,8 +1627,17 @@
             const groundH = flatTopAt(p.x, p.z);
             const overWater = groundH < WATER_LEVEL - 0.01;
             const inWater = !g.flyMode && overWater && p.y < WATER_LEVEL;
+            // Splash on entering/leaving the water (entry strength scales with fall speed),
+            // and a steady wake ripple while moving through it.
+            if (inWater && !this._wasInWater) { this._spawnSplash(p.x, p.z, Math.min(2, 0.6 + Math.abs(vel.y) * 0.12)); g.audio && g.audio.play && g.audio.play(Math.abs(vel.y) > 4 ? 'splash' : 'splashSmall'); }
+            else if (!inWater && this._wasInWater) { this._spawnSplash(p.x, p.z, 0.7); g.audio && g.audio.play && g.audio.play('splashSmall'); }
+            this._wasInWater = inWater;
+            if (inWater) {
+                this._rippleT = (this._rippleT || 0) - dt;
+                if (this._rippleT <= 0 && Math.hypot(vel.x, vel.z) > 1.0) { this._spawnRipple(p.x, p.z, 0.4, 2.2, 0.4); g.audio && g.audio.play && g.audio.play('swimStroke'); this._rippleT = 0.38; }
+            }
             this._inWater = inWater;
-            const spd = (inWater ? 6.5 : 12) * boost;            // swimming/wading is slower than running
+            const spd = (inWater ? PLAYER_H * 1.4 : PLAYER_H * 2.6) * boost; // scales with player size
             let tx = 0, tz = 0; if (wl > 1e-4) { tx = wx / wl * spd; tz = wz / wl * spd; }
             const k = Math.min(1, (inWater ? 6 : 12) * dt);      // softer accel in water
             vel.x += (tx - vel.x) * k; vel.z += (tz - vel.z) * k;
@@ -1562,7 +1660,7 @@
                 vel.x *= (1 - Math.min(1, 0.8 * dt)); vel.z *= (1 - Math.min(1, 0.8 * dt)); // glide to a stop
             } else {
                 vel.y -= GRAVITY * dt;
-                if (g.keys['Space'] && this._onGround) { vel.y = 14; this._onGround = false; }
+                if (g.keys['Space'] && this._onGround) { vel.y = PLAYER_H * 1.9; this._onGround = false; } // scaled jump
             }
             p.x += vel.x * dt; p.y += vel.y * dt; p.z += vel.z * dt;
             // Keep coordinates bounded to one torus tile (terrain is periodic, so this is
@@ -1618,7 +1716,7 @@
                 const obj = src.clone(true);
                 obj.traverse((o) => { if (o.isMesh) { o.castShadow = false; o.frustumCulled = false; } });
                 const box = new THREE.Box3().setFromObject(obj); const size = new THREE.Vector3(); box.getSize(size);
-                const longest = Math.max(size.x, size.y, size.z) || 1; const scale = 16 / longest;
+                const longest = Math.max(size.x, size.y, size.z) || 1; const scale = (PLAYER_H * 2.6) / longest; // ~2.6 player-lengths
                 obj.scale.setScalar(scale);
                 this._shipMinY = box.min.y * scale;
                 obj.position.set(sx, flatTopAt(sx, sz) - this._shipMinY, sz);
@@ -1702,7 +1800,7 @@
             this._shipPos.z = ((this._shipPos.z % L) + L) % L;
             this._shipHomeX = this._shipPos.x; this._shipHomeZ = this._shipPos.z; // park here
             const gy = flatTopAt(this._shipPos.x, this._shipPos.z);
-            g.player.position.set(this._shipPos.x + 5, gy + 0.5, this._shipPos.z);
+            g.player.position.set(this._shipPos.x + PLAYER_H, gy + 0.5, this._shipPos.z);
             g.player.velocity.set(0, 0, 0); this._onGround = true;
             this._lastYaw = g.characterRotation || 0;
         }
@@ -1738,12 +1836,25 @@
             }
             this._shipPos.addScaledVector(v, dt);
             if (!this._space) {
-                const gy = flatTopAt(this._shipPos.x, this._shipPos.z) + 2;
+                // Rest level: water surface when over sea (so the ship floats, not sinks to
+                // the bed), else 2 above the ground for takeoff clearance.
+                const floorH = flatTopAt(this._shipPos.x, this._shipPos.z);
+                const onWater = floorH < WATER_LEVEL - 0.01;
+                const gy = onWater ? ((WATER_LEVEL - 0.25) - (this._shipMinY || 0)) : (floorH + 2);
                 if (this._shipPos.y < gy) { this._shipPos.y = gy; if (v.y < 0) v.y = 0; }
+                this._shipFloating = onWater && this._shipPos.y <= gy + 0.4 && !g.keys['Space'];
                 this._showPrompt(this._shipPos.y < gy + 4 ? 'Press E to disembark' : '');
-            }
+            } else { this._shipFloating = false; }
             if (this._ship) {
                 this._ship.position.copy(this._shipPos);
+                // Buoyant bob on the rendered hull while settled on water (camera tracks
+                // _shipPos, which stays steady — the hull bobs, the view doesn't lurch).
+                if (this._shipFloating) {
+                    this._shipBobT = (this._shipBobT || 0) + (dt || 0.016);
+                    this._ship.position.y += Math.sin(this._shipBobT * 1.4) * 0.18;
+                    this._shipRipT = (this._shipRipT || 0) - (dt || 0.016);
+                    if (this._shipRipT <= 0) { this._spawnRipple(this._shipPos.x, this._shipPos.z, 0.9, 1.6, 0.22); this._shipRipT = 1.3; }
+                }
                 // -pitch so the nose follows the flight direction (matches cursor-up = nose-up).
                 this._ship.quaternion.setFromEuler(new THREE.Euler(-this._shipPitch, this._shipYaw, this._shipRoll || 0, 'YXZ'));
                 this._ship.visible = !this._cockpit; // hidden in cockpit FPV — the drawn cockpit frames the view
@@ -2190,18 +2301,19 @@
             const fx = Math.sin(yaw), fz = Math.cos(yaw);
             const lx = fx * Math.cos(pitch), ly = Math.sin(pitch), lz = fz * Math.cos(pitch);
             if (g.viewMode === 'fpv') {
-                cam.position.set(p.x, p.y + EYE, p.z);
-                cam.lookAt(p.x + lx, p.y + EYE + ly, p.z + lz);
+                cam.position.set(p.x, p.y + PLAYER_EYE, p.z);
+                cam.lookAt(p.x + lx, p.y + PLAYER_EYE + ly, p.z + lz);
             } else {
-                const dist = 4, rx = -fz, rz = fx; // shoulder axis (over the right shoulder)
-                const fy = p.y + EYE * 0.9;
-                cam.position.set(p.x - lx * dist + rx * (dist * 0.30 + 1.4),
+                const dist = PLAYER_H * 1.35, rx = -fz, rz = fx;     // over-the-shoulder, scaled to the player
+                const off = dist * 0.30 + PLAYER_H * 0.4;            // shoulder offset
+                const fy = p.y + PLAYER_EYE;
+                cam.position.set(p.x - lx * dist + rx * off,
                                  fy - ly * dist,
-                                 p.z - lz * dist + rz * (dist * 0.30 + 1.4));
+                                 p.z - lz * dist + rz * off);
                 // Don't let the camera sink through the terrain behind/below the player.
-                const gc = flatTopAt(cam.position.x, cam.position.z) + 1.5;
+                const gc = flatTopAt(cam.position.x, cam.position.z) + PLAYER_H * 0.2;
                 if (cam.position.y < gc) cam.position.y = gc;
-                cam.lookAt(p.x + lx * 10, fy + ly * 10, p.z + lz * 10);
+                cam.lookAt(p.x + lx * PLAYER_H, fy + ly * PLAYER_H, p.z + lz * PLAYER_H);
             }
             // Underwater screen tint: fade in a blue overlay once the camera dips below the
             // surface over a sea column (head submerged while diving / in deep water).
@@ -4408,7 +4520,7 @@
             // Toroidal flat world: ship flight when boarded, otherwise the walker.
             // _tickFx runs every frame (not just while flying) so the entry/exit wash
             // always finishes fading out — otherwise the bloom freezes the screen.
-            if (FLAT_SURFACE) { this._tickFx(dt); this._updateWater(dt); if (this._flying) this._updateFlatFlight(dt); else this._updateFlatPlayer(dt); return; }
+            if (FLAT_SURFACE) { this._tickFx(dt); this._updateWater(dt); this._tickWaterFx(dt); if (this._flying) this._updateFlatFlight(dt); else this._updateFlatPlayer(dt); return; }
             const p = g.player.position;
             const vel = g.player.velocity;
             const center = this._center;

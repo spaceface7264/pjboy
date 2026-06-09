@@ -224,6 +224,18 @@ class AudioBus {
                 this._noise({ dur: 0.06, gain: 0.14, lowpass: 1500, highpass: 600 });
                 this._tone({ type: 'square', freq: 320, dur: 0.05, gain: 0.10, delay: 0.08 });
                 break;
+            case 'splash': // diving / falling into water — broadband whoosh + low "ploop"
+                this._noise({ dur: 0.34, gain: 0.30, lowpass: 2600, highpass: 250 });
+                this._noise({ dur: 0.14, gain: 0.16, lowpass: 5000, highpass: 1500, delay: 0.02 }); // bright droplet spray
+                this._tone({ type: 'sine', freq: 420, freqEnd: 150, dur: 0.22, gain: 0.12 });
+                break;
+            case 'splashSmall': // stepping out / small entry
+                this._noise({ dur: 0.18, gain: 0.18, lowpass: 2400, highpass: 400 });
+                this._tone({ type: 'sine', freq: 520, freqEnd: 220, dur: 0.12, gain: 0.08 });
+                break;
+            case 'swimStroke': // soft per-stroke swish while swimming
+                this._noise({ dur: 0.22, gain: 0.10 + Math.random() * 0.03, lowpass: 1300 + Math.random() * 300, highpass: 250 });
+                break;
         }
     }
 
