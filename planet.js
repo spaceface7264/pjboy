@@ -43,7 +43,7 @@
     //   scaleMul: extra size multiplier on the model wrap (1 = no change)
     //   footDrop: how far to sink the model along the surface normal (defaults FOOT_DROP)
     const PLANET_CHAR = {
-        hero: { scaleMul: 0.86, footDrop: 0.8 }, // a touch smaller; rigged feet float otherwise
+        hero: { scaleMul: 0.86, footDrop: 0.0 }, // grounding is correct now (upright-bbox fix in loadPlayerModel); no drop hack needed
     };
 
     // Gravity sphere of influence (recomputed per world from its R). Full pull near
@@ -71,6 +71,9 @@
     const FCELLS = 60;           // blocks per streamed flat chunk edge (bigger = fewer draw calls)
     const FCHUNK = BS * FCELLS;  // chunk size in world units (180)
     const FTH = BS * 6;          // block tile thickness — extends down to hide cliff gaps
+    const FAR_SPAN = 16000;      // far-LOD terrain covers this square (revealed from altitude)
+    const FAR_CELLS = 200;       // far-LOD grid resolution (coarse, cheap)
+    const FAR_RECESS = 4;        // sit the far mesh just under the voxel tops
     const ATMO_TOP = 2600;       // top of the atmosphere — above this (climbing) you're in space
     const SPACE_RING = 600000;   // radius the planet cubes sit at (fixed, spread far apart)
     const SPACE_CUBE = 160000;   // planet-cube size — utterly dwarfs the ~16u ship
@@ -1125,6 +1128,7 @@
                 this.loader.load(PLANET_GLB, (gl) => this.assetCache.set(PLANET_GLB, gl), undefined,
                     (e) => console.warn('[planet] cube-world glb load failed', e && e.message));
             }
+            this._buildFarTerrain();
             this._updateFlatSky(0);
             this._streamFlat(true);
         }
@@ -1134,6 +1138,7 @@
             const g = this.game;
             this._clearFlatChunks();
             if (this._flatClouds) { g.scene.remove(this._flatClouds); this._flatClouds = null; }
+            if (this._farTerrain) { g.scene.remove(this._farTerrain); if (this._farTerrain.geometry) this._farTerrain.geometry.dispose(); this._farTerrain = null; }
             if (this._water) { g.scene.remove(this._water); this._water = null; }
             if (this._ship) { g.scene.remove(this._ship); this._ship = null; }
             this._clearSpacePlanets();
@@ -1474,6 +1479,39 @@
             this._flatChunks.clear();
         }
 
+        // Far-LOD terrain: one coarse mesh covering a big region (the toroidal world
+        // repeats, so it tiles), heights matching the voxel tops (flatTopAt) and recessed
+        // just below them. Fixed at the origin — the player wraps within one tile, so this
+        // always surrounds them. Revealed by extending the fog as you climb.
+        _buildFarTerrain() {
+            const N = FAR_CELLS, span = FAR_SPAN, step = span / N, o = -span / 2;
+            const positions = [], colors = [], indices = [], col = new THREE.Color();
+            const sea = new THREE.Color(SEA_COLOR), sand = new THREE.Color(0xcdba84);
+            const land = new THREE.Color(this._activeDef.sky || 0x6f9e4a), snow = new THREE.Color(0xeef4fb);
+            for (let jz = 0; jz <= N; jz++)
+                for (let jx = 0; jx <= N; jx++) {
+                    const x = o + jx * step, z = o + jz * step, h = flatTopAt(x, z);
+                    positions.push(x, h - FAR_RECESS, z);
+                    if (h < 0) col.copy(sea); else if (h < BS) col.copy(sand);
+                    else if (h < AMP * 0.6) col.copy(land); else col.copy(snow);
+                    colors.push(col.r, col.g, col.b);
+                }
+            const vpu = N + 1;
+            for (let jz = 0; jz < N; jz++)
+                for (let jx = 0; jx < N; jx++) {
+                    const i0 = jz * vpu + jx, i1 = i0 + 1, i2 = i0 + vpu, i3 = i2 + 1;
+                    indices.push(i0, i2, i1, i1, i2, i3);
+                }
+            const geo = new THREE.BufferGeometry();
+            geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+            geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+            geo.setIndex(indices); geo.computeVertexNormals();
+            const mesh = new THREE.Mesh(geo, this._ensureTerrainMat());
+            mesh.frustumCulled = false; mesh.renderOrder = -1; // under the voxel chunks
+            this.game.scene.add(mesh);
+            this._farTerrain = mesh;
+        }
+
         // Flat (Open-World-style) controller: up = +Y, gravity straight down.
         _updateFlatPlayer(dt) {
             const g = this.game, p = g.player.position, vel = g.player.velocity;
@@ -1514,7 +1552,7 @@
                 // Buoyancy + swim. Space surfaces/climbs, Shift/Ctrl dives; otherwise a spring
                 // bobs the body to a rest waterline (feet ~FLOAT_DEPTH below the surface so the
                 // upper body stays out). Heavy vertical drag keeps it from bouncing.
-                const FLOAT_DEPTH = 1.3, SWIM_VERT = 8 * boost, BUOY_K = 7;
+                const FLOAT_DEPTH = 0.75, SWIM_VERT = 8 * boost, BUOY_K = 7;
                 let swimVY = 0;
                 if (g.keys['Space']) swimVY += 1;
                 if (g.keys['ShiftLeft'] || g.keys['ShiftRight'] || g.keys['ControlLeft']) swimVY -= 1;
@@ -1759,7 +1797,18 @@
             const descend = -this._shipVel.y;
             if (t > 0.5 && t < 0.9 && descend > 30) col.lerp(this._cReentry, Math.min(0.6, (descend - 30) / 140));
             if (g.scene.background && g.scene.background.copy) g.scene.background.copy(col);
-            if (g.scene.fog) { g.scene.fog.color.copy(col); g.scene.fog.near = this._fogFar * (0.6 + t * 6); g.scene.fog.far = this._fogFar * (1 + t * 10); }
+            if (g.scene.fog) {
+                g.scene.fog.color.copy(col);
+                // As you climb, push the fog out from the voxel-chunk ring toward the
+                // far-LOD edge, so MORE of the planet is revealed with altitude (and it
+                // still fades into the sky at the far edge — no hard cutoff).
+                const ringR = (Math.ceil(this._fogFar / FCHUNK) + 1) * FCHUNK; // ~detailed ring
+                const farR = FAR_SPAN * 0.46;                                  // far-LOD edge
+                const reveal = Math.min(1, this._shipPos.y / 1400);            // fully revealed by ~1400m
+                const ff = ringR + (farR - ringR) * reveal;
+                g.scene.fog.near = ff * 0.4;
+                g.scene.fog.far = ff * 0.95;
+            }
             if (this._stars) {
                 this._stars.position.copy(g.camera.position);
                 const s = Math.max(0, (t - 0.45) / 0.55);
@@ -1910,6 +1959,7 @@
         _setFlatVisible(v) {
             if (this._flatChunks) for (const m of this._flatChunks.values()) m.visible = v;
             if (this._water) this._water.visible = v;
+            if (this._farTerrain) this._farTerrain.visible = v;
             if (this._sunMesh) this._sunMesh.visible = v;
         }
 

@@ -3277,13 +3277,15 @@ class Game3D {
         
         // Create renderer with 128-bit aesthetic
         const canvas = document.getElementById('gameCanvas');
-        this.renderer = new THREE.WebGLRenderer({ 
-            canvas: canvas, 
-            antialias: false,
-            alpha: false
+        this.renderer = new THREE.WebGLRenderer({
+            canvas: canvas,
+            antialias: true,
+            alpha: false,
+            powerPreference: 'high-performance'
         });
         this.renderer.setSize(window.innerWidth, window.innerHeight);
-        this.renderer.setPixelRatio(1);
+        // Render at (capped) device resolution — crisp on retina without the full 4x cost.
+        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75));
         this.renderer.setClearColor(0x000000);
         // Dynamic shadow mapping disabled — the cheap drop-shadow disc under
         // the avatar carries the grounding cue and saves the PCF pass cost.
@@ -3349,7 +3351,7 @@ class Game3D {
         this.characters = {
             pjboy:    { label: 'PJBoy',    path: 'assets/Blocks/Characters/Character_PJBoy.glb',
                         grip: { position: [0, 0.06, 0], rotation: [0, 0, 0] } },
-            hero:     { label: 'Hero',     path: 'assets/Blocks/Characters/Character_Hero.glb',
+            hero:     { label: 'Hero',     path: 'assets/Blocks/Characters/Character_Hero.glb?v=2', // ?v bump: force refetch after removing the Icosphere proxy + adding swim clips
                         scale: 0.56,  // ~1.4u tall (shorter than trees)
                         // NOTE: Tiny-Planet-specific size/grounding tweaks live in planet.js
                         // (PLANET_CHAR), applied on enter() and reverted on exit() — keep them
@@ -3485,7 +3487,15 @@ class Game3D {
                     child.receiveShadow = true;
                 }
             });
-            // Scale so the character is ~2.5 units tall (matches old lion archer footprint)
+            // Measure an UPRIGHT bounding box for scale + grounding. glTF skinned characters
+            // often carry a Z-up→Y-up rotation on their armature node; Box3.setFromObject
+            // ignores skinning and rotates the bind geometry by that matrix, so it measures
+            // the character "lying down" → wrong height (over-scale) + a phantom min.y below
+            // the feet (the avatar floats). Neutralize node rotations for the measurement
+            // only, then restore them so the skinned render is unaffected.
+            const _savedQ = [];
+            character.traverse((o) => { _savedQ.push([o, o.quaternion.clone()]); o.quaternion.identity(); });
+            character.updateMatrixWorld(true);
             const box = new THREE.Box3().setFromObject(character);
             const height = box.max.y - box.min.y;
             if (height > 0) {
@@ -3496,11 +3506,14 @@ class Game3D {
                 const s = targetHeight / height;
                 character.scale.setScalar(s);
             }
-            // Re-measure after scaling, drop so feet are at y=0
+            // Re-measure after scaling, drop so feet are at y=0 (still rotation-neutralized)
+            character.updateMatrixWorld(true);
             const scaledBox = new THREE.Box3().setFromObject(character);
             character.position.y -= scaledBox.min.y;
             character.position.x = 0;
             character.position.z = 0;
+            for (const [o, q] of _savedQ) o.quaternion.copy(q); // restore rotations → correct upright render
+            character.updateMatrixWorld(true);
 
             // Detach both 3rd-person weapon pivots so they can be re-attached to the new character's hand socket
             for (const p of Object.values(this.player.meleePivots || {})) {
