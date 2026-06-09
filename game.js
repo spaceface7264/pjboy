@@ -9198,10 +9198,11 @@ class Game3D {
             } else {
                 document.body.style.cursor = 'default';
             }
-            // Crosshair visibility: only in FPV during play
+            // Crosshair visibility: only in FPV during play, and never in Tiny Planet
+            // (no aiming there — keeps the aim dot out of the ship's iso/chase view).
             const ch = document.getElementById('crosshair');
             if (ch) {
-                ch.style.display = (this.gameMode === 'play' && this.viewMode === 'fpv') ? 'block' : 'none';
+                ch.style.display = (this.gameMode === 'play' && this.viewMode === 'fpv' && this.activeModeId !== 'planet') ? 'block' : 'none';
             }
         });
 

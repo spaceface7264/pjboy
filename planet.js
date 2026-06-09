@@ -67,6 +67,7 @@
     let FLAT_SURFACE = false;
     let TORUS_L = 2400;          // world period (units) — the terrain repeats every TORUS_L
     const BS = 3;                // voxel block size (world units)
+    const WATER_LEVEL = BS * 0.5; // flat-world sea surface Y (water mesh sits here); columns whose floor is below this are sea
     const FCELLS = 60;           // blocks per streamed flat chunk edge (bigger = fewer draw calls)
     const FCHUNK = BS * FCELLS;  // chunk size in world units (180)
     const FTH = BS * 6;          // block tile thickness — extends down to hide cliff gaps
@@ -621,6 +622,7 @@
             this._clearSpacePlanets();
             this._flying = false; this._space = false;
             this._fx = null;
+            this._setUnderwater(false);
             if (this._fadeEl) this._fadeEl.style.opacity = '0';
             if (this._cockpitEl) this._cockpitEl.style.display = 'none';
             if (this._thruster) { g.scene.remove(this._thruster); this._thruster = null; }
@@ -1232,6 +1234,7 @@
                     uSkyCol:  { value: new THREE.Color(skyCol) },           // horizon / ambient sky
                     uSkyTop:  { value: new THREE.Color(skyCol).multiplyScalar(1.12) }, // zenith (env reflection top)
                     uRoughness: { value: 0.08 },                            // glossy water
+                    uDetail:  { value: 0.28 },                              // high-freq surface texture strength
                     uOpacity: { value: 0.86 },
                 }
             ]);
@@ -1314,7 +1317,7 @@
             return [
                 'uniform vec3 uDeep; uniform vec3 uShallow; uniform vec3 uFoam;',
                 'uniform vec3 uSunDir; uniform vec3 uSunCol; uniform float uSunInt;',
-                'uniform vec3 uSkyCol; uniform vec3 uSkyTop; uniform float uRoughness; uniform float uOpacity;',
+                'uniform vec3 uSkyCol; uniform vec3 uSkyTop; uniform float uRoughness; uniform float uDetail; uniform float uOpacity; uniform float uTime;',
                 'varying vec3 vWPos; varying vec3 vN; varying float vH;',
                 '#include <fog_pars_fragment>',
                 'const float PI = 3.14159265359;',
@@ -1322,8 +1325,19 @@
                 'float G_Smith(float NoV, float NoL, float a){ float k=a*a*0.5; float gv=NoV/(NoV*(1.0-k)+k); float gl=NoL/(NoL*(1.0-k)+k); return gv*gl; }',
                 'vec3 F_Schlick(float c, vec3 F0){ return F0 + (1.0-F0)*pow(1.0-c,5.0); }',
                 'vec3 skyEnv(vec3 dir){ float up=clamp(dir.y*0.5+0.5,0.0,1.0); return mix(uSkyCol, uSkyTop, pow(up,0.8)); }',
+                // High-frequency procedural surface texture: layered directional ripples whose
+                // slopes perturb the normal, so the water catches the sun/sky at varied angles
+                // (sparkle + micro-detail) without any texture map.
+                'vec2 detailSlope(vec2 P, float t){',
+                '  vec2 s = vec2(0.0);',
+                '  s.x += cos(P.x*0.90 + t*2.1)*0.50 + cos(P.x*1.70 - P.y*0.60 + t*1.3)*0.32 + cos(P.x*3.10 + P.y*1.20 - t*2.7)*0.18;',
+                '  s.y += cos(P.y*0.90 - t*1.9)*0.50 + cos(P.y*1.70 + P.x*0.60 + t*1.1)*0.32 + cos(P.y*3.10 - P.x*1.20 + t*2.3)*0.18;',
+                '  return s;',
+                '}',
                 'void main(){',
                 '  vec3 N = normalize(vN);',
+                '  vec2 ds = detailSlope(vWPos.xz, uTime) * uDetail;',
+                '  N = normalize(N + vec3(-ds.x, 0.0, -ds.y));',
                 '  vec3 V = normalize(cameraPosition - vWPos);',
                 '  vec3 L = normalize(uSunDir);',
                 '  vec3 H = normalize(L + V);',
@@ -1481,15 +1495,33 @@
             const s = (g.keys['KeyD'] ? 1 : 0) - (g.keys['KeyA'] ? 1 : 0);
             let wx = fwd.x * f + right.x * s, wz = fwd.z * f + right.z * s;
             const wl = Math.hypot(wx, wz);
-            const spd = 12 * boost;
+            // Water test: this column is sea if its floor is below the surface, and the body
+            // is "in water" once the feet drop below the waterline. Slower, draggier in water.
+            const groundH = flatTopAt(p.x, p.z);
+            const overWater = groundH < WATER_LEVEL - 0.01;
+            const inWater = !g.flyMode && overWater && p.y < WATER_LEVEL;
+            this._inWater = inWater;
+            const spd = (inWater ? 6.5 : 12) * boost;            // swimming/wading is slower than running
             let tx = 0, tz = 0; if (wl > 1e-4) { tx = wx / wl * spd; tz = wz / wl * spd; }
-            const k = Math.min(1, 12 * dt);
+            const k = Math.min(1, (inWater ? 6 : 12) * dt);      // softer accel in water
             vel.x += (tx - vel.x) * k; vel.z += (tz - vel.z) * k;
             if (g.flyMode) {
                 let vy = 0;
                 if (g.keys['Space']) vy += 1;
                 if (g.keys['ShiftLeft'] || g.keys['ShiftRight'] || g.keys['ControlLeft']) vy -= 1;
                 vel.y = vy * 30 * boost;
+            } else if (inWater) {
+                // Buoyancy + swim. Space surfaces/climbs, Shift/Ctrl dives; otherwise a spring
+                // bobs the body to a rest waterline (feet ~FLOAT_DEPTH below the surface so the
+                // upper body stays out). Heavy vertical drag keeps it from bouncing.
+                const FLOAT_DEPTH = 1.3, SWIM_VERT = 8 * boost, BUOY_K = 7;
+                let swimVY = 0;
+                if (g.keys['Space']) swimVY += 1;
+                if (g.keys['ShiftLeft'] || g.keys['ShiftRight'] || g.keys['ControlLeft']) swimVY -= 1;
+                if (swimVY !== 0) vel.y += swimVY * SWIM_VERT * dt;
+                else vel.y += ((WATER_LEVEL - FLOAT_DEPTH) - p.y) * BUOY_K * dt;
+                vel.y *= (1 - Math.min(1, 3.0 * dt));            // vertical water drag
+                vel.x *= (1 - Math.min(1, 0.8 * dt)); vel.z *= (1 - Math.min(1, 0.8 * dt)); // glide to a stop
             } else {
                 vel.y -= GRAVITY * dt;
                 if (g.keys['Space'] && this._onGround) { vel.y = 14; this._onGround = false; }
@@ -1501,6 +1533,7 @@
             p.z = ((p.z % TORUS_L) + TORUS_L) % TORUS_L;
             const h = flatTopAt(p.x, p.z); // block-quantised floor — matches the rendered cubes
             this._onGround = false;
+            // Floor collision still applies in water → you can walk the sea bed / wade up a shore.
             if (!g.flyMode && p.y <= h) { p.y = h; if (vel.y < 0) vel.y = 0; this._onGround = true; }
             else if (g.flyMode && p.y < h) { p.y = h; }
             // Model
@@ -1518,6 +1551,13 @@
                 const tsp = Math.hypot(vel.x, vel.z);
                 let clip = 'Idle';
                 if (g.flyMode && g.player.clips['Fly']) clip = 'Fly';
+                else if (this._inWater) {
+                    // Swim while moving, tread water while floating still; fall back gracefully.
+                    if (tsp > 0.6 && g.player.clips['Swim']) clip = 'Swim';
+                    else if (g.player.clips['Tread']) clip = 'Tread';
+                    else if (g.player.clips['Swim']) clip = 'Swim';
+                    else clip = (tsp > 0.5 && g.player.clips['Run']) ? 'Run' : 'Idle';
+                }
                 else if (!this._onGround && g.player.clips['Jump']) clip = 'Jump';
                 else if (tsp > 0.7 && g.player.clips['Run']) clip = 'Run';
                 if (g.setPlayerAnimation) g.setPlayerAnimation(clip);
@@ -1644,13 +1684,20 @@
             const fwd = this._tmpFwd || (this._tmpFwd = new THREE.Vector3());
             fwd.set(sy * cp, sp, cy * cp);
             const v = this._shipVel, boost = g.getSpeedBoostMultiplier ? g.getSpeedBoostMultiplier() : 1;
-            const TH = (this._space ? 20000 : 95) * boost; // fast across the huge space view
+            // Thrust = acceleration (Newtonian). In space there's almost no drag, so you
+            // build momentum and COAST — turning doesn't snap your velocity, you drift.
+            const TH = (this._space ? 9000 : 95) * boost;
             if (g.keys['KeyW']) v.addScaledVector(fwd, TH * dt);
-            if (g.keys['KeyS']) v.addScaledVector(fwd, -TH * 0.6 * dt);
+            if (g.keys['KeyS']) v.addScaledVector(fwd, -TH * 0.6 * dt); // reverse / brake
             if (g.keys['Space']) v.y += TH * dt;
             if (g.keys['ShiftLeft'] || g.keys['ShiftRight'] || g.keys['ControlLeft']) v.y -= TH * dt;
-            if (!this._space) v.y -= GRAVITY * 0.25 * dt; // mild gravity in atmosphere — thrust to hover/climb
-            v.multiplyScalar(1 - Math.min(1, dt * (this._space ? 0.4 : 0.9))); // drag (less in space)
+            if (!this._space) v.y -= GRAVITY * 0.25 * dt; // gravity in atmosphere
+            // Inertia: near-frictionless coasting in space; mild air drag in atmosphere.
+            v.multiplyScalar(1 - Math.min(1, dt * (this._space ? 0.04 : 0.6)));
+            if (this._space) { // cap top speed so momentum stays controllable
+                const maxV = 55000 * boost, s2 = v.lengthSq();
+                if (s2 > maxV * maxV) v.multiplyScalar(maxV / Math.sqrt(s2));
+            }
             this._shipPos.addScaledVector(v, dt);
             if (!this._space) {
                 const gy = flatTopAt(this._shipPos.x, this._shipPos.z) + 2;
@@ -1958,6 +2005,7 @@
 
         _flatFlightCamera() {
             const g = this.game, cam = g.camera;
+            this._setUnderwater(false); // never tint while piloting
             cam.up.set(0, 1, 0);
             const cy = Math.cos(this._shipYaw), sy = Math.sin(this._shipYaw), cp = Math.cos(this._shipPitch), sp = Math.sin(this._shipPitch);
             const fx = sy * cp, fy = sp, fz = cy * cp;
@@ -1971,22 +2019,23 @@
                 this._camLerp = null; // snap when we switch back to chase
             } else {
                 this._showCockpit(false);
-                // Isometric-style follow: behind the ship in YAW only, at a fixed high
-                // 3/4 elevation (ignores the ship's pitch) so the view stays stable and
-                // readable — you see the ship + surroundings, not just its tail.
-                const fhx = Math.sin(this._shipYaw), fhz = Math.cos(this._shipYaw);
-                const ELEV = 0.62, back = Math.cos(ELEV), upc = Math.sin(ELEV);
-                const dist = h * 4 + 24;
+                // Locked behind the tail: sit directly behind the ship along its FULL
+                // heading (yaw + pitch) so steering turns the view with the ship; raised a
+                // little for the iso feel. Camera stays world-upright (no roll).
+                const dist = h * 3.5 + 18, lift = h * 1.0 + 7;
                 const target = (this._tmpCam || (this._tmpCam = new THREE.Vector3()))
-                    .set(p.x - fhx * dist * back, p.y + dist * upc, p.z - fhz * dist * back);
+                    .set(p.x - fx * dist, p.y - fy * dist + lift, p.z - fz * dist);
                 if (this._space) {
                     cam.position.copy(target); // snap: at space speeds a lagging cam can't keep up
                 } else {
                     if (!this._camLerp) this._camLerp = target.clone();
                     this._camLerp.lerp(target, 0.18); // smoothed follow on the surface
                     cam.position.copy(this._camLerp);
+                    // Keep the chase cam above the terrain while flying low.
+                    const gc = flatTopAt(cam.position.x, cam.position.z) + 3;
+                    if (cam.position.y < gc) cam.position.y = gc;
                 }
-                cam.lookAt(p.x, p.y + h * 0.3, p.z);
+                cam.lookAt(p.x + fx * 8, p.y + fy * 8, p.z + fz * 8);
             }
         }
 
@@ -2084,7 +2133,10 @@
             if (this._thruster) this._thruster.visible = false;
             cam.up.set(0, 1, 0);
             const yaw = g.characterRotation || 0;
-            const pitch = Math.max(-0.9, Math.min(0.9, g.fpvPitch || 0));
+            // First-person can look (nearly) straight down/up; the over-shoulder view keeps
+            // a gentler clamp so the chase cam stays sane.
+            const lim = (g.viewMode === 'fpv') ? (Math.PI / 2 - 0.05) : 0.9;
+            const pitch = Math.max(-lim, Math.min(lim, g.fpvPitch || 0));
             const fx = Math.sin(yaw), fz = Math.cos(yaw);
             const lx = fx * Math.cos(pitch), ly = Math.sin(pitch), lz = fz * Math.cos(pitch);
             if (g.viewMode === 'fpv') {
@@ -2096,8 +2148,35 @@
                 cam.position.set(p.x - lx * dist + rx * (dist * 0.30 + 1.4),
                                  fy - ly * dist,
                                  p.z - lz * dist + rz * (dist * 0.30 + 1.4));
+                // Don't let the camera sink through the terrain behind/below the player.
+                const gc = flatTopAt(cam.position.x, cam.position.z) + 1.5;
+                if (cam.position.y < gc) cam.position.y = gc;
                 cam.lookAt(p.x + lx * 10, fy + ly * 10, p.z + lz * 10);
             }
+            // Underwater screen tint: fade in a blue overlay once the camera dips below the
+            // surface over a sea column (head submerged while diving / in deep water).
+            const submerged = cam.position.y < WATER_LEVEL && flatTopAt(cam.position.x, cam.position.z) < WATER_LEVEL;
+            this._setUnderwater(submerged);
+        }
+
+        // Blue full-screen overlay shown while the camera is underwater. Lazily created.
+        _ensureWaterOverlay() {
+            if (this._waterEl) return this._waterEl;
+            const el = document.createElement('div');
+            el.id = 'planet-underwater';
+            el.style.cssText = 'position:fixed;inset:0;z-index:40;pointer-events:none;opacity:0;'
+                + 'transition:opacity 0.25s ease;'
+                + 'background:radial-gradient(ellipse at center, rgba(20,90,150,0.30) 0%, rgba(8,50,100,0.62) 100%);'
+                + 'mix-blend-mode:multiply;';
+            document.body.appendChild(el);
+            this._waterEl = el;
+            return el;
+        }
+
+        _setUnderwater(on) {
+            if (on === this._underwater) return;
+            this._underwater = on;
+            this._ensureWaterOverlay().style.opacity = on ? '1' : '0';
         }
 
         // Dig a streamed fine tile (mirror of _digTerrain, scoped to a chunk mesh).
