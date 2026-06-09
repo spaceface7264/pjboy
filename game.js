@@ -8908,8 +8908,10 @@ class Game3D {
                 }
             }
 
-            // V: swap FPV / iso
-            if (event.code === 'KeyV' && !event.repeat) {
+            // V: swap FPV / iso — but while piloting the ship, V is the cockpit toggle
+            // (handled in planet.js), so don't also flip the world view mode here.
+            if (event.code === 'KeyV' && !event.repeat
+                && !(this.activeModeId === 'planet' && this.planetWorld && this.planetWorld._flying)) {
                 this.setViewMode(this.viewMode === 'fpv' ? 'iso' : 'fpv');
             }
 

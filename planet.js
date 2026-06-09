@@ -131,6 +131,7 @@
     const CLOUD_PATHS = [1, 2, 3, 4].map((n) => ROOT + 'sky/Cloud_' + n + '.glb');
     const SHIP_PATH = 'assets/Spaceship_shaded.glb';  // imported spaceship (self-contained baked materials)
     const PLANET_GLB = 'assets/planets/Cube_World_baked.glb'; // cube-world (procedural shader baked to a texture)
+    const WATER_GLB = 'assets/water.glb'; // baked wavy ocean disk (DAZ Water.obj → centered, ~2850 across, ±0.8 wave), shaded with the PBR water shader
     const pick = (arr, rng) => arr[(rng() * arr.length) | 0];
 
     // --- deterministic noise / rng -----------------------------------------
@@ -622,6 +623,7 @@
             this._fx = null;
             if (this._fadeEl) this._fadeEl.style.opacity = '0';
             if (this._cockpitEl) this._cockpitEl.style.display = 'none';
+            if (this._thruster) { g.scene.remove(this._thruster); this._thruster = null; }
             if (this._travelEl) this._travelEl.style.display = 'none';
             g.scene.fog = (this._saved && this._saved.fog) || null;
             if (this._savedBg !== undefined) { g.scene.background = this._savedBg; this._savedBg = undefined; }
@@ -1063,16 +1065,23 @@
             // Much lighter fog: clear air out to ~88% of the view, then a thin haze band
             // only at the very edge (just enough to mask chunk pop-in + the wrap).
             g.scene.fog = new THREE.Fog(skyCol, this._fogFar * 0.88, this._fogFar);
-            // Flat sea plane (half a block above y=0 so it never z-fights block tops).
+            // Procedural ocean: a player-following plane displaced by a few long
+            // sines in a vertex shader (every wavelength is an integer fraction of
+            // TORUS_L, so the field is seamless across the toroidal wrap), shaded
+            // with a sun/sky-lit gradient + crest foam. Driven by _updateWater().
+            // Sits half a block above y=0 so it never z-fights block tops.
             this._water = new THREE.Mesh(
-                new THREE.PlaneGeometry(this._fogFar * 3, this._fogFar * 3),
-                new THREE.MeshLambertMaterial({ color: SEA_COLOR, transparent: true, opacity: 0.82, depthWrite: false })
+                new THREE.PlaneGeometry(this._fogFar * 3, this._fogFar * 3, 128, 128),
+                this._buildWaterMaterial(skyCol)
             );
             this._water.rotation.x = -Math.PI / 2;
             this._water.position.y = BS * 0.5;
             this._water.renderOrder = 1;
             this._water.frustumCulled = false;
             g.scene.add(this._water);
+            // Swap the procedural plane for the baked Water.obj disk once it loads (the
+            // plane shows instantly so there's never a frame of missing water).
+            this._loadObjWater(skyCol);
             // Living sky: day/night cycle + stars + sun + clouds.
             this._buildStars();
             this._buildFlatSun();
@@ -1204,6 +1213,206 @@
                 for (let dv = -ring; dv <= ring; dv++) want.add((cx + du) + ',' + (cz + dv));
             for (const k of want) if (!this._flatChunks.has(k)) { const pp = k.split(','); this._buildFlatChunk(+pp[0], +pp[1]); }
             for (const k of Array.from(this._flatChunks.keys())) if (!want.has(k)) this._dropFlatChunk(k);
+        }
+
+        // Shared uniforms for both water materials (procedural plane + baked OBJ disk).
+        _waterUniforms(skyCol) {
+            const sea = new THREE.Color(SEA_COLOR);
+            return THREE.UniformsUtils.merge([
+                THREE.UniformsLib['fog'],
+                {
+                    uTime:    { value: 0 },
+                    uPeriod:  { value: TORUS_L },
+                    uDeep:    { value: sea.clone().multiplyScalar(0.5) },
+                    uShallow: { value: sea.clone().lerp(new THREE.Color(0x9fe6ff), 0.5) },
+                    uFoam:    { value: new THREE.Color(0xeaf6ff) },
+                    uSunDir:  { value: new THREE.Vector3(0.4, 1.0, 0.3).normalize() },
+                    uSunCol:  { value: new THREE.Color(0xfff4e0) },
+                    uSunInt:  { value: 1.0 },
+                    uSkyCol:  { value: new THREE.Color(skyCol) },           // horizon / ambient sky
+                    uSkyTop:  { value: new THREE.Color(skyCol).multiplyScalar(1.12) }, // zenith (env reflection top)
+                    uRoughness: { value: 0.08 },                            // glossy water
+                    uOpacity: { value: 0.86 },
+                }
+            ]);
+        }
+
+        // Procedural ocean plane: wave heights summed from long sines at the vertex's WORLD
+        // x/z (anchored in the world; you move through it). Each wave's cycle count is an
+        // integer over uPeriod (=TORUS_L) so the field is seamless across the toroidal wrap.
+        _buildWaterMaterial(skyCol) {
+            const uniforms = this._waterUniforms(skyCol);
+            const vertexShader = [
+                'uniform float uTime;',
+                'uniform float uPeriod;',
+                'varying vec3 vWPos;',
+                'varying vec3 vN;',
+                'varying float vH;',
+                '#include <fog_pars_vertex>',
+                'float waveH(vec2 P, out vec2 grad){',
+                '  grad = vec2(0.0); float h = 0.0; const float TAU = 6.2831853;',
+                '  { float k=TAU* 8.0/uPeriod; vec2 d=normalize(vec2( 1.0, 0.18)); float A=0.50,sp=0.6; float ph=dot(d,P)*k+uTime*sp; h+=A*sin(ph); grad+=d*(A*k*cos(ph)); }',
+                '  { float k=TAU*12.0/uPeriod; vec2 d=normalize(vec2( 0.3, 0.95)); float A=0.26,sp=0.9; float ph=dot(d,P)*k+uTime*sp; h+=A*sin(ph); grad+=d*(A*k*cos(ph)); }',
+                '  { float k=TAU*16.0/uPeriod; vec2 d=normalize(vec2(-0.7, 0.50)); float A=0.16,sp=1.3; float ph=dot(d,P)*k+uTime*sp; h+=A*sin(ph); grad+=d*(A*k*cos(ph)); }',
+                '  { float k=TAU*20.0/uPeriod; vec2 d=normalize(vec2( 0.8,-0.45)); float A=0.10,sp=1.7; float ph=dot(d,P)*k+uTime*sp; h+=A*sin(ph); grad+=d*(A*k*cos(ph)); }',
+                '  return h;',
+                '}',
+                'void main(){',
+                '  vec4 wp = modelMatrix * vec4(position, 1.0);',
+                '  vec2 grad; float h = waveH(wp.xz, grad);',
+                '  vec3 world = wp.xyz + vec3(0.0, h, 0.0);',
+                '  vWPos = world; vH = h;',
+                '  vN = normalize(vec3(-grad.x, 1.0, -grad.y));',
+                '  vec4 mvPosition = viewMatrix * vec4(world, 1.0);',
+                '  gl_Position = projectionMatrix * mvPosition;',
+                '  #include <fog_vertex>',
+                '}',
+            ].join('\n');
+            return new THREE.ShaderMaterial({
+                uniforms, vertexShader, fragmentShader: this._waterFragment(),
+                fog: true, transparent: true, depthWrite: false,
+            });
+        }
+
+        // OBJ-disk ocean: the baked Water.obj wave geometry (real organic waves) shaded with
+        // the same PBR fragment, plus a gentle animated ripple + normal shimmer so the frozen
+        // mesh feels alive. Uses the mesh's own normals (runtime transform is translation only,
+        // so mat3(modelMatrix) is the identity → world normal == baked normal).
+        _buildObjWaterMaterial(skyCol) {
+            const vertexShader = [
+                'uniform float uTime;',
+                'varying vec3 vWPos; varying vec3 vN; varying float vH;',
+                '#include <fog_pars_vertex>',
+                'void main(){',
+                '  vec4 wp0 = modelMatrix * vec4(position, 1.0);',
+                '  float t = uTime;',
+                '  float sx = sin(wp0.x*0.18 + t*1.30);',
+                '  float sz = sin(wp0.z*0.15 - t*1.05);',
+                '  float ripple = (sx + sz) * 0.07;',
+                '  vec3 pos = position + vec3(0.0, ripple, 0.0);',
+                '  vec4 wp = modelMatrix * vec4(pos, 1.0);',
+                '  vWPos = wp.xyz; vH = position.y + ripple;',
+                '  vec3 n = normalize(mat3(modelMatrix) * normal);',
+                '  n = normalize(n + vec3(-cos(wp0.x*0.18+t*1.30)*0.18, 0.0, -cos(wp0.z*0.15-t*1.05)*0.15) * 0.07);',
+                '  vN = n;',
+                '  vec4 mvPosition = viewMatrix * vec4(wp.xyz, 1.0);',
+                '  gl_Position = projectionMatrix * mvPosition;',
+                '  #include <fog_vertex>',
+                '}',
+            ].join('\n');
+            return new THREE.ShaderMaterial({
+                uniforms: this._waterUniforms(skyCol), vertexShader, fragmentShader: this._waterFragment(),
+                fog: true, transparent: true, depthWrite: false,
+            });
+        }
+
+        // PBR (Cook-Torrance) water fragment, shared by both water meshes: GGX microfacet sun
+        // specular, Schlick fresnel with water's dielectric F0 (~0.02), energy-conserving diffuse
+        // body, analytic sky-gradient environment reflection (IBL approx) blurred by roughness,
+        // and foam roughening/brightening crests.
+        _waterFragment() {
+            return [
+                'uniform vec3 uDeep; uniform vec3 uShallow; uniform vec3 uFoam;',
+                'uniform vec3 uSunDir; uniform vec3 uSunCol; uniform float uSunInt;',
+                'uniform vec3 uSkyCol; uniform vec3 uSkyTop; uniform float uRoughness; uniform float uOpacity;',
+                'varying vec3 vWPos; varying vec3 vN; varying float vH;',
+                '#include <fog_pars_fragment>',
+                'const float PI = 3.14159265359;',
+                'float D_GGX(float NoH, float a){ float a2=a*a; float d=(NoH*NoH)*(a2-1.0)+1.0; return a2/(PI*d*d); }',
+                'float G_Smith(float NoV, float NoL, float a){ float k=a*a*0.5; float gv=NoV/(NoV*(1.0-k)+k); float gl=NoL/(NoL*(1.0-k)+k); return gv*gl; }',
+                'vec3 F_Schlick(float c, vec3 F0){ return F0 + (1.0-F0)*pow(1.0-c,5.0); }',
+                'vec3 skyEnv(vec3 dir){ float up=clamp(dir.y*0.5+0.5,0.0,1.0); return mix(uSkyCol, uSkyTop, pow(up,0.8)); }',
+                'void main(){',
+                '  vec3 N = normalize(vN);',
+                '  vec3 V = normalize(cameraPosition - vWPos);',
+                '  vec3 L = normalize(uSunDir);',
+                '  vec3 H = normalize(L + V);',
+                '  float NoV = clamp(dot(N,V), 1e-3, 1.0);',
+                '  float NoL = clamp(dot(N,L), 0.0, 1.0);',
+                '  float NoH = clamp(dot(N,H), 0.0, 1.0);',
+                '  float VoH = clamp(dot(V,H), 0.0, 1.0);',
+                '  float foam = smoothstep(0.42, 0.66, vH);',
+                '  float hf = clamp(vH*0.7 + 0.5, 0.0, 1.0);',
+                '  vec3 albedo = mix(mix(uDeep, uShallow, hf), uFoam, foam);',
+                '  float rough = mix(uRoughness, 0.65, foam);',
+                '  float a = max(rough*rough, 0.012);',
+                '  vec3 F0 = vec3(0.02);',
+                '  vec3 sun = uSunCol * uSunInt;',
+                '  float D = D_GGX(NoH, a);',
+                '  float G = G_Smith(NoV, NoL, a);',
+                '  vec3  F = F_Schlick(VoH, F0);',
+                '  vec3 spec = (D * G * F) / max(4.0*NoV*NoL, 1e-3) * NoL;',
+                '  vec3 R = reflect(-V, N);',
+                '  vec3 env = mix(skyEnv(R), mix(uSkyCol, uSkyTop, 0.5), rough*0.6);',
+                '  vec3 Fenv = F_Schlick(NoV, F0);',
+                '  vec3 ambient = mix(uSkyCol, uSkyTop, 0.5);',
+                '  vec3 diffuse = albedo * (0.30*ambient + sun*NoL) * (1.0 - Fenv);',
+                '  vec3 color = diffuse + spec*sun + env*Fenv + uFoam*foam*0.15;',
+                '  float alpha = clamp(mix(uOpacity, 1.0, max(foam, dot(Fenv, vec3(0.3333))*0.6)), 0.0, 1.0);',
+                '  gl_FragColor = vec4(color, alpha);',
+                '  #include <fog_fragment>',
+                '}',
+            ].join('\n');
+        }
+
+        // Advance the ocean: tick its time, keep the mesh centred under the player, and
+        // feed the live sun/sky so the water tracks the day/night cycle. No-op in space
+        // (water is hidden there by _setFlatVisible).
+        _updateWater(dt) {
+            const w = this._water;
+            if (!w || !w.visible || !w.material.uniforms) return;
+            const u = w.material.uniforms;
+            u.uTime.value += (dt || 0.016);
+            const p = this.game.player.position;
+            w.position.x = p.x; w.position.z = p.z;
+            if (this._sun) {
+                u.uSunDir.value.copy(this._sun.position).normalize();
+                u.uSunCol.value.copy(this._sun.color);
+                u.uSunInt.value = this._sun.intensity;
+            }
+            if (this.game.scene.fog) {
+                u.uSkyCol.value.copy(this.game.scene.fog.color);
+                // Zenith = a brighter horizon — gives the env reflection a sky gradient.
+                u.uSkyTop.value.copy(this.game.scene.fog.color).multiplyScalar(1.12);
+            }
+        }
+
+        // Load the baked Water.obj disk (cached) and swap it in for the procedural plane.
+        _loadObjWater(skyCol) {
+            const cached = this.assetCache.get(WATER_GLB);
+            if (cached) { this._applyObjWater(cached, skyCol); return; }
+            if (!this.loader) this.loader = new THREE.GLTFLoader();
+            this.loader.load(WATER_GLB, (gl) => {
+                let geo = null;
+                gl.scene.traverse((o) => { if (o.isMesh && !geo) geo = o.geometry; });
+                if (!geo) return;
+                if (!geo.attributes.normal) geo.computeVertexNormals();
+                geo.computeBoundingBox();
+                this.assetCache.set(WATER_GLB, geo);
+                if (FLAT_SURFACE && this._water) this._applyObjWater(geo, skyCol); // still in a flat world
+            }, undefined, (e) => console.warn('[planet] water glb load failed', e && e.message));
+        }
+
+        // Replace this._water with a mesh built from the baked ocean disk geometry. The GLB
+        // already lies flat (Y-up waves) and is centred, so no rotation/scale is needed — the
+        // disk just follows the player (_updateWater) like the plane did.
+        _applyObjWater(geo, skyCol) {
+            const g = this.game;
+            const mesh = new THREE.Mesh(geo, this._buildObjWaterMaterial(skyCol));
+            mesh.rotation.set(0, 0, 0);
+            const p = g.player.position;
+            mesh.position.set(p.x, BS * 0.5, p.z);
+            mesh.renderOrder = 1;
+            mesh.frustumCulled = false;
+            const old = this._water;
+            if (old) mesh.visible = old.visible; // inherit space-hidden state from _setFlatVisible
+            this._water = mesh;
+            g.scene.add(mesh);
+            if (old) {
+                g.scene.remove(old);
+                if (old.geometry && old.geometry !== geo) old.geometry.dispose(); // keep the shared disk geo
+                if (old.material) old.material.dispose();
+            }
         }
 
         _buildFlatChunk(cx, cz) {
@@ -1400,6 +1609,7 @@
             this._shipVel = this._shipVel || new THREE.Vector3(); this._shipVel.set(0, 0, 0);
             this._shipYaw = g.characterRotation || 0; this._shipPitch = 0.15;
             this._cockpit = false; // start in chase view; V toggles cockpit FPV
+            this._shipRoll = 0; this._camLerp = null;
             this._mouseDX = 0; this._mouseDY = 0;
             g.showMessage && g.showMessage('🚀 Liftoff — hold Space to climb out of the atmosphere', 3000);
         }
@@ -1422,10 +1632,14 @@
         // Ship controller (atmosphere + space). Mouse steers; W/S thrust; Space/Shift up/down.
         _updateFlatFlight(dt) {
             const g = this.game;
-            this._shipYaw -= (this._mouseDX || 0) * 0.0022;
+            const dyaw = -(this._mouseDX || 0) * 0.0022;
+            this._shipYaw += dyaw;
             this._shipPitch -= (this._mouseDY || 0) * 0.0022;
             this._shipPitch = Math.max(-1.35, Math.min(1.35, this._shipPitch));
             this._mouseDX = 0; this._mouseDY = 0;
+            // Bank into turns for flight feel (ship model only; camera stays upright).
+            const rollTarget = Math.max(-0.7, Math.min(0.7, -dyaw * 14));
+            this._shipRoll = (this._shipRoll || 0) + (rollTarget - (this._shipRoll || 0)) * Math.min(1, dt * 6);
             const cy = Math.cos(this._shipYaw), sy = Math.sin(this._shipYaw), cp = Math.cos(this._shipPitch), sp = Math.sin(this._shipPitch);
             const fwd = this._tmpFwd || (this._tmpFwd = new THREE.Vector3());
             fwd.set(sy * cp, sp, cy * cp);
@@ -1445,18 +1659,29 @@
             }
             if (this._ship) {
                 this._ship.position.copy(this._shipPos);
-                this._ship.quaternion.setFromEuler(new THREE.Euler(this._shipPitch, this._shipYaw, 0, 'YXZ'));
+                // -pitch so the nose follows the flight direction (matches cursor-up = nose-up).
+                this._ship.quaternion.setFromEuler(new THREE.Euler(-this._shipPitch, this._shipYaw, this._shipRoll || 0, 'YXZ'));
                 this._ship.visible = !this._cockpit; // hidden in cockpit FPV — the drawn cockpit frames the view
+            }
+            // Engine thruster glow behind the ship, scaled by thrust input.
+            {
+                const amt = (g.keys['KeyW'] ? 1 : 0) + (g.keys['Space'] ? 0.6 : 0);
+                const th = this._ensureThruster(); const h = this._shipHalf || 8;
+                th.position.set(this._shipPos.x - fwd.x * h * 0.95, this._shipPos.y - fwd.y * h * 0.95, this._shipPos.z - fwd.z * h * 0.95);
+                const sc = h * (0.5 + amt * 1.3); th.scale.set(sc, sc, sc);
+                th.material.opacity = 0.28 + amt * 0.55;
+                th.visible = !this._cockpit;
             }
             g.player.position.copy(this._shipPos); // anchor streaming/camera to the ship
             if (!this._space) {
                 this._streamFlat(false);
                 this._updateFlatSky(dt);
+                this._updateWeather(dt); // keep precipitation alive while flying (fades with altitude)
                 this._applyAtmoLayers();
-                // Crossing the top of the atmosphere while CLIMBING → wash to space.
-                if (this._shipPos.y >= ATMO_TOP && this._shipVel.y > 0 && !this._fx) {
-                    this._startFx(this._atmHex(this._activeDef), () => this._enterSpace());
-                }
+                // Crossing the top of the atmosphere while CLIMBING → pop straight into
+                // space (no fade): the sky is already near-black here and the planet is
+                // placed below you, so it reads as breaking out into orbit.
+                if (this._shipPos.y >= ATMO_TOP && this._shipVel.y > 0) this._enterSpace();
             } else {
                 this._updateSpace(dt);
             }
@@ -1508,6 +1733,7 @@
             const g = this.game;
             this._space = true;
             this._setFlatVisible(false);
+            if (this._rain) this._rain.visible = false; // no precipitation in space
             g.scene.fog = null;
             if (g.scene.background && g.scene.background.setHex) g.scene.background.setHex(0x05060d);
             if (this._stars) { this._stars.material.color.setScalar(1); this._stars.visible = true; }
@@ -1516,20 +1742,18 @@
             if (this._altEl) this._altEl.style.display = 'none';
             if (g.camera) { g.camera.far = SPACE_FAR; g.camera.updateProjectionMatrix(); } // see across the system
             this._buildSpacePlanets();
-            const margin = ENTRY_R + SPACE_CUBE * 0.4; // sit clear of the entry shell
+            // Place the ship straight ABOVE the planet you just left (you climbed out along
+            // +Y), keeping your heading + momentum — so you continue up and the planet sits
+            // below/behind you. Look down/back and there it is. No view reset, no fade.
+            const margin = ENTRY_R + SPACE_CUBE * 0.4; // clear of the entry shell
             const depart = (this._spacePlanets || []).find((c) => c.userData.def === this._activeDef);
-            if (depart) {
-                const out = depart.position.clone().normalize(); // outward from the system centre
-                this._shipPos.copy(depart.position).addScaledVector(out, margin);
-                this._shipYaw = Math.atan2(out.x, out.z);
-                this._shipPitch = Math.asin(Math.max(-1, Math.min(1, out.y)));
-            } else {
-                this._shipPos.set(0, 0, -margin); this._shipYaw = 0; this._shipPitch = 0;
-            }
-            this._shipVel.set(0, 0, 0);
+            const base = depart ? depart.position : new THREE.Vector3(0, 0, 0);
+            this._shipPos.set(base.x, base.y + margin, base.z);
+            this._camLerp = null; // snap the chase cam across the teleport (no sweep)
+            // keep this._shipYaw / this._shipPitch / this._shipVel (continuous climb)
             if (this._ship) this._ship.position.copy(this._shipPos);
             g.player.position.copy(this._shipPos);
-            g.showMessage && g.showMessage('🌌 Space — fly toward a planet to enter it', 3500);
+            g.showMessage && g.showMessage('🌌 Orbit — the planet is below you; fly to another to enter it', 3500);
         }
 
         // A planet as seen from space: a rounded cube (the game's identity) coloured with
@@ -1649,32 +1873,45 @@
                 const d = grp.position.distanceTo(this._shipPos);
                 if (d < nd) { nd = d; nearest = grp; }
             }
-            // Pierce the atmosphere shell → wash to the surface (entry hidden in the bloom).
+            // Pierce the atmosphere shell → drop straight onto the surface (no fade), the
+            // mirror of the exit: the planet fills the view, then you're standing on it.
             if (nearest && nd < ENTRY_R) {
-                const def = nearest.userData.def;
                 this._showPrompt('');
-                this._startFx(this._atmHex(def), () => this._beginEntry(def));
+                this._beginEntry(nearest.userData.def);
                 return;
             }
             this._showPrompt('Fly toward a planet to enter it');
+            // Nav readout: nearest planet + distance.
+            const el = this._ensureAltUI();
+            if (el && nearest) {
+                el.style.display = 'block';
+                el.textContent = '→ ' + (nearest.userData.def.name || 'planet') + '  ·  ' + Math.round(nd / 1000) + 'k';
+            }
         }
 
-        // Entry: switch to the destination's flat map (on foot). Wrapped in the atmosphere
-        // wash, so reaching a planet blooms → you're standing on its surface.
+        // Entry (mirror of the climb-out): stay in the ship and drop in at the top of the
+        // atmosphere, nose-down, so you fly DOWN through the layers and land manually —
+        // arriving by descent rather than just spawning on the ground.
         _beginEntry(def) {
             const g = this.game;
             this._clearSpacePlanets();
             this._nearestPlanet = null;
-            this._space = false; this._flying = false;
-            if (g.player.model) g.player.model.visible = true;
-            if (this._altEl) this._altEl.style.display = 'none';
+            this._space = false;
             this._showPrompt('');
-            if (g.camera) { g.camera.far = 21000; g.camera.updateProjectionMatrix(); } // back to surface range
+            if (g.camera) { g.camera.far = 21000; g.camera.updateProjectionMatrix(); } // surface range
             this._teardownFlatScene();
             this._activeDef = def; this._activeKey = def.key; setActivePlanet(def); this._streamed = !!def.streamed;
-            this._buildFlatScene();              // spawns the player on the surface + a ship to leave again
-            g.showMessage && g.showMessage('🪐 ' + (def.name || def.key), 2600);
-            if (g.applyViewModeToPlayerModel) g.applyViewModeToPlayerModel();
+            this._buildFlatScene();              // builds the world (also resets pose) ...
+            this._flying = true;                 // ... but we stay in the ship, diving in
+            if (g.player.model) g.player.model.visible = false;
+            this._shipPos.set(0, ATMO_TOP, 0);   // top of atmosphere (sky already dark, like space)
+            this._shipPitch = -0.6;              // nose down
+            this._shipVel.set(0, -120, 0);       // diving
+            this._camLerp = null;                // snap the chase cam across the teleport
+            if (this._ship) this._ship.position.copy(this._shipPos);
+            g.player.position.copy(this._shipPos);
+            this._streamFlat(true);
+            g.showMessage && g.showMessage('Descending to ' + (def.name || def.key) + ' — fly down to land', 3000);
             this.updateCamera();
             g.scene.updateMatrixWorld(true);
         }
@@ -1711,6 +1948,14 @@
 
         _showCockpit(on) { this._ensureCockpitEl().style.display = on ? 'block' : 'none'; }
 
+        _ensureThruster() {
+            if (this._thruster) return this._thruster;
+            const tex = this._sunGlowTex(['rgba(255,240,200,0.95)', 'rgba(255,150,60,0.5)', 'rgba(255,90,30,0)']);
+            const m = new THREE.SpriteMaterial({ map: tex, color: 0xffd9a0, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
+            const s = new THREE.Sprite(m); s.frustumCulled = false; s.renderOrder = 3;
+            this.game.scene.add(s); this._thruster = s; return s;
+        }
+
         _flatFlightCamera() {
             const g = this.game, cam = g.camera;
             cam.up.set(0, 1, 0);
@@ -1723,11 +1968,25 @@
                 cam.position.set(p.x, eyeY, p.z);
                 cam.lookAt(p.x + fx * 60, eyeY + fy * 60, p.z + fz * 60);
                 this._showCockpit(true);
+                this._camLerp = null; // snap when we switch back to chase
             } else {
                 this._showCockpit(false);
-                const dist = h * 3 + 14;
-                cam.position.set(p.x - fx * dist, p.y - fy * dist + 7, p.z - fz * dist);
-                cam.lookAt(p.x + fx * 10, p.y + fy * 10, p.z + fz * 10);
+                // Isometric-style follow: behind the ship in YAW only, at a fixed high
+                // 3/4 elevation (ignores the ship's pitch) so the view stays stable and
+                // readable — you see the ship + surroundings, not just its tail.
+                const fhx = Math.sin(this._shipYaw), fhz = Math.cos(this._shipYaw);
+                const ELEV = 0.62, back = Math.cos(ELEV), upc = Math.sin(ELEV);
+                const dist = h * 4 + 24;
+                const target = (this._tmpCam || (this._tmpCam = new THREE.Vector3()))
+                    .set(p.x - fhx * dist * back, p.y + dist * upc, p.z - fhz * dist * back);
+                if (this._space) {
+                    cam.position.copy(target); // snap: at space speeds a lagging cam can't keep up
+                } else {
+                    if (!this._camLerp) this._camLerp = target.clone();
+                    this._camLerp.lerp(target, 0.18); // smoothed follow on the surface
+                    cam.position.copy(this._camLerp);
+                }
+                cam.lookAt(p.x, p.y + h * 0.3, p.z);
             }
         }
 
@@ -1822,6 +2081,7 @@
         _flatCamera() {
             const g = this.game, p = g.player.position, cam = g.camera;
             if (this._cockpitEl) this._cockpitEl.style.display = 'none'; // on foot — no cockpit
+            if (this._thruster) this._thruster.visible = false;
             cam.up.set(0, 1, 0);
             const yaw = g.characterRotation || 0;
             const pitch = Math.max(-0.9, Math.min(0.9, g.fpvPitch || 0));
@@ -4019,7 +4279,7 @@
             // Toroidal flat world: ship flight when boarded, otherwise the walker.
             // _tickFx runs every frame (not just while flying) so the entry/exit wash
             // always finishes fading out — otherwise the bloom freezes the screen.
-            if (FLAT_SURFACE) { this._tickFx(dt); if (this._flying) this._updateFlatFlight(dt); else this._updateFlatPlayer(dt); return; }
+            if (FLAT_SURFACE) { this._tickFx(dt); this._updateWater(dt); if (this._flying) this._updateFlatFlight(dt); else this._updateFlatPlayer(dt); return; }
             const p = g.player.position;
             const vel = g.player.velocity;
             const center = this._center;
