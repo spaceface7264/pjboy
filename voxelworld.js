@@ -1091,6 +1091,7 @@
             tpWeapon = built.mesh;
             const VC = getVC();
             if (VC && VC.mirrorWeaponForTpGrip) VC.mirrorWeaponForTpGrip(tpWeapon, built.def);
+            applyTpWeaponGripRest(tpWeapon, built.def);
             tpWeapon.visible = true;
             target.add(tpWeapon);
             if (av) {
@@ -1166,6 +1167,113 @@
             return !!(weaponDef && weaponDef.id === 'pickaxe');
         }
 
+        function isSwordEquipped() {
+            return !!(weaponDef && weaponDef.id === 'sword');
+        }
+
+        const SWORD_SWING_LOCK = 0.62;
+        const SWORD_FP_SWING_VARIANTS = [
+            { dir: 1, phase: { anticEnd: 0.24, strikeEnd: 0.46, strikePeak: 1.35 },
+              pivot: { ry: [0.18, 1.35], rz: [0.52, 1.48], rx: [0.28, 0.55], pz: [0.18, 0.28], py: [0.07, 0.05], px: [0.08, 0.22] },
+              weapon: { x: [0.24, 0.18], y: [0, 0.55], z: [0, 0.38] } },
+            { dir: -1, phase: { anticEnd: 0.22, strikeEnd: 0.44, strikePeak: 1.28 },
+              pivot: { ry: [0.16, 1.28], rz: [0.48, 1.42], rx: [0.24, 0.52], pz: [0.16, 0.26], py: [0.06, 0.04], px: [0.07, 0.2] },
+              weapon: { x: [0.22, 0.16], y: [0, 0.52], z: [0, 0.36] } },
+            { dir: 1, phase: { anticEnd: 0.26, strikeEnd: 0.5, strikePeak: 1.4 },
+              pivot: { ry: [0.1, 0.72], rz: [0.28, 0.95], rx: [0.55, 1.22], pz: [0.24, 0.35], py: [0.1, 0.08], px: [0.04, 0.12] },
+              weapon: { x: [0.35, 0.28], y: [0, 0.32], z: [0, 0.22] } },
+            { dir: 1, phase: { anticEnd: 0.2, strikeEnd: 0.42, strikePeak: 1.2 },
+              pivot: { ry: [0.08, 0.42], rz: [0.18, 0.38], rx: [0.18, 0.68], pz: [0.22, 0.52], py: [0.04, 0.02], px: [0, 0.06] },
+              weapon: { x: [0.12, 0.42], y: [0, 0.25], z: [0, 0.15] } }
+        ];
+        let swordSwingLock = 0;
+        let swordSwingVariant = 0;
+        let swordSwingNext = 0;
+
+        function swordSwingVariantCount() {
+            const VC = getVC();
+            return (VC && VC.SWORD_SWING_COUNT) || SWORD_FP_SWING_VARIANTS.length;
+        }
+
+        function currentFpSwordSwing() {
+            const n = SWORD_FP_SWING_VARIANTS.length;
+            const i = ((swordSwingVariant % n) + n) % n;
+            return SWORD_FP_SWING_VARIANTS[i];
+        }
+
+        function canStartSwordSwing() {
+            return swordSwingLock <= 0;
+        }
+
+        function beginSwordSwing() {
+            swordSwingVariant = swordSwingNext;
+            swordSwingNext = (swordSwingNext + 1) % swordSwingVariantCount();
+            swordSwingLock = SWORD_SWING_LOCK;
+            const fpVar = currentFpSwordSwing();
+            fpSwingDir = fpVar.dir || 1;
+            if (av && av.anim) av.anim.swordSwingVariant = swordSwingVariant;
+        }
+
+        function tickSwordSwingLock(dt) {
+            if (swordSwingLock > 0) swordSwingLock -= dt;
+        }
+
+        function applyFpSwordSwingPivot(t, k, out) {
+            const v = currentFpSwordSwing();
+            const { antic, strike } = meleeSwingPhase(t, v.phase);
+            const dir = v.dir || 1;
+            const p = v.pivot;
+            out.ry += (-antic * p.ry[0] + strike * p.ry[1]) * dir * k;
+            out.rz += (-antic * p.rz[0] - strike * p.rz[1]) * dir * k;
+            out.rx += (-antic * p.rx[0] + strike * p.rx[1]) * k;
+            out.pz += (-strike * p.pz[1] + antic * p.pz[0]) * k;
+            out.py += (antic * p.py[0] - strike * p.py[1]) * k;
+            out.px += (strike * p.px[1] - antic * p.px[0]) * dir * k;
+        }
+
+        function applyFpSwordSwingWeapon(t) {
+            const v = currentFpSwordSwing();
+            const { antic, strike } = meleeSwingPhase(t, v.phase);
+            const dir = fpSwingDir || v.dir || 1;
+            const w = v.weapon;
+            const base = fpWeapon.userData.fpBaseRot;
+            if (!base) return;
+            fpWeapon.rotation.x = (base.x || base[0] || 0) - antic * w.x[0] + strike * w.x[1];
+            fpWeapon.rotation.y = (base.y || base[1] || 0) + strike * w.y[1] * dir;
+            fpWeapon.rotation.z = (base.z || base[2] || 0) - strike * w.z[1] * dir;
+        }
+
+        function meleeSwingPhase(t, profile) {
+            const A = profile.anticEnd ?? 0.22;
+            const S = profile.strikeEnd ?? 0.48;
+            const peak = profile.strikePeak ?? 1.15;
+            let antic = 0, strike = 0, recover = 0;
+            if (t < A) {
+                antic = Math.sin((t / A) * Math.PI / 2);
+            } else if (t < S) {
+                const u = (t - A) / (S - A);
+                strike = u * u * peak;
+                antic = 1 - u;
+            } else {
+                const u = (t - S) / (1 - S);
+                recover = 1 - (1 - u) * (1 - u);
+                strike = (1 - recover) * peak;
+            }
+            return { antic, strike, recover };
+        }
+
+        function applyLegacySwordSwingPose(tgt, k) {
+            const ph = meleeSwingPhase(k, { anticEnd: 0.26, strikeEnd: 0.5, strikePeak: 1.28 });
+            const { antic, strike } = ph;
+            tgt.torsoRY = (tgt.torsoRY || 0) + (-antic * 0.62 + strike * 0.95);
+            tgt.shRz = (tgt.shRz || 0) + (-antic * 0.82 + strike * 1.22);
+            tgt.shRx = -0.28 - antic * 1.25 + strike * 1.65;
+            tgt.elR = 0.28 + antic * 0.52 + strike * 0.78;
+            tgt.torsoRX = (tgt.torsoRX || 0) + (-antic * 0.18 + strike * 0.14);
+            tgt.headRY = (tgt.headRY || 0) + (-antic * 0.24 + strike * 0.34);
+            tgt.hipRz = (tgt.hipRz || 0) + (-antic * 0.08 + strike * 0.14);
+        }
+
         function isMiningTool() {
             return isPickaxe() || isMineLaser();
         }
@@ -1203,7 +1311,7 @@
             if (fireHeld && isMineLaser() && !voxelPanelOpen()) {
                 return 0.82 + 0.18 * Math.sin(elapsed * 28);
             }
-            if (fpSwingTimer > 0) return Math.max(0, 1 - fpSwingTimer / fpSwingDuration);
+            if (fpSwingTimer > 0) return Math.max(0, 1 - fpSwingTimer / fpSwingDurationActive);
             if (tpRecoilT >= 0) return Math.max(0, 1 - tpRecoilT / TP_RECOIL_DUR);
             const atkT = (av && av.anim && av.anim.attackT >= 0) ? av.anim.attackT : attackT;
             if (atkT >= 0) {
@@ -1307,6 +1415,7 @@
             weaponDef = ch.weaponDef || null;
             tpWeapon = ch.weapon || null;
             tpGrip = ch.weaponGrip || (ch.weapon && ch.weapon.parent ? ch.weapon.parent : null);
+            if (tpWeapon && weaponDef) applyTpWeaponGripRest(tpWeapon, weaponDef);
             ch.group.visible = !firstPerson;
             if (!ch.group.parent) scene.add(ch.group);
             return ch;
@@ -1383,7 +1492,7 @@
         }
         
         // ---------- pose system (extracted essentials from the creator) ----------
-        const KEYS=['rootY','torsoRX','headRX','headRY','shLx','shLz','elL','shRx','shRz','elR',
+        const KEYS=['rootY','torsoRX','torsoRY','headRX','headRY','shLx','shLz','elL','shRx','shRz','elR',
           'hipLx','kneeL','hipRx','kneeR'];
         const cur={}; KEYS.forEach(k=>cur[k]=0);
         let attackT=-1;
@@ -1413,9 +1522,24 @@
           POSES[state](t,tgt);
           // Third-person melee swing — FP uses the dedicated viewmodel swing.
           if(!firstPerson && attackT>=0){
-            attackT+=dt; const d=.42,k=Math.min(attackT/d,1);
-            if(k<.35){ const w=k/.35; tgt.shRx=-2.4*w; tgt.elR=.3; tgt.torsoRX=(tgt.torsoRX||0)-.15*w; }
-            else { const w=(k-.35)/.65; tgt.shRx=-2.4+3.1*w; tgt.elR=.3+.3*w; tgt.torsoRX=(tgt.torsoRX||0)+.3*w; }
+            attackT+=dt;
+            const d = isSwordEquipped() ? 0.52 : 0.42;
+            const k = Math.min(attackT / d, 1);
+            if (isSwordEquipped()) {
+              const VC = getVC();
+              const k = Math.min(attackT / d, 1);
+              if (VC && VC.applySwordAttackPose) {
+                VC.applySwordAttackPose(tgt, k, swordSwingVariant);
+              } else {
+                applyLegacySwordSwingPose(tgt, k);
+              }
+            } else if (k < .35) {
+              const w = k / .35;
+              tgt.shRx = -2.4 * w; tgt.elR = .3; tgt.torsoRX = (tgt.torsoRX || 0) - .15 * w;
+            } else {
+              const w = (k - .35) / .65;
+              tgt.shRx = -2.4 + 3.1 * w; tgt.elR = .3 + .3 * w; tgt.torsoRX = (tgt.torsoRX || 0) + .3 * w;
+            }
             if(attackT>=d) attackT=-1;
           }
           // Third-person ranged recoil — short shoulder kick, not a melee wind-up.
@@ -1433,6 +1557,7 @@
           KEYS.forEach(k=>cur[k]+=(tgt[k]-cur[k])*a);
           j.hips.position.y=.92+cur.rootY;
           j.torso.rotation.x=cur.torsoRX;
+          j.torso.rotation.y=cur.torsoRY||0;
           j.neck.rotation.x=cur.headRX; j.neck.rotation.y=cur.headRY;
           j.shL.rotation.x=cur.shLx; j.shL.rotation.z=cur.shLz; j.elL.rotation.x=-Math.abs(cur.elL);
           j.shR.rotation.x=cur.shRx; j.shR.rotation.z=cur.shRz; j.elR.rotation.x=-Math.abs(cur.elR);
@@ -1579,7 +1704,7 @@
         function defaultWeaponTunes() {
             return {
                 pickaxe: { wx: -0.23, wy: -0.19, wz: -0.16, wrx: 1.39, wry: -3.14, wrz: 0.13, meleeRot: true },
-                sword:   { wx: -0.11, wy: 0.01,  wz: -0.37, wrx: 1.37, wry: -3.14, wrz: 0.09, meleeRot: true },
+                sword:   { wx: -0.08, wy: -0.04, wz: -0.18, wrx: 0.92, wry: -2.75, wrz: -0.24, meleeRot: true },
                 wrench:  { wx: -0.15, wy: -0.11, wz: -0.12, wrx: 1.33, wry: 0,     wrz: 0,    meleeRot: true },
                 blaster: { wx: -0.09, wy: -0.05, wz: -0.2,  wrx: 0.22, wry: -0.05, wrz: -0.04, meleeRot: true },
                 laser:   { wx: -0.08, wy: -0.12, wz: -0.18, wrx: 0.2,  wry: 0.02,  wrz: 0.03,  meleeRot: true },
@@ -1666,11 +1791,19 @@
                 const base = defaultFpTune();
                 const cam = Object.assign({}, base.cam, saved.cam || {});
                 if (typeof cam.theta === 'number') cam.theta = wrapAngleRad(cam.theta);
+                const weapons = Object.assign({}, base.weapons, saved.weapons || {});
+                const swordSaved = weapons.sword;
+                if (swordSaved && typeof swordSaved.wrx === 'number' && swordSaved.wrx > 1.15) {
+                    Object.assign(swordSaved, {
+                        wx: base.weapons.sword.wx, wy: base.weapons.sword.wy, wz: base.weapons.sword.wz,
+                        wrx: base.weapons.sword.wrx, wry: base.weapons.sword.wry, wrz: base.weapons.sword.wrz
+                    });
+                }
                 return {
                     dismissed: !!saved.dismissed,
                     cam,
                     global: Object.assign({}, base.global, saved.global || {}),
-                    weapons: Object.assign({}, base.weapons, saved.weapons || {}),
+                    weapons,
                     weaponStats: mergeWeaponStats(saved.weaponStats)
                 };
             } catch (e) {
@@ -1743,6 +1876,7 @@
         }
         let fpSwingTimer = 0;
         const fpSwingDuration = 0.32;
+        let fpSwingDurationActive = fpSwingDuration;
         const FP_RANGED_RECOIL_STRENGTH = 0.05;
         let fpSwingDir = 1;
         let elapsed = 0;
@@ -3290,8 +3424,9 @@
           }
         }
         function triggerFpSwing() {
-            fpSwingTimer = fpSwingDuration;
-            fpSwingDir = -(fpSwingDir || 1);
+            fpSwingDurationActive = isSwordEquipped() ? 0.42 : fpSwingDuration;
+            fpSwingTimer = fpSwingDurationActive;
+            if (!isSwordEquipped()) fpSwingDir = -(fpSwingDir || 1);
         }
 
         function triggerLaserPulse() {
@@ -3315,6 +3450,8 @@
         }
 
         function triggerCombatAnim() {
+            if (isSwordEquipped() && !canStartSwordSwing()) return;
+            if (isSwordEquipped()) beginSwordSwing();
             if (firstPerson) triggerFpSwing();
             if (!firstPerson) {
                 if (av && av.anim) {
@@ -3392,6 +3529,7 @@
 
         function fireCombat() {
             if (!weaponDef) return;
+            if (isSwordEquipped() && !canStartSwordSwing()) return;
             const t = pickTarget();
             const hasBlock = !!(t && getBlock(t.x, t.y, t.z));
             triggerCombatAnim();
@@ -3755,6 +3893,54 @@
         let tpTunerEl = null;
         const TP_TUNE_KEY = 'pjboy.voxelTpTune.v1';
 
+        const TP_TUNER_WEAPON = [
+            ['wx', 'Grip X', -0.35, 0.35, 0.01],
+            ['wy', 'Grip Y', -0.35, 0.35, 0.01],
+            ['wz', 'Grip Z', -0.2, 0.35, 0.01],
+            ['wrx', 'Wpn pitch', -3.14, 3.14, 0.01],
+            ['wry', 'Wpn yaw', -3.14, 3.14, 0.01],
+            ['wrz', 'Wpn roll', -3.14, 3.14, 0.01]
+        ];
+
+        function defaultTpWeaponTunes() {
+            const VC = getVC();
+            const out = {};
+            if (!VC || !VC.tpWeaponGripRest) return out;
+            weaponList().forEach((w) => {
+                const r = VC.tpWeaponGripRest(w);
+                out[w.id] = { wx: r.px, wy: r.py, wz: r.pz, wrx: r.x, wry: r.y, wrz: r.z };
+            });
+            return out;
+        }
+
+        function tpWeaponTuneFor(id) {
+            if (!tpTune) tpTune = loadTpTune();
+            const defs = defaultTpWeaponTunes();
+            if (!tpTune.weapons) tpTune.weapons = Object.assign({}, defs);
+            if (!tpTune.weapons[id]) tpTune.weapons[id] = Object.assign({}, defs[id] || defs.sword || defs.blaster);
+            return tpTune.weapons[id];
+        }
+
+        function tpWeaponRestFromTune(def) {
+            const t = tpWeaponTuneFor(def.id);
+            return {
+                x: t.wrx, y: t.wry, z: t.wrz,
+                px: t.wx, py: t.wy, pz: t.wz
+            };
+        }
+
+        function applyTpWeaponGripRest(mesh, def) {
+            if (!mesh || !def) return;
+            const rest = tpWeaponRestFromTune(def);
+            mesh.rotation.set(rest.x, rest.y, rest.z);
+            mesh.position.set(rest.px, rest.py, rest.pz);
+            mesh.scale.set(1, 1, 1);
+            mesh.userData.restRotation = { x: rest.x, y: rest.y, z: rest.z };
+            mesh.userData.restPosition = { x: rest.px, y: rest.py, z: rest.pz };
+            delete mesh.userData.restMuzzleDirGrip;
+            delete mesh.userData.restQuat;
+        }
+
         function defaultTpTune() {
             return {
                 dismissed: true,
@@ -3775,7 +3961,8 @@
                     adsShoulder: 0.38,
                     adsFov: 49,
                     adsYaw: 0
-                }
+                },
+                weapons: defaultTpWeaponTunes()
             };
         }
 
@@ -3791,7 +3978,8 @@
                 if (typeof cam.pitchMin === 'number' && cam.pitchMin > 0.45) cam.pitchMin = 0.22;
                 return {
                     dismissed: !!saved.dismissed,
-                    cam
+                    cam,
+                    weapons: Object.assign({}, defaultTpWeaponTunes(), saved.weapons || {})
                 };
             } catch (e) {
                 return defaultTpTune();
@@ -3859,6 +4047,14 @@
             const title = tpTunerEl.querySelector('[data-tp-tune-weapon]');
             if (title) title.textContent = weaponDef ? weaponDef.name : '—';
             syncWeaponStatInputs(tpTunerEl);
+            const wid = weaponDef ? weaponDef.id : 'sword';
+            const w = tpWeaponTuneFor(wid);
+            TP_TUNER_WEAPON.forEach(([key]) => {
+                const input = tpTunerEl.querySelector(`[data-tp-w="${key}"]`);
+                const out = tpTunerEl.querySelector(`[data-tp-wv="${key}"]`);
+                if (input) input.value = w[key];
+                if (out) out.textContent = fmtTpVal(key, w[key]);
+            });
             const c = getTpCam();
             [['theta', orbit.theta], ['phi', orbit.phi], ['dist', orbit.dist]].forEach(([key, val]) => {
                 const input = tpTunerEl.querySelector(`[data-tp-c="${key}"]`);
@@ -3875,7 +4071,8 @@
         }
 
         function fmtTpVal(key, val) {
-            if (key === 'theta' || key === 'phi' || key === 'pitchMin' || key === 'pitchMax' || key === 'adsYaw') {
+            if (key === 'theta' || key === 'phi' || key === 'pitchMin' || key === 'pitchMax' || key === 'adsYaw'
+                || key === 'wrx' || key === 'wry' || key === 'wrz') {
                 return (val * 180 / Math.PI).toFixed(0) + '°';
             }
             if (key === 'orbitSens') return (+val).toFixed(4);
@@ -3885,6 +4082,16 @@
 
         function onTpTunerInput(e) {
             if (onWeaponStatInput(e)) return;
+            const wKey = e.target.dataset.tpW;
+            if (wKey) {
+                const w = tpWeaponTuneFor(weaponDef ? weaponDef.id : 'sword');
+                const val = parseFloat(e.target.value);
+                w[wKey] = val;
+                if (tpWeapon && weaponDef) applyTpWeaponGripRest(tpWeapon, weaponDef);
+                const out = tpTunerEl.querySelector(`[data-tp-wv="${wKey}"]`);
+                if (out) out.textContent = fmtTpVal(wKey, val);
+                return;
+            }
             const key = e.target.dataset.tpC;
             if (!key) return;
             const c = getTpCam();
@@ -3918,6 +4125,16 @@
                 </label>`;
             }
 
+            function weaponSliderRow(key, label, min, max, step) {
+                const id = `tp-tune-w-${key}`;
+                return `<label class="vx-fp-row" for="${id}">
+                    <span class="vx-fp-lbl">${label}</span>
+                    <span class="vx-tp-val" data-tp-wv="${key}">—</span>
+                    <input type="range" id="${id}" data-tp-w="${key}"
+                        min="${min}" max="${max}" step="${step}">
+                </label>`;
+            }
+
             function section(title, rows) {
                 let h = `<div class="vx-fp-section"><b>${title}</b>`;
                 rows.forEach(([key, label, min, max, step]) => {
@@ -3930,15 +4147,21 @@
                 <h4>TP camera tuner</h4>
                 <span class="vx-fp-weapon" data-tp-tune-weapon>—</span>
             </div>
-            <p class="vx-fp-hint">Camera + weapon power/range (Q/E). <b>F8</b> in 3rd person.</p>`;
+            <p class="vx-fp-hint">Camera, TP weapon grip (Q/E), power &amp; range. <b>F8</b> in 3rd person.</p>`;
             html += weaponStatsSectionHtml();
+            html += `<div class="vx-fp-section"><b>TP weapon grip rest</b>`;
+            TP_TUNER_WEAPON.forEach(([key, label, min, max, step]) => {
+                html += weaponSliderRow(key, label, min, max, step);
+            });
+            html += `</div>`;
             html += section('Orbit angle', TP_TUNER_ORBIT);
             html += section('Shoulder &amp; lens', TP_TUNER_CAM);
             html += section('Limits', TP_TUNER_LIMITS);
             html += section('ADS (Shift aim)', TP_TUNER_ADS);
             html += `<div class="vx-fp-actions">
                 <button type="button" class="vx-btn" data-tp-save>Save &amp; close</button>
-                <button type="button" class="vx-btn" data-tp-reset>Reset defaults</button>
+                <button type="button" class="vx-btn" data-tp-reset-wpn>Reset weapon grip</button>
+                <button type="button" class="vx-btn" data-tp-reset>Reset camera</button>
             </div>`;
             el.innerHTML = html;
             overlay.appendChild(el);
@@ -3952,8 +4175,17 @@
                 el.hidden = true;
                 if (g.showMessage) g.showMessage('Camera & weapon stats saved (F8 to tweak again)', 2800);
             });
+            el.querySelector('[data-tp-reset-wpn]').addEventListener('click', () => {
+                const id = weaponDef ? weaponDef.id : 'sword';
+                const defs = defaultTpWeaponTunes();
+                tpTune.weapons[id] = Object.assign({}, defs[id] || defs.sword);
+                syncTpTunerInputs();
+                if (tpWeapon && weaponDef) applyTpWeaponGripRest(tpWeapon, weaponDef);
+            });
             el.querySelector('[data-tp-reset]').addEventListener('click', () => {
+                const weapons = tpTune.weapons;
                 tpTune = defaultTpTune();
+                tpTune.weapons = weapons;
                 tpTune.dismissed = false;
                 applyTpTuneToOrbit();
                 syncTpTunerInputs();
@@ -4209,34 +4441,49 @@
             }
 
             if (fpSwingTimer > 0) {
-                const t = 1 - (fpSwingTimer / fpSwingDuration);
+                const t = 1 - (fpSwingTimer / fpSwingDurationActive);
                 const dir = fpSwingDir || 1;
-                const A = 0.18, S = 0.52;
-                let antic = 0, strike = 0, recover = 0;
-                if (t < A) {
-                    antic = Math.sin((t / A) * Math.PI / 2);
-                } else if (t < S) {
-                    const u = (t - A) / (S - A);
-                    strike = u * u * 1.2;
-                    antic = 1 - u;
-                } else {
-                    const u = (t - S) / (1 - S);
-                    recover = 1 - (1 - u) * (1 - u);
-                    strike = (1 - recover) * 1.2;
-                }
                 const k = fpRecoilStrength();
-                rx += (-antic * 0.4 + strike * 1.15) * k;
-                ry += strike * 0.16 * dir * k;
-                rz += (-strike * 1.35 - antic * 0.22) * dir * k;
-                pz += (-strike * 0.22 + antic * 0.08) * k;
-                py += (antic * 0.11 - strike * 0.15) * k;
-                px += (strike * 0.1 - antic * 0.04) * dir * k;
+                if (isSwordEquipped()) {
+                    const swing = { ry: 0, rz: 0, rx: 0, pz: 0, py: 0, px: 0 };
+                    applyFpSwordSwingPivot(t, k, swing);
+                    ry += swing.ry;
+                    rz += swing.rz;
+                    rx += swing.rx;
+                    pz += swing.pz;
+                    py += swing.py;
+                    px += swing.px;
+                } else {
+                    const A = 0.18, S = 0.52;
+                    let antic = 0, strike = 0, recover = 0;
+                    if (t < A) {
+                        antic = Math.sin((t / A) * Math.PI / 2);
+                    } else if (t < S) {
+                        const u = (t - A) / (S - A);
+                        strike = u * u * 1.2;
+                        antic = 1 - u;
+                    } else {
+                        const u = (t - S) / (1 - S);
+                        recover = 1 - (1 - u) * (1 - u);
+                        strike = (1 - recover) * 1.2;
+                    }
+                    rx += (-antic * 0.4 + strike * 1.15) * k;
+                    ry += strike * 0.16 * dir * k;
+                    rz += (-strike * 1.35 - antic * 0.22) * dir * k;
+                    pz += (-strike * 0.22 + antic * 0.08) * k;
+                    py += (antic * 0.11 - strike * 0.15) * k;
+                    px += (strike * 0.1 - antic * 0.04) * dir * k;
+                }
             }
 
             fpPivot.position.set(px, py, pz);
             fpPivot.rotation.set(rx, ry, rz);
             applyFpMountPose();
             applyFpWeaponGripRest();
+            if (fpWeapon && isSwordEquipped() && fpSwingTimer > 0) {
+                const t = 1 - (fpSwingTimer / fpSwingDurationActive);
+                applyFpSwordSwingWeapon(t);
+            }
         }
 
         function mineBlock() {
@@ -5106,6 +5353,7 @@
                 }
             }
             updateFpViewmodel(dt, sp);
+            tickSwordSwingLock(dt);
             updateLaserHoldFire(dt);
             updateMiningHold(dt);
             updateWeaponFx();
@@ -5447,6 +5695,7 @@
             fpTune = loadFpTune();
             tpTune = loadTpTune();
             aimTune = loadAimTune();
+            if (tpWeapon && weaponDef) applyTpWeaponGripRest(tpWeapon, weaponDef);
             applyFpCamToOrbit();
             applyTpTuneToOrbit();
             ensureFpViewmodel();

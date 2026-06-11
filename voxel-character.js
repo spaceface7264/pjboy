@@ -172,11 +172,11 @@ function buildWeapon(def, accent){
     const arr=[];
     for(let i=0;i<n;i++){ const m=box(size,size,size,glow(color)); m.visible=false; g.add(m); arr.push({m,t:-1,v:new THREE.Vector3()}); }
     return {
-      spawn(px,py,pz,vx,vy,vz){ const p=arr.find(p=>p.t<0)||arr[0]; p.t=0; p.m.visible=true; p.m.position.set(px,py,pz); p.v.set(vx,vy,vz); },
+      spawn(px,py,pz,vx,vy,vz){ const p=arr.find(p=>p.t<0)||arr[0]; p.t=0; p.m.visible=true; p.m.position.set(px,py,pz); p.v.set(vx,vy,vz); p.m.scale.setScalar(1); },
       step(d,life,grav=0){ arr.forEach(p=>{ if(p.t<0) return; p.t+=d;
-        if(p.t>life){ p.t=-1; p.m.visible=false; return; }
+        if(p.t>life){ p.t=-1; p.m.visible=false; p.m.scale.setScalar(1); return; }
         p.v.y -= grav*d; p.m.position.addScaledVector(p.v,d);
-        const s=1-(p.t/life); p.m.scale.set(s,s,s); }); }
+        const s=(1-(p.t/life))*.65; p.m.scale.set(s,s,s); }); }
     };
   }
 
@@ -246,22 +246,36 @@ function buildWeapon(def, accent){
     const blade = box(.05,.56,.1,bladeM); blade.position.y=.56; g.add(blade);
     const core  = box(.02,.56,.05,glow(0xffffff)); core.position.set(0,.56,.035); g.add(core);
     const tip   = box(.04,.09,.07,glow(0xff8ae4)); tip.position.y=.87; g.add(tip);
-    const motes=[]; for(let i=0;i<4;i++){ const m=box(.025,.025,.025,glow(0xffb8ec)); g.add(m); motes.push(m); }
-    // swing trail: ghost blades fanning behind on attack
-    const trail=[]; for(let i=0;i<3;i++){ const tb=box(.02,.56,.08,glow(0xff8ae4)); tb.position.y=.56; tb.visible=false; g.add(tb); trail.push(tb); }
-    const crackle = pool(3,0xffffff,.02);
+    const motes=[]; for(let i=0;i<3;i++){ const m=box(.018,.018,.018,glow(0xffb8ec)); g.add(m); motes.push(m); }
+    const trail=[]; for(let i=0;i<2;i++){
+      const tb=box(.015,.48,.06,glow(0xff8ae4)); tb.position.y=.56; tb.visible=false; g.add(tb); trail.push(tb); }
+    const crackle = pool(3,0xfff0fc,.011);
     g.userData.animate = (t,f)=>{ const d=dtOf(t);
-      pomGem.rotation.y = t*2; pomGem.rotation.x = t*1.3;
-      blade.scale.x = 1 + .07*Math.sin(t*17) + f*.7;
-      blade.scale.z = 1 + .05*Math.sin(t*23) + f*.7;
-      bladeM.color.setHex(f>0? 0xffd0f2 : 0xff5ad2);
-      ventMs.forEach(vm=>vm.color.setHex(f>0? 0xff5ad2 : 0x7a3068));
+      const swing = THREE.MathUtils.clamp(f, 0, 1);
+      pomGem.rotation.y = t * 2 + swing * 0.35;
+      pomGem.rotation.x = t * 1.3;
+      blade.scale.x = 1 + .05 * Math.sin(t * 17) + swing * .12;
+      blade.scale.z = 1 + .04 * Math.sin(t * 23) + swing * .1;
+      blade.scale.y = 1;
+      bladeM.color.setHex(swing > 0.12 ? 0xffd0f2 : 0xff5ad2);
+      ventMs.forEach(vm => vm.color.setHex(swing > 0.08 ? 0xff5ad2 : 0x7a3068));
       motes.forEach((m,i)=>{ const k=(t*.45+i*.27)%1;
-        m.position.set(.05*Math.sin(t*3+i*2), .3+k*.55, .07*Math.cos(t*2.6+i));
-        m.scale.setScalar(1-k*.7); });
-      trail.forEach((tb,i)=>{ tb.visible=f>0; if(f>0){ tb.rotation.x=-(i+1)*.18; tb.scale.x=1-(i+1)*.2; } });
-      if(Math.random()<.04+f*.3) crackle.spawn((Math.random()-.5)*.06, .3+Math.random()*.5, .06, (Math.random()-.5)*.5, .3, .4);
-      crackle.step(d,.25);
+        m.position.set(.04*Math.sin(t*3+i*2), .34+k*.42, .05*Math.cos(t*2.6+i));
+        m.scale.setScalar((1-k*.75)*.85); });
+      trail.forEach((tb,i)=>{
+        tb.visible = swing > 0.14;
+        if (tb.visible) {
+          const s = (1 - (i + 1) * .28) * (0.22 + swing * .18);
+          tb.rotation.x = -(i + 1) * .18 - swing * .32;
+          tb.rotation.z = (i % 2 ? 1 : -1) * swing * .12;
+          tb.scale.set(s, s * .92, s);
+          tb.material.opacity = 0.12 + swing * 0.38;
+        }
+      });
+      if (Math.random() < .015 + swing * .1) {
+        crackle.spawn((Math.random()-.5)*.04, .38+Math.random()*.34, .04, (Math.random()-.5)*.25, .15, .2);
+      }
+      crackle.step(d,.16);
       prevF=f;
     };
     socket.position.set(0, 0.2, 0.05);
@@ -474,7 +488,7 @@ function buildWeapon(def, accent){
   // grip orientation: melee modeled along +Y gets tipped into the hand; ranged along +Z
   if(type==='pickaxe'){ g.rotation.x=1.45; g.rotation.z=.08; g.position.set(0,-.03,.06); }
   else if(type==='wrench'){ g.rotation.x=1.3; g.position.set(0,-.03,.05); }
-  else if(type==='sword'){ g.rotation.x=1.1; g.position.set(0,-.03,.05); }
+  else if(type==='sword'){ g.rotation.x=Math.PI/2; g.rotation.z=-0.24; g.position.set(0,-.02,.1); }
   else { g.rotation.x=-.05; g.position.set(0,-.03,.05); }
   return g;
 }
@@ -485,7 +499,7 @@ function tpWeaponGripRest(def) {
   const fy = Math.PI;
   if (id === 'pickaxe') return { x: 1.45, y: fy, z: 0.08, px: 0, py: -0.03, pz: 0.06 };
   if (id === 'wrench') return { x: 1.3, y: fy, z: 0, px: 0, py: -0.03, pz: 0.05 };
-  if (id === 'sword') return { x: 1.1, y: fy, z: 0, px: 0, py: -0.03, pz: 0.05 };
+  if (id === 'sword') return { x: Math.PI / 2, y: fy, z: -0.24, px: 0.02, py: -0.02, pz: 0.12 };
   if (id === 'plasma') return { x: -0.05, y: fy, z: 0.04, px: 0, py: -0.03, pz: 0.04 };
   if (id === 'minecutter') return { x: -0.05, y: fy, z: 0.05, px: 0, py: -0.03, pz: 0.04 };
   if (id === 'railgun') return { x: -0.02, y: fy, z: -0.02, px: 0, py: -0.04, pz: 0.04 };
@@ -495,7 +509,7 @@ function tpWeaponGripRest(def) {
   return { x: 1.35, y: fy, z: 0, px: 0, py: -0.03, pz: 0.05 };
 }
 
-const TP_WEAPON_REST_V = 4;
+const TP_WEAPON_REST_V = 5;
 
 // Rig primary grip is -X local (world-right in play). Y-flip only — no scale mirror (breaks aim axes).
 function mirrorWeaponForTpGrip(mesh, def) {
@@ -578,6 +592,126 @@ function alignWeaponToAim(char, worldDir, strength) {
   _qDelta.setFromUnitVectors(restDir, _aimLocal);
   _qAim.copy(_qDelta).multiply(restQuat);
   w.quaternion.slerp(_qAim, s);
+}
+
+function meleeSwingPhase(t, profile) {
+  const A = profile.anticEnd ?? 0.22;
+  const S = profile.strikeEnd ?? 0.48;
+  const peak = profile.strikePeak ?? 1.15;
+  let antic = 0, strike = 0, recover = 0;
+  if (t < A) {
+    antic = Math.sin((t / A) * Math.PI / 2);
+  } else if (t < S) {
+    const u = (t - A) / (S - A);
+    strike = u * u * peak;
+    antic = 1 - u;
+  } else {
+    const u = (t - S) / (1 - S);
+    recover = 1 - (1 - u) * (1 - u);
+    strike = (1 - recover) * peak;
+  }
+  return { antic, strike, recover };
+}
+
+const SWORD_SWING_DURATION = 0.52;
+
+const SWORD_SWING_VARIANTS = [
+  {
+    id: 'slash_r',
+    phase: { anticEnd: 0.26, strikeEnd: 0.5, strikePeak: 1.28 },
+    apply(tgt, ph) {
+      const { antic, strike } = ph;
+      tgt.torsoRY = (tgt.torsoRY || 0) + (-antic * 0.62 + strike * 0.95);
+      tgt.torsoRX = (tgt.torsoRX || 0) + (-antic * 0.18 + strike * 0.14);
+      tgt.headRY = (tgt.headRY || 0) + (-antic * 0.24 + strike * 0.34);
+      tgt.headRX = (tgt.headRX || 0) + (-antic * 0.1 + strike * 0.16);
+      tgt.shRz = (tgt.shRz || 0) + (-antic * 0.82 + strike * 1.22);
+      tgt.shRx = -0.28 - antic * 1.25 + strike * 1.65;
+      tgt.elR = 0.28 + antic * 0.52 + strike * 0.78;
+      tgt.shLx = -0.4 - antic * 0.28 + strike * 0.12;
+      tgt.shLz = -0.18 - antic * 0.22;
+      tgt.elL = 0.68 + strike * 0.18;
+      tgt.hipRx = (tgt.hipRx || 0) + strike * 0.12;
+      tgt.hipRz = (tgt.hipRz || 0) + (-antic * 0.08 + strike * 0.14);
+      tgt.rootY = (tgt.rootY || 0) + (-strike * 0.04 + antic * 0.02);
+    }
+  },
+  {
+    id: 'slash_l',
+    phase: { anticEnd: 0.24, strikeEnd: 0.48, strikePeak: 1.22 },
+    apply(tgt, ph) {
+      const { antic, strike } = ph;
+      tgt.torsoRY = (tgt.torsoRY || 0) + (antic * 0.55 - strike * 0.88);
+      tgt.torsoRX = (tgt.torsoRX || 0) + (-antic * 0.12 + strike * 0.18);
+      tgt.headRY = (tgt.headRY || 0) + (antic * 0.2 - strike * 0.28);
+      tgt.shRz = (tgt.shRz || 0) + (antic * 0.75 - strike * 1.05);
+      tgt.shRx = -0.22 - antic * 0.95 + strike * 1.45;
+      tgt.elR = 0.35 + antic * 0.38 + strike * 0.65;
+      tgt.shLx = -0.55 - antic * 0.35 + strike * 0.28;
+      tgt.shLz = -0.28 + antic * 0.18;
+      tgt.elL = 0.75 + strike * 0.22;
+      tgt.hipLx = (tgt.hipLx || 0) + strike * 0.08;
+      tgt.rootY = (tgt.rootY || 0) + (-strike * 0.035 + antic * 0.015);
+    }
+  },
+  {
+    id: 'overhead',
+    phase: { anticEnd: 0.28, strikeEnd: 0.52, strikePeak: 1.35 },
+    apply(tgt, ph) {
+      const { antic, strike } = ph;
+      tgt.torsoRY = (tgt.torsoRY || 0) + (-antic * 0.35 + strike * 0.42);
+      tgt.torsoRX = (tgt.torsoRX || 0) + (-antic * 0.45 + strike * 0.55);
+      tgt.headRX = (tgt.headRX || 0) + (-antic * 0.22 + strike * 0.28);
+      tgt.headRY = (tgt.headRY || 0) + (-antic * 0.14 + strike * 0.16);
+      tgt.shRx = -0.15 - antic * 1.65 + strike * 2.1;
+      tgt.shRz = (tgt.shRz || 0) + (-antic * 0.35 + strike * 0.45);
+      tgt.elR = 0.15 + antic * 0.65 + strike * 0.85;
+      tgt.shLx = -0.48 - antic * 0.42;
+      tgt.elL = 0.82 + strike * 0.15;
+      tgt.hipRx = (tgt.hipRx || 0) + strike * 0.18;
+      tgt.rootY = (tgt.rootY || 0) + (-strike * 0.06 + antic * 0.04);
+    }
+  },
+  {
+    id: 'thrust',
+    phase: { anticEnd: 0.22, strikeEnd: 0.44, strikePeak: 1.18 },
+    apply(tgt, ph) {
+      const { antic, strike } = ph;
+      tgt.torsoRY = (tgt.torsoRY || 0) + (-antic * 0.25 + strike * 0.35);
+      tgt.torsoRX = (tgt.torsoRX || 0) + (-antic * 0.08 + strike * 0.22);
+      tgt.headRY = (tgt.headRY || 0) + (-antic * 0.12 + strike * 0.18);
+      tgt.shRx = -0.55 - antic * 0.85 + strike * 1.85;
+      tgt.shRz = (tgt.shRz || 0) + (-antic * 0.25 + strike * 0.18);
+      tgt.elR = 0.42 + antic * 0.28 + strike * 0.48;
+      tgt.shLx = -0.38 - antic * 0.15 + strike * 0.35;
+      tgt.shLz = -0.12 - strike * 0.08;
+      tgt.elL = 0.58 + strike * 0.28;
+      tgt.hipRx = (tgt.hipRx || 0) + strike * 0.08;
+      tgt.hipRz = (tgt.hipRz || 0) + strike * 0.06;
+      tgt.rootY = (tgt.rootY || 0) + (-strike * 0.02);
+    }
+  }
+];
+
+function swordSwingFactor(attackT, variantIdx) {
+  if (attackT < 0) return 0;
+  const v = SWORD_SWING_VARIANTS[variantIdx % SWORD_SWING_VARIANTS.length] || SWORD_SWING_VARIANTS[0];
+  const ph = meleeSwingPhase(Math.min(attackT / SWORD_SWING_DURATION, 1), v.phase);
+  return ph.strike + ph.antic * 0.22;
+}
+
+function meleeSwingFactor(char, attackT) {
+  if (attackT < 0 || charIsRanged(char)) return 0;
+  if (char.weaponDef && char.weaponDef.id === 'sword') {
+    const vi = char.anim ? char.anim.swordSwingVariant : 0;
+    return swordSwingFactor(attackT, vi);
+  }
+  return 1;
+}
+
+function applySwordAttackPose(tgt, k, variantIdx) {
+  const v = SWORD_SWING_VARIANTS[variantIdx % SWORD_SWING_VARIANTS.length] || SWORD_SWING_VARIANTS[0];
+  v.apply(tgt, meleeSwingPhase(k, v.phase));
 }
 
 function buildCharacter(params, opts){
@@ -798,7 +932,7 @@ function buildCharacter(params, opts){
            socket, twoHanded,
            muzzleFlash, beam,
            flames, bike, hipY,
-           anim: { state: 'idle', elapsed: 0, attackT: -1, ikW: 0,
+           anim: { state: 'idle', elapsed: 0, attackT: -1, swordSwingVariant: 0, ikW: 0,
                    cur: {}, curCharY: 0, weaponEquipped: weaponEquipped && params.weapon >= 0 } };
 }
 
@@ -915,13 +1049,13 @@ function aimOverlay(o, aimX, aimY, ch, aimOpts) {
   } else {
     const wid = ch.weaponDef.id;
     if (wid === 'sword') {
-      o.torsoRY = (o.torsoRY || 0) + 0.15;
-      o.shRz = a.yaw * 0.75 + 0.1;
-      o.shRx = -0.55 - a.pitch * 0.78;
-      o.elR = 0.45 + Math.abs(a.pitch) * 0.18;
-      o.shLx = -0.48 - a.pitch * 0.2;
-      o.shLz = -0.28 - a.yaw * 0.18;
-      o.elL = 0.86;
+      o.torsoRY = (o.torsoRY || 0) + 0.08;
+      o.shRz = a.yaw * 0.45 + 0.04;
+      o.shRx = -0.38 - a.pitch * 0.48;
+      o.elR = 0.52 + Math.abs(a.pitch) * 0.1;
+      o.shLx = -0.42 - a.pitch * 0.14;
+      o.shLz = -0.22 - a.yaw * 0.12;
+      o.elL = 0.72;
     } else if (wid === 'pickaxe') {
       o.shRz = a.yaw * 0.55 - 0.18;
       o.shRx = -0.48 - a.pitch * 0.6;
@@ -972,6 +1106,10 @@ function holdPose(o, blend, ch) {
     o.shLx = lerp(o.shLx != null ? o.shLx : 0, -0.62);
     o.shLz = lerp(o.shLz != null ? o.shLz : -0.25, -0.28);
     o.elL = lerp(o.elL != null ? o.elL : 0.08, 0.96);
+  } else if (ch.weaponDef.id === 'sword') {
+    o.shRx = lerp(o.shRx != null ? o.shRx : -0.25, -0.68);
+    o.shRz = lerp(o.shRz != null ? o.shRz : 0.25, 0.06);
+    o.elR = lerp(o.elR != null ? o.elR : 0.08, 0.58);
   } else {
     o.shRx = lerp(o.shRx != null ? o.shRx : -0.25, -1.2);
     o.elR = lerp(o.elR != null ? o.elR : 0.08, 0.5);
@@ -1100,6 +1238,7 @@ function initAnimState(char, weaponEquipped) {
   anim.curCharY = 0;
   anim.ikW = 0;
   anim.attackT = -1;
+  anim.swordSwingVariant = 0;
   anim.elapsed = 0;
   anim.weaponEquipped = weaponEquipped !== false;
   anim.state = 'idle';
@@ -1165,6 +1304,10 @@ function update(char, state, dt, opts) {
         tgt.torsoRX = (tgt.torsoRX || 0) + kick * .4;
       }
       if (attackT >= d) { attackT = -1; anim.attackT = -1; }
+    } else if (char.weaponDef && char.weaponDef.id === 'sword') {
+      const d = SWORD_SWING_DURATION, k = Math.min(attackT / d, 1);
+      applySwordAttackPose(tgt, k, char.anim.swordSwingVariant || 0);
+      if (attackT >= d) { attackT = -1; anim.attackT = -1; }
     } else {
       const d = .55, k = Math.min(attackT / d, 1);
       if (k < .35) { const w = k / .35; tgt.shRx = -2.4 * w; tgt.elR = .3; tgt.torsoRX = (tgt.torsoRX || 0) - .15 * w; }
@@ -1191,13 +1334,17 @@ function update(char, state, dt, opts) {
   j.hipR.rotation.x = cur.hipRx; j.hipR.rotation.z = cur.hipRz; j.kneeR.rotation.x = Math.abs(cur.kneeR);
 
   if (useWorldAim) {
-    primaryArmAimIK(j, Math.min(1, aimStrength * 0.94), cur, char, aimWorldDir);
+    const swordAttacking = attackT >= 0 && char.weaponDef && char.weaponDef.id === 'sword';
+    const aimIkW = swordAttacking
+      ? Math.max(0, 0.08 * (1 - swordSwingFactor(attackT, char.anim.swordSwingVariant || 0)))
+      : Math.min(1, aimStrength * 0.94);
+    if (aimIkW > 0.01) primaryArmAimIK(j, aimIkW, cur, char, aimWorldDir);
   }
 
   if (weaponEquipped && char.weapon) {
     if (anim.state === 'swim' || anim.state === 'ride') {
       char.weapon.quaternion.slerp(_qT.setFromEuler(_eul.set(-.05, 0, 0)), 1 - Math.exp(-10 * dt));
-    } else if (useWorldAim) {
+    } else if (useWorldAim && !(attackT >= 0 && char.weaponDef && char.weaponDef.id === 'sword')) {
       alignWeaponToAim(char, aimWorldDir, aimStrength);
     } else {
       resetWeaponToGripRest(char);
@@ -1219,7 +1366,7 @@ function update(char, state, dt, opts) {
   if (char.bike && char.bike.visible) char.bike.position.y = .5 + Math.sin(anim.elapsed * 3) * .015;
   if (char.weapon) char.weapon.visible = weaponEquipped;
   if (char.weapon && char.weapon.userData.animate && weaponEquipped) {
-    const meleeSwing = attackT >= 0 && !charIsRanged(char) ? 1 : 0;
+    const meleeSwing = meleeSwingFactor(char, attackT);
     char.weapon.userData.animate(anim.elapsed, rifleKick > 0 ? 1 : meleeSwing);
   }
   if (char.muzzleFlash) {
@@ -1244,7 +1391,8 @@ window.VoxelCharacter = {
   CLASSES, WEAPONS, BODY_TYPES, HEAD_DECOS, HAIR_COLORS, GEAR_COLORS, SKIN_TONES,
   DEFAULT_PARAMS, SAVE_KEY, weaponIdx,
   normalizeParams, loadSaved, saveParams, build, update, dispose, scaleToHeight,
-  buildWeapon, mirrorWeaponForTpGrip, addOutlines
+  buildWeapon, mirrorWeaponForTpGrip, tpWeaponGripRest, addOutlines,
+  SWORD_SWING_DURATION, SWORD_SWING_COUNT: SWORD_SWING_VARIANTS.length, applySwordAttackPose
 };
 
 
