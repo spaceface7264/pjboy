@@ -1150,7 +1150,7 @@
         }
 
         function weaponFireFactor() {
-            if (fireHeld && isLaserRifle() && !drawerOpen) {
+            if (fireHeld && isLaserRifle() && !voxelPanelOpen()) {
                 return 0.82 + 0.18 * Math.sin(elapsed * 28);
             }
             if (fpSwingTimer > 0) return Math.max(0, 1 - fpSwingTimer / fpSwingDuration);
@@ -1470,7 +1470,7 @@
         }
 
         function applyFpMouseLook(dx, dy) {
-            if (!firstPerson || drawerOpen) return;
+            if (!firstPerson || voxelPanelOpen()) return;
             const fc = getFpCam();
             orbit.theta -= dx * fc.aimSens;
             orbit.phi = Math.max(fc.pitchMin, Math.min(fc.pitchMax, orbit.phi - dy * fc.aimSens));
@@ -1478,7 +1478,7 @@
         }
 
         function applyTpMouseOrbit(dx, dy) {
-            if (firstPerson || drawerOpen || (!dx && !dy)) return;
+            if (firstPerson || voxelPanelOpen() || (!dx && !dy)) return;
             const tc = getTpCam();
             orbit.theta -= dx * tc.orbitSens;
             orbit.phi = Math.max(tc.pitchMin, Math.min(tc.pitchMax, orbit.phi - dy * tc.orbitSens));
@@ -1489,21 +1489,21 @@
         }
 
         function requestViewPointerLock() {
-            if (drawerOpen || !canvasEl) return;
+            if (voxelPanelOpen() || !canvasEl) return;
             if (!isViewPointerLocked()) canvasEl.requestPointerLock();
         }
 
         function requestFpPointerLock() {
-            if (!firstPerson || drawerOpen) return;
+            if (!firstPerson || voxelPanelOpen()) return;
             requestViewPointerLock();
         }
 
         function restoreViewPointerLock() {
-            if (drawerOpen || !canvasEl) return;
+            if (voxelPanelOpen() || !canvasEl) return;
             // Browsers often drop pointer lock when the right mouse button is released;
             // defer re-lock until after that release finishes.
             setTimeout(() => {
-                if (!drawerOpen && !isViewPointerLocked()) requestViewPointerLock();
+                if (!voxelPanelOpen() && !isViewPointerLocked()) requestViewPointerLock();
             }, 0);
         }
 
@@ -1954,7 +1954,7 @@
         }
 
         function updateAimEdgeHighlight(t) {
-            if (drawerOpen || !isMiningTool()) {
+            if (voxelPanelOpen() || !isMiningTool()) {
                 if (aimOutline) aimOutline.visible = false;
                 return;
             }
@@ -2011,7 +2011,7 @@
         const _scanWorld = new THREE.Vector3();
 
         function isScanCompactActive(t) {
-            return !drawerOpen && isBuilderMinerTool() && focusAimBlend > 0.08
+            return !voxelPanelOpen() && isBuilderMinerTool() && focusAimBlend > 0.08
                 && t && getBlock(t.x, t.y, t.z);
         }
 
@@ -2671,7 +2671,7 @@
         function updateBlockScan(t) {
             const panel = document.getElementById('voxel-scan');
             if (!panel) return;
-            if (drawerOpen) {
+            if (voxelPanelOpen()) {
                 if (scanExpanded) setScanExpanded(false);
                 hideScanChrome();
                 return;
@@ -2735,7 +2735,7 @@
 
         function updatePlaceGhost(t) {
             const slot = hotbar[selected];
-            if (!isMiningTool() || !slot || slot.count <= 0 || drawerOpen || !t) {
+            if (!isMiningTool() || !slot || slot.count <= 0 || voxelPanelOpen() || !t) {
                 if (placeGhost) placeGhost.visible = false;
                 return;
             }
@@ -3048,7 +3048,7 @@
         }
 
         function updateMiningHold(dt) {
-            if (!fireHeld || !isPickaxe() || drawerOpen) return;
+            if (!fireHeld || !isPickaxe() || voxelPanelOpen()) return;
             mineRepeatCooldown -= dt;
             if (mineRepeatCooldown > 0) return;
             tryMineSwing();
@@ -3076,7 +3076,7 @@
         }
 
         function updateLaserHoldFire(dt) {
-            if (!fireHeld || !isLaserRifle() || drawerOpen) return;
+            if (!fireHeld || !isLaserRifle() || voxelPanelOpen()) return;
             laserCooldown -= dt;
             if (laserCooldown <= 0) {
                 tryLaserMine();
@@ -3742,12 +3742,24 @@
             if (g.showMessage) g.showMessage(firstPerson ? 'First person' : 'Third person', 1200);
         }
 
+        function ctrlHintRow(key, desc) {
+            return `<div class="vx-ctrl-row"><kbd>${key}</kbd><span>${desc}</span></div>`;
+        }
+
         function updateViewHints() {
             const el = document.getElementById('voxel-view-hint');
             if (!el) return;
             el.innerHTML = firstPerson
-                ? '<b>mouse</b> aim · <b>Shift</b> focus / scan · <b>pickaxe + click/hold</b> mine · <b>laser + hold</b> cut · <b>right-click</b> place · <b>1-9</b> quickbar · <b>F9</b> aim tune'
-                : '<b>click</b> capture mouse · <b>move</b> look · <b>Shift</b> focus / scan · <b>pickaxe + click/hold</b> mine · <b>right-click</b> place · <b>scroll</b> zoom · <b>F9</b> aim tune';
+                ? [
+                    ctrlHintRow('Mouse', 'aim'),
+                    ctrlHintRow('Shift', 'focus scan')
+                ].join('')
+                : [
+                    ctrlHintRow('Click', 'capture mouse'),
+                    ctrlHintRow('Move', 'look around'),
+                    ctrlHintRow('Scroll', 'zoom'),
+                    ctrlHintRow('Shift', 'focus scan')
+                ].join('');
         }
 
         function updateFpViewmodel(dt, sp) {
@@ -3853,10 +3865,16 @@
         const backpack = {};   // block id -> total count
         let selected = 0;
         let drawerOpen = false;
+        let controlsDrawerOpen = false;
         let drawerFilter = 'owned';   // 'owned' | 'all'
         const hotbarEl = document.getElementById('voxel-hotbar');
         const drawerEl = document.getElementById('voxel-drawer');
         const drawerPanelEl = document.getElementById('voxel-drawer-panel');
+        const controlsDrawerEl = document.getElementById('voxel-controls-drawer');
+
+        function voxelPanelOpen() {
+            return drawerOpen || controlsDrawerOpen;
+        }
 
         function backpackTotal() {
             return Object.values(backpack).reduce((n, c) => n + c, 0);
@@ -4052,8 +4070,26 @@
                 }));
             }
         }
+        function toggleControlsDrawer(force) {
+            const next = force !== undefined ? !!force : !controlsDrawerOpen;
+            if (next && drawerOpen) toggleDrawer(false);
+            controlsDrawerOpen = next;
+            if (controlsDrawerEl) {
+                controlsDrawerEl.hidden = !controlsDrawerOpen;
+                controlsDrawerEl.classList.toggle('vx-controls-open', controlsDrawerOpen);
+            }
+            if (controlsDrawerOpen) {
+                releasePointerLock();
+                syncViewCursor();
+                updateViewHints();
+            } else if (firstPerson) {
+                requestFpPointerLock();
+            }
+        }
+
         function toggleDrawer(force) {
             drawerOpen = force !== undefined ? !!force : !drawerOpen;
+            if (drawerOpen && controlsDrawerOpen) toggleControlsDrawer(false);
             if (drawerEl) {
                 drawerEl.hidden = !drawerOpen;
                 drawerEl.classList.toggle('vx-drawer-open', drawerOpen);
@@ -4097,7 +4133,7 @@
                 </div>
                 <div class="vx-body" id="voxel-drawer-body"></div>
                 <div class="vx-help">
-                    <kbd>1</kbd>–<kbd>9</kbd> pick slot · <kbd>Q</kbd>/<kbd>E</kbd> cycle weapon · <kbd>Tab</kbd>/<kbd>M</kbd> toggle · <kbd>Esc</kbd> close
+                    <kbd>1</kbd>–<kbd>9</kbd> pick slot · <kbd>Q</kbd>/<kbd>E</kbd> cycle weapon · <kbd>Tab</kbd>/<kbd>M</kbd> inventory · <kbd>H</kbd> controls · <kbd>Esc</kbd> close
                 </div>`;
 
             const strip = drawerPanelEl.querySelector('#voxel-drawer-strip');
@@ -4297,6 +4333,7 @@
             const hud = document.getElementById('voxel-overlay');
             if (hud) hud.hidden = true;
             toggleDrawer(false);
+            toggleControlsDrawer(false);
             if (g._restoreLegacyPlayUI) g._restoreLegacyPlayUI();
         }
 
@@ -4560,6 +4597,10 @@
                         setScanExpanded(false);
                         return;
                     }
+                    if (controlsDrawerOpen) {
+                        toggleControlsDrawer(false);
+                        return;
+                    }
                     if (drawerOpen) {
                         toggleDrawer(false);
                         return;
@@ -4570,7 +4611,7 @@
                         return;
                     }
                 }
-                if (e.code === 'KeyO' && !drawerOpen) {
+                if (e.code === 'KeyO' && !voxelPanelOpen()) {
                     if (scanExpanded) {
                         setScanExpanded(false);
                     } else {
@@ -4579,6 +4620,11 @@
                             setScanExpanded(true);
                         }
                     }
+                    return;
+                }
+                if (e.code === 'KeyH') {
+                    e.preventDefault();
+                    toggleControlsDrawer();
                     return;
                 }
                 if (e.code === 'Tab' || e.code === 'KeyM') {
@@ -4619,10 +4665,20 @@
                 });
                 on(drawerEl, 'wheel', (e) => e.preventDefault(), { passive: false });
             }
+            if (controlsDrawerEl) {
+                on(controlsDrawerEl, 'click', (e) => {
+                    if (e.target === controlsDrawerEl) toggleControlsDrawer(false);
+                });
+                const controlsClose = controlsDrawerEl.querySelector('[data-vx-controls-close]');
+                if (controlsClose) {
+                    on(controlsClose, 'click', () => toggleControlsDrawer(false));
+                }
+            }
             const voxelHud = document.getElementById('voxel-overlay');
             if (voxelHud) {
                 on(voxelHud, 'wheel', (e) => {
                     if (scanExpanded && e.target.closest('#voxel-scan')) return;
+                    if (e.target.closest('#voxel-controls-drawer')) return;
                     e.preventDefault();
                 }, { passive: false });
             }
@@ -4633,7 +4689,7 @@
             canvasEl = g.renderer && g.renderer.domElement;
 
             function onCanvasPointerDown(e) {
-                if (drawerOpen) return;
+                if (voxelPanelOpen()) return;
                 dragging = true;
                 moved = 0;
                 px = e.clientX;
@@ -4664,7 +4720,7 @@
                     fireHeld = false;
                     resetMining();
                 }
-                if (drawerOpen) return;
+                if (voxelPanelOpen()) return;
                 if (moved >= 8) return;
                 if (btn === 0 && !firstPerson && !wasLockedOnDown && isViewPointerLocked()) return;
                 if (btn === 2) {
@@ -4679,7 +4735,7 @@
                     const my = e.movementY || 0;
                     if (firstPerson) applyFpMouseLook(mx, my);
                     else applyTpMouseOrbit(mx, my);
-                } else if (!firstPerson && !drawerOpen && (e.buttons & 2)) {
+                } else if (!firstPerson && !voxelPanelOpen() && (e.buttons & 2)) {
                     const dx = e.clientX - px, dy = e.clientY - py;
                     applyTpMouseOrbit(dx, dy);
                 }
@@ -4706,7 +4762,7 @@
                 on(canvasEl, 'pointermove', onCanvasPointerMove);
             }
             on(document, 'pointerlockchange', () => {
-                if (drawerOpen && document.pointerLockElement) releasePointerLock();
+                if (voxelPanelOpen() && document.pointerLockElement) releasePointerLock();
                 syncViewCursor();
             });
             on(window, 'pointerup', onCanvasPointerUp);

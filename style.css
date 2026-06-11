@@ -1856,15 +1856,147 @@ body.mode-asteroid #lava-vignette {
     position: fixed;
     left: 16px;
     bottom: 88px;
-    line-height: 1.65;
+    line-height: 1.5;
     font-family: 'Courier New', monospace;
     font-size: 11px;
     color: #9eb8c4;
     pointer-events: none;
     text-shadow: 0 1px 4px rgba(0, 0, 0, 0.85);
-    max-width: min(420px, 92vw);
 }
 #voxel-hud b { color: #6fe3ff; }
+
+/* ===== Asteroid controls drawer (right) ===== */
+#voxel-controls-drawer.vx-controls-drawer {
+    position: fixed;
+    inset: 0;
+    z-index: 10055;
+    pointer-events: none;
+    overflow: hidden;
+    background: linear-gradient(to left,
+        rgba(4, 8, 18, 0.78) 0%,
+        rgba(4, 8, 18, 0.35) 28%,
+        rgba(4, 8, 18, 0) 52%);
+    opacity: 0;
+    transition: opacity 0.2s ease;
+}
+#voxel-controls-drawer.vx-controls-open {
+    pointer-events: auto;
+    opacity: 1;
+}
+#voxel-controls-drawer[hidden] { display: none !important; }
+.vx-controls-panel {
+    position: absolute;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    width: min(360px, calc(100vw - 24px));
+    display: flex;
+    flex-direction: column;
+    padding: 16px 18px 14px;
+    background: linear-gradient(180deg, rgba(10, 16, 30, 0.98), rgba(6, 10, 22, 0.99));
+    border-left: 1px solid rgba(111, 227, 255, 0.42);
+    box-shadow: -12px 0 40px rgba(0, 0, 0, 0.55), 0 0 24px rgba(111, 227, 255, 0.08);
+    color: #b8d4e0;
+    font-family: 'Courier New', monospace;
+    transform: translateX(104%);
+    transition: transform 0.26s cubic-bezier(0.2, 0.9, 0.25, 1);
+}
+#voxel-controls-drawer.vx-controls-open .vx-controls-panel {
+    transform: translateX(0);
+}
+.vx-controls-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding-bottom: 12px;
+    margin-bottom: 12px;
+    border-bottom: 1px dashed rgba(111, 227, 255, 0.25);
+}
+.vx-controls-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0;
+    color: #6fe3ff;
+    font-size: 13px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+}
+.vx-controls-close {
+    width: 30px;
+    height: 30px;
+    border: 1px solid rgba(111, 227, 255, 0.35);
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.25);
+    color: #9eb8c4;
+    font-size: 14px;
+    cursor: pointer;
+    pointer-events: auto;
+}
+.vx-controls-close:hover {
+    color: #6fe3ff;
+    border-color: rgba(111, 227, 255, 0.55);
+}
+.vx-controls-body {
+    flex: 1;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding-right: 4px;
+}
+.vx-controls-section {
+    margin-bottom: 14px;
+}
+.vx-controls-section:last-child { margin-bottom: 0; }
+.vx-controls-section h4 {
+    margin: 0 0 6px;
+    font-size: 10px;
+    font-weight: bold;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: #5a7a88;
+}
+.vx-ctrl-list {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+.vx-ctrl-row {
+    display: grid;
+    grid-template-columns: 92px 1fr;
+    gap: 8px;
+    align-items: baseline;
+    font-size: 11px;
+    line-height: 1.35;
+}
+.vx-ctrl-row kbd {
+    display: block;
+    padding: 2px 6px;
+    border: 1px solid rgba(111, 227, 255, 0.28);
+    border-radius: 4px;
+    background: rgba(0, 0, 0, 0.22);
+    font-family: inherit;
+    font-size: 10px;
+    color: #6fe3ff;
+    text-align: center;
+    white-space: nowrap;
+}
+.vx-ctrl-row span {
+    color: #9eb8c4;
+}
+.vx-controls-footer {
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px dashed rgba(111, 227, 255, 0.2);
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+.vx-controls-footer .vx-ctrl-row {
+    grid-template-columns: 52px 1fr;
+    font-size: 10px;
+}
+.vx-controls-footer .vx-ctrl-row span { color: #6a8a98; }
 #voxel-target-name {
     position: fixed;
     left: 50%;

@@ -10,7 +10,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>3D Second-Person Game - 128-bit Style</title>
-    <link rel="stylesheet" href="style.css?v=42">
+    <link rel="stylesheet" href="style.css?v=44">
     <link rel="stylesheet" href="style-meta.css?v=4">
 </head>
 <body>
@@ -431,13 +431,60 @@
                 </div>
             </div>
             <div id="voxel-hud">
-                <div><b>WASD</b> move · <b>Space</b> jump / hold = jetpack · <b>Shift</b> aim (3rd person)</div>
-                <div id="voxel-view-hint"><b>mouse</b> aim · <b>click</b> mine · <b>hold click</b> laser · <b>right-click</b> place · <b>1-9</b> quickbar</div>
-                <div><b>V</b> view · <b>Esc</b> close drawer</div>
-                <div><b>Shift+R</b> new seed · <b>Q</b>/<b>E</b> switch weapon · <b>F8</b> FP weapon tuner · scan open: <b>O</b> expand</div>
-                <div><b id="voxel-tri-count">0</b> tris · <span id="voxel-seed-label"></span> · <span id="voxel-weapon-label">Pickaxe</span></div>
+                <div><b id="voxel-tri-count">0</b> tris · <span id="voxel-seed-label"></span> · <span id="voxel-weapon-label">Pickaxe</span> · <b>H</b> controls</div>
             </div>
             <div id="voxel-hotbar"></div>
+            <div id="voxel-controls-drawer" class="vx-controls-drawer" hidden>
+                <div class="vx-controls-panel" id="voxel-controls-panel">
+                    <div class="vx-controls-header">
+                        <h3 class="vx-controls-title"><span>⌨</span> Controls</h3>
+                        <button type="button" class="vx-controls-close" data-vx-controls-close aria-label="Close controls">✕</button>
+                    </div>
+                    <div class="vx-controls-body">
+                        <section class="vx-controls-section">
+                            <h4>Movement</h4>
+                            <div class="vx-ctrl-list">
+                                <div class="vx-ctrl-row"><kbd>W A S D</kbd><span>move</span></div>
+                                <div class="vx-ctrl-row"><kbd>Space</kbd><span>jump · hold = jetpack</span></div>
+                                <div class="vx-ctrl-row"><kbd>Shift</kbd><span>aim · focus scan</span></div>
+                            </div>
+                        </section>
+                        <section class="vx-controls-section">
+                            <h4>View</h4>
+                            <div class="vx-ctrl-list" id="voxel-view-hint"></div>
+                        </section>
+                        <section class="vx-controls-section">
+                            <h4>Combat &amp; build</h4>
+                            <div class="vx-ctrl-list">
+                                <div class="vx-ctrl-row"><kbd>LMB</kbd><span>mine (pickaxe)</span></div>
+                                <div class="vx-ctrl-row"><kbd>Hold LMB</kbd><span>mine (laser)</span></div>
+                                <div class="vx-ctrl-row"><kbd>RMB</kbd><span>place block</span></div>
+                                <div class="vx-ctrl-row"><kbd>1–9</kbd><span>quickbar slot</span></div>
+                                <div class="vx-ctrl-row"><kbd>Q</kbd><span>previous weapon</span></div>
+                                <div class="vx-ctrl-row"><kbd>E</kbd><span>next weapon</span></div>
+                            </div>
+                        </section>
+                        <section class="vx-controls-section">
+                            <h4>UI</h4>
+                            <div class="vx-ctrl-list">
+                                <div class="vx-ctrl-row"><kbd>V</kbd><span>toggle view</span></div>
+                                <div class="vx-ctrl-row"><kbd>H</kbd><span>controls</span></div>
+                                <div class="vx-ctrl-row"><kbd>Tab</kbd><span>inventory</span></div>
+                                <div class="vx-ctrl-row"><kbd>M</kbd><span>inventory</span></div>
+                                <div class="vx-ctrl-row"><kbd>O</kbd><span>expand scan</span></div>
+                                <div class="vx-ctrl-row"><kbd>F8</kbd><span>weapon tuner</span></div>
+                                <div class="vx-ctrl-row"><kbd>F9</kbd><span>aim tuner</span></div>
+                                <div class="vx-ctrl-row"><kbd>Shift+R</kbd><span>new seed</span></div>
+                                <div class="vx-ctrl-row"><kbd>Esc</kbd><span>close panel</span></div>
+                            </div>
+                        </section>
+                    </div>
+                    <div class="vx-controls-footer">
+                        <div class="vx-ctrl-row"><kbd>H</kbd><span>toggle</span></div>
+                        <div class="vx-ctrl-row"><kbd>Esc</kbd><span>close</span></div>
+                    </div>
+                </div>
+            </div>
             <div id="voxel-drawer" class="vx-drawer" hidden>
                 <div class="vx-panel" id="voxel-drawer-panel"></div>
             </div>
@@ -454,7 +501,7 @@
     <script src="planetgen.js?v=12"></script>
     <script src="planet.js?v=173"></script>
     <script src="voxel-character.js?v=18"></script>
-    <script src="voxelworld.js?v=87"></script>
+    <script src="voxelworld.js?v=89"></script>
     <script src="modes.js?v=9"></script>
     <script src="game.js?v=151"></script>
     <script src="game-modes-impl.js?v=28"></script>
