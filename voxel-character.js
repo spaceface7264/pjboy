@@ -806,14 +806,11 @@ const POSES = {
   },
   fly(t,o){
     o.charY = .85 + Math.sin(t*1.6)*.06;
-    o.torsoRX = .45; o.headRX = -.5;
+    o.torsoRX = .35;
     o.hipLx = .5; o.hipRx = .5;
     o.kneeL = .55+Math.sin(t*2)*.05; o.kneeR = .55-Math.sin(t*2)*.05;
     o.shLx = -.5; o.shLz = -.7; o.elL=.2;
-    if(_poseWeaponEquipped){
-      // torso is pitched forward: hold low at the hip so the weapon stays clear of the face
-      o.shRx = -.25; o.shRz = .2; o.elR = .45;
-    } else { o.shRx = -2.8; o.shRz = .5; o.elR = .1; }
+    if(!_poseWeaponEquipped){ o.headRX = -.5; o.shRx = -2.8; o.shRz = .5; o.elR = .1; }
   },
   swim(t,o){
     o.charY = 1.05; o.charRX = -1.25;
@@ -1085,7 +1082,7 @@ function update(char, state, dt, opts) {
   const aimStrength = opts.aimBlend != null ? opts.aimBlend
     : (aiming ? 1 : (opts.alwaysAim ? 0.62 : 0));
   const canAim = aimStrength > 0.05 && weaponEquipped && anim.state !== 'swim'
-    && anim.state !== 'ride' && anim.state !== 'fly';
+    && anim.state !== 'ride';
   const aimLyaw = (opts.localAimYaw || 0) * aimStrength;
   const aimLpitch = (opts.localAimPitch || 0) * aimStrength;
   const aimWorldDir = opts.aimWorldDir || null;
@@ -1159,7 +1156,8 @@ function update(char, state, dt, opts) {
   }
 
   const useSupportIK = char.twoHanded || (char.weaponDef && char.weaponDef.id === 'sword');
-  const wantIK = weaponEquipped && useSupportIK && anim.state !== 'swim' && anim.state !== 'ride' && anim.state !== 'fly' && (attackT < 0 || charIsRanged(char));
+  const wantIK = weaponEquipped && useSupportIK && anim.state !== 'swim' && anim.state !== 'ride'
+    && (attackT < 0 || charIsRanged(char));
   anim.ikW += ((wantIK ? 1 : 0) - anim.ikW) * (1 - Math.exp(-8 * dt));
   if (anim.ikW > .01) {
     if (weaponEquipped && char.weapon) char.weapon.updateMatrixWorld(true);
