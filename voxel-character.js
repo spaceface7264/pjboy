@@ -1178,7 +1178,8 @@ function update(char, state, dt, opts) {
     if (char.muzzleFlash.visible) { const s = .7 + Math.random() * .8; char.muzzleFlash.scale.set(s, s, s); }
   }
   if (char.beam) {
-    char.beam.visible = weaponEquipped && rifleKick > 0;
+    const showBeam = opts.showWeaponBeam !== false && weaponEquipped && rifleKick > 0;
+    char.beam.visible = showBeam;
     if (char.beam.visible) char.beam.material.opacity = .6 + Math.random() * .4;
   }
 }

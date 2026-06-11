@@ -1146,7 +1146,8 @@
                     w.userData.flash.material.opacity = 0.35 + f * 0.65;
                 }
                 if (w.userData.beam) {
-                    w.userData.beam.visible = flashOn && f > 0.06;
+                    // Weapon mesh beam is FP-only; TP uses short-lived shot VFX traces.
+                    w.userData.beam.visible = firstPerson && flashOn && f > 0.06;
                     w.userData.beam.material.opacity = 0.25 + f * 0.75;
                 }
             }
@@ -1191,9 +1192,10 @@
             av.group.rotation.y = player.yaw;
             const VC = getVC();
             if (VC && av.anim && av.j) {
+                const aimSolve = resolveAim();
                 const aim = computeAimOffsets();
-                const aimDir = syncAimRay();
-                const ads = tpAdsBlend > 0.04;
+                const aimDir = aimSolve.dir;
+                const ads = focusAimBlend > 0.04;
                 const atk = attackT >= 0 ? attackT : (av.anim.attackT >= 0 ? av.anim.attackT : -1);
                 VC.update(av, mapVcState(player.state), dt, {
                     aiming: ads,
@@ -1205,7 +1207,8 @@
                     localAimPitch: aim.localPitch,
                     aimWorldDir: aimDir,
                     attackT: atk,
-                    weaponEquipped: true
+                    weaponEquipped: true,
+                    showWeaponBeam: false
                 });
                 av.group.position.copy(player.pos);
                 attackT = av.anim.attackT;
@@ -1396,8 +1399,10 @@
         let firstPerson = true;
         const orbit = { theta: 0.6, phi: 0.92, dist: 2.35 };
         const TP_FP_FOV = 55;
-        const TP_ADS_SPEED = 1.7;
-        let tpAdsBlend = 0;
+        const TP_FP_ADS_FOV = 49;
+        const MOVE_RUN_SPEED = 6.4;
+        const MOVE_ADS_SPEED = 1.7;
+        let focusAimBlend = 0;
         let tpCamPos = null;
         let tpCamReady = false;
         let dragging = false, moved = 0, px = 0, py = 0, downBtn = 0;
@@ -1586,12 +1591,45 @@
             return _shotDir;
         }
 
+        const _aimState = {
+            dir: new THREE.Vector3(),
+            origin: new THREE.Vector3(),
+            end: new THREE.Vector3(),
+            hit: new THREE.Vector3(),
+            normal: new THREE.Vector3(),
+            len: 0,
+            hasSurfaceHit: false
+        };
+
+        // Single aim solve: screen-center ray, muzzle origin, end on the same line as shots.
+        function resolveAim() {
+            syncAimRay();
+            _aimState.dir.copy(_shotDir);
+            if (av && av.group && !firstPerson) av.group.updateMatrixWorld(true);
+            if (!firstPerson && tpWeapon) tpWeapon.updateMatrixWorld(true);
+            if (fpPivot && firstPerson) fpPivot.updateMatrixWorld(true);
+            _aimState.origin.copy(getMuzzleWorldPos());
+
+            ray.setFromCamera({ x: 0, y: 0 }, camera);
+            const hit = ray.intersectObjects(collectAimMeshes(), true)[0];
+            const inRange = hit && hit.point.distanceTo(player.pos) <= AIM_REACH;
+            if (inRange) {
+                _aimState.hasSurfaceHit = true;
+                _aimState.normal.copy(hit.face.normal);
+                const along = _shotScratch.copy(hit.point).sub(_aimState.origin).dot(_aimState.dir);
+                _aimState.len = Math.max(0.2, along);
+            } else {
+                _aimState.hasSurfaceHit = false;
+                _aimState.normal.set(0, 1, 0);
+                _aimState.len = AIM_REACH;
+            }
+            _aimState.end.copy(_aimState.origin).addScaledVector(_aimState.dir, _aimState.len);
+            _aimState.hit.copy(_aimState.end);
+            return _aimState;
+        }
+
         function getAimWorldHit() {
-          syncAimRay();
-          const hit = ray.intersectObjects(collectAimMeshes())[0];
-          if (hit && hit.point.distanceTo(player.pos) <= AIM_REACH) return hit.point.clone();
-          const eye = player.pos.clone().add(new THREE.Vector3(0, 1.62, 0));
-          return eye.clone().add(_shotDir.clone().multiplyScalar(AIM_REACH));
+            return resolveAim().end.clone();
         }
 
         function computeAimShot(origin, hit) {
@@ -1835,81 +1873,8 @@
             if (aimEdgeGlow) aimEdgeGlow.visible = true;
         }
 
-        let tpAimMarker = null;
-        let tpAimLine = null;
-        const _aimHit = new THREE.Vector3();
-        const _aimNormal = new THREE.Vector3();
-        const _aimUp = new THREE.Vector3();
-        const _aimFrom = new THREE.Vector3();
-        const _tpLineDir = new THREE.Vector3();
-        const _aimQuat = new THREE.Quaternion();
-        const _aimYAxis = new THREE.Vector3(0, 1, 0);
-        const _aimLookAt = new THREE.Vector3();
-        const _aimMat = new THREE.Matrix4();
-
-        function ensureTpAimVisuals() {
-            if (tpAimMarker) return;
-            tpAimMarker = new THREE.Group();
-            const ringMat = new THREE.MeshBasicMaterial({
-                color: 0x6fe3ff, transparent: true, opacity: 0.72, side: THREE.DoubleSide, depthWrite: false
-            });
-            const dotMat = new THREE.MeshBasicMaterial({
-                color: 0xffffff, transparent: true, opacity: 0.9, side: THREE.DoubleSide, depthWrite: false
-            });
-            const ring = new THREE.Mesh(new THREE.RingGeometry(0.2, 0.34, 28), ringMat);
-            const dot = new THREE.Mesh(new THREE.CircleGeometry(0.07, 16), dotMat);
-            tpAimMarker.add(ring);
-            tpAimMarker.add(dot);
-            tpAimMarker.visible = false;
-            scene.add(tpAimMarker);
-
-            tpAimLine = new THREE.Mesh(
-                new THREE.BoxGeometry(0.028, 1, 0.028),
-                new THREE.MeshBasicMaterial({
-                    color: 0x6fe3ff, transparent: true, opacity: 0.28, depthWrite: false
-                })
-            );
-            tpAimLine.visible = false;
-            scene.add(tpAimLine);
-        }
-
         function updateTpAimVisuals() {
-            ensureTpAimVisuals();
-            if (firstPerson || drawerOpen) {
-                tpAimMarker.visible = false;
-                tpAimLine.visible = false;
-                return;
-            }
-            ray.setFromCamera({ x: 0, y: 0 }, camera);
-            const hit = ray.intersectObjects(collectAimMeshes(), true)[0];
-            const inRange = hit && hit.point.distanceTo(player.pos) <= AIM_REACH;
-            if (inRange) {
-                _aimHit.copy(hit.point);
-                _aimNormal.copy(hit.face.normal);
-            } else {
-                _aimHit.copy(getAimWorldHit());
-                _aimNormal.set(0, 1, 0);
-            }
-            tpAimMarker.position.copy(_aimHit).addScaledVector(_aimNormal, 0.05);
-            _aimUp.set(0, 0, 1);
-            if (Math.abs(_aimNormal.y) > 0.85) _aimUp.set(0, 1, 0);
-            _aimLookAt.copy(tpAimMarker.position).add(_aimNormal);
-            _aimMat.lookAt(tpAimMarker.position, _aimLookAt, _aimUp);
-            tpAimMarker.quaternion.setFromRotationMatrix(_aimMat);
-            tpAimMarker.visible = true;
-
-            _aimFrom.copy(player.pos);
-            _aimFrom.y += 1.35;
-            _tpLineDir.copy(_aimHit).sub(_aimFrom);
-            const len = _tpLineDir.length();
-            if (len > 0.2) {
-                tpAimLine.position.copy(_aimFrom).addScaledVector(_tpLineDir, 0.5);
-                tpAimLine.scale.set(1, len, 1);
-                tpAimLine.quaternion.setFromUnitVectors(_aimYAxis, _tpLineDir.normalize());
-                tpAimLine.visible = true;
-            } else {
-                tpAimLine.visible = false;
-            }
+            // Iso aim = screen crosshair only; traces spawn on fire via shotVfx.
         }
         // break particles colored from the block's own texture
         const blockColorCache={};
@@ -1991,14 +1956,14 @@
             shotVfx.push({ kind: 'flash', m: flash, life: 0.09, maxLife: 0.09 });
         }
 
-        function spawnRangedShotVfxAt(hit, airShot) {
+        function spawnRangedShotVfxAt(airShot) {
             if (!weaponDef || !weaponDef.ranged) return;
             const profile = SHOT_PROFILES[weaponDef.id] || SHOT_PROFILES.blaster;
-            const origin = getMuzzleWorldPos();
-            const shot = computeAimShot(origin, hit);
-            if (shot.len < 0.05) return;
-            const dir = shot.dir;
-            const aimEnd = shot.end;
+            const a = resolveAim();
+            if (a.len < 0.05) return;
+            const origin = a.origin;
+            const dir = a.dir;
+            const aimEnd = a.end;
 
             if (profile.kind === 'bolt') {
                 const orb = new THREE.Mesh(
@@ -2029,21 +1994,21 @@
                 return;
             }
 
-            const mid = origin.clone().addScaledVector(dir, shot.len * 0.5);
+            const mid = origin.clone().addScaledVector(dir, a.len * 0.5);
             const grp = new THREE.Group();
             grp.position.copy(mid);
             const quat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), dir);
             grp.quaternion.copy(quat);
 
-            const outer = addBeamSegment(grp, shot.len, profile.width, profile.color, 0.82, 0);
-            const inner = addBeamSegment(grp, shot.len * 1.02, profile.width * 0.32, profile.core, 0.98, 0);
+            const outer = addBeamSegment(grp, a.len, profile.width, profile.color, 0.82, 0);
+            const inner = addBeamSegment(grp, a.len * 1.02, profile.width * 0.32, profile.core, 0.98, 0);
             const segs = [outer, inner];
 
             if (profile.jagged) {
                 for (let i = 0; i < 4; i++) {
                     const jag = addBeamSegment(
-                        grp, shot.len * (0.18 + Math.random() * 0.12), profile.width * 0.18,
-                        0xffffff, 0.55, (i - 1.5) * shot.len * 0.22
+                        grp, a.len * (0.18 + Math.random() * 0.12), profile.width * 0.18,
+                        0xffffff, 0.55, (i - 1.5) * a.len * 0.22
                     );
                     jag.position.x = (Math.random() - 0.5) * profile.width * 2.2;
                     jag.position.y = (Math.random() - 0.5) * profile.width * 2.2;
@@ -2057,11 +2022,11 @@
                 grp,
                 segs,
                 profile,
-                hit: hit.clone(),
+                hit: aimEnd.clone(),
                 life: profile.life,
                 maxLife: profile.life
             });
-            if (!airShot) spawnImpactVfx(hit, profile);
+            if (!airShot) spawnImpactVfx(aimEnd, profile);
         }
 
         function stepShotVfx(dt) {
@@ -2130,7 +2095,7 @@
         function fireWeapon(opts) {
             opts = opts || {};
             const t = pickTarget();
-            const worldHit = getAimWorldHit();
+            const aim = resolveAim();
             const hasBlock = !!(t && getBlock(t.x, t.y, t.z));
 
             if (opts.laserPulse) {
@@ -2150,7 +2115,7 @@
             }
 
             if (weaponDef && weaponDef.ranged) {
-                spawnRangedShotVfxAt(worldHit, !hasBlock);
+                spawnRangedShotVfxAt(!hasBlock);
             }
 
             if (!hasBlock) return false;
@@ -2598,8 +2563,8 @@
             const el = document.getElementById('voxel-view-hint');
             if (!el) return;
             el.innerHTML = firstPerson
-                ? '<b>mouse</b> aim · <b>click</b> mine · <b>hold click</b> laser · <b>right-click</b> place · <b>1-9</b> quickbar'
-                : '<b>click</b> capture mouse · <b>move</b> look · <b>Shift</b> aim · <b>scroll</b> zoom · <b>F8</b> camera · <b>right-click</b> place';
+                ? '<b>mouse</b> aim · <b>Shift</b> focus · <b>click</b> mine · <b>hold click</b> laser · <b>right-click</b> place · <b>1-9</b> quickbar'
+                : '<b>click</b> capture mouse · <b>move</b> look · <b>Shift</b> focus · <b>scroll</b> zoom · <b>F8</b> camera · <b>right-click</b> place';
         }
 
         function updateFpViewmodel(dt, sp) {
@@ -2608,7 +2573,8 @@
 
             const moving = player.grounded && sp > 0.3;
             const run = player.state === 'run';
-            const bobAmp = moving ? Math.min(sp / 6, 1) * (run ? 0.048 : 0.034) : 0;
+            const aimT = focusAimBlend;
+            const bobAmp = moving ? Math.min(sp / MOVE_RUN_SPEED, 1) * (run ? 0.048 : 0.034) * (1 - aimT * 0.88) : 0;
             const bobFreq = run ? 10.5 : 7.2;
             const bobY = Math.sin(elapsed * bobFreq) * bobAmp;
             const bobX = Math.cos(elapsed * bobFreq * 0.5) * bobAmp * 0.45;
@@ -2620,6 +2586,14 @@
             let rx = fpRest.rotX;
             let ry = fpRest.rotY;
             let rz = fpRest.rotZ + bobRoll;
+            if (aimT > 0.001) {
+                px = THREE.MathUtils.lerp(px, fpRest.pos.x + 0.05, aimT);
+                py = THREE.MathUtils.lerp(py, fpRest.pos.y - 0.07, aimT);
+                pz = THREE.MathUtils.lerp(pz, fpRest.pos.z + 0.2, aimT);
+                rx = THREE.MathUtils.lerp(rx, fpRest.rotX - 0.04, aimT);
+                ry = THREE.MathUtils.lerp(ry, fpRest.rotY, aimT);
+                rz = THREE.MathUtils.lerp(rz, fpRest.rotZ * 0.35, aimT);
+            }
 
             if (fpSwingTimer > 0) {
                 const t = 1 - (fpSwingTimer / fpSwingDuration);
@@ -3173,8 +3147,6 @@
                 if (s.m) scene.remove(s.m);
             });
             shotVfx.length = 0;
-            if (tpAimMarker) { scene.remove(tpAimMarker); tpAimMarker = null; }
-            if (tpAimLine) { scene.remove(tpAimLine); tpAimLine = null; }
             disposeAimEdgeHighlight();
             if (fpPivot && fpPivot.parent) fpPivot.parent.remove(fpPivot);
             if (g._voxelLights) {
@@ -3212,11 +3184,8 @@
             if(keys.KeyA||keys.ArrowLeft) ix-=1;
             if(keys.KeyD||keys.ArrowRight) ix+=1;
             const shiftHeld = !!(keys.ShiftLeft || keys.ShiftRight);
-            const adsHeld = !firstPerson && shiftHeld;
-            tpAdsBlend += ((adsHeld ? 1 : 0) - tpAdsBlend) * (1 - Math.exp(-12 * dt));
-            const speed = firstPerson
-                ? (shiftHeld ? 6.4 : 3.6)
-                : THREE.MathUtils.lerp(3.6, TP_ADS_SPEED, tpAdsBlend);
+            focusAimBlend += ((shiftHeld ? 1 : 0) - focusAimBlend) * (1 - Math.exp(-12 * dt));
+            const speed = THREE.MathUtils.lerp(MOVE_RUN_SPEED, MOVE_ADS_SPEED, focusAimBlend);
             const len=Math.hypot(ix,iz);
             let mvx=0,mvz=0;
             if(len){
@@ -3227,7 +3196,7 @@
             }
             const camYaw = orbit.theta + Math.PI;
             const yawTarget = firstPerson ? camYaw
-                : (tpAdsBlend > 0.12 || !len ? camYaw : Math.atan2(mvx, mvz));
+                : (focusAimBlend > 0.12 || !len ? camYaw : Math.atan2(mvx, mvz));
             if(yawTarget!==null){
                 let d=yawTarget-player.yaw;
                 while(d>Math.PI)d-=Math.PI*2; while(d<-Math.PI)d+=Math.PI*2;
@@ -3248,7 +3217,7 @@
             moveAxis('y', player.vel.y*dt);
             const sp=Math.hypot(mvx,mvz);
             player.state = !player.grounded ? (thrusting ? 'fly' : 'air')
-                : sp < 0.3 ? 'idle' : ((firstPerson && shiftHeld) || sp > 5.5 ? 'run' : 'walk');
+                : sp < 0.3 ? 'idle' : 'run';
             if (av && av.group) {
                 if (!firstPerson) {
                     updateTpCharacter(dt, sp);
@@ -3315,6 +3284,11 @@
             if (!camera) return;
             if (firstPerson) {
                 orbit.phi = Math.max(0.15, Math.min(2.95, orbit.phi));
+                const fpFov = THREE.MathUtils.lerp(TP_FP_FOV, TP_FP_ADS_FOV, focusAimBlend);
+                if (Math.abs(camera.fov - fpFov) > 0.05) {
+                    camera.fov = fpFov;
+                    camera.updateProjectionMatrix();
+                }
                 const eye = player.pos.clone().add(new THREE.Vector3(0, 1.62, 0));
                 camera.position.copy(eye);
                 camera.lookAt(
@@ -3325,7 +3299,7 @@
                 const tc = getTpCam();
                 orbit.phi = Math.max(tc.pitchMin, Math.min(tc.pitchMax, orbit.phi));
                 orbit.dist = Math.max(tc.distMin, Math.min(tc.distMax, orbit.dist));
-                const ads = tpAdsBlend;
+                const ads = focusAimBlend;
                 const camDist = THREE.MathUtils.lerp(orbit.dist, tc.adsDist, ads);
                 const camShoulder = THREE.MathUtils.lerp(tc.shoulder, tc.adsShoulder, ads);
                 const camFov = THREE.MathUtils.lerp(tc.fov, tc.adsFov, ads);

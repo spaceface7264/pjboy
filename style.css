@@ -1849,8 +1849,8 @@ body.mode-asteroid #lava-vignette {
     transition: opacity 0.2s ease, transform 0.2s ease;
 }
 #voxel-overlay.vx-tp-view #voxel-cross {
-    opacity: 0.5;
-    transform: scale(0.82);
+    opacity: 1;
+    transform: none;
 }
 #voxel-hud {
     position: fixed;
