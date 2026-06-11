@@ -765,13 +765,21 @@ function buildCharacter(params, opts){
     clump(0, HH*.6, -HW*.48, 8, {x:HW*.9,y:.18,z:.08}, .08,.13, hairM);
   }
 
-  // weapon (selected independently of class)
-  const wDef = WEAPONS[params.weapon];
-  const weapon = buildWeapon(wDef, cls.accent);
-  mirrorWeaponForTpGrip(weapon, wDef);
-  weapon.visible = weaponEquipped;
-  weaponGrip.add(weapon);
-  cacheWeaponGripAim(weapon, weaponGrip);
+  // weapon (selected independently of class; -1 = empty hands)
+  let weapon = null, wDef = null, socket = null, twoHanded = false;
+  let muzzleFlash = null, beam = null;
+  if (params.weapon >= 0) {
+    wDef = WEAPONS[params.weapon];
+    weapon = buildWeapon(wDef, cls.accent);
+    mirrorWeaponForTpGrip(weapon, wDef);
+    weapon.visible = weaponEquipped;
+    weaponGrip.add(weapon);
+    cacheWeaponGripAim(weapon, weaponGrip);
+    socket = weapon.userData.socket || null;
+    twoHanded = !!weapon.userData.twoHanded;
+    muzzleFlash = weapon.userData.flash || null;
+    beam = weapon.userData.beam || null;
+  }
 
   // hover bike (ride state prop)
   const bike = new THREE.Group();
@@ -787,11 +795,11 @@ function buildCharacter(params, opts){
   if (withOutlines) addOutlines(group);
   return { params: Object.assign({}, params), group, j, weapon, weaponDef: wDef,
            primaryHand: PRIMARY_HAND, weaponGrip, supportGrip: PRIMARY_HAND === 'right' ? AL.grip : AR.grip,
-           socket: weapon.userData.socket, twoHanded: weapon.userData.twoHanded,
-           muzzleFlash: weapon.userData.flash||null, beam: weapon.userData.beam||null,
+           socket, twoHanded,
+           muzzleFlash, beam,
            flames, bike, hipY,
            anim: { state: 'idle', elapsed: 0, attackT: -1, ikW: 0,
-                   cur: {}, curCharY: 0, weaponEquipped: weaponEquipped } };
+                   cur: {}, curCharY: 0, weaponEquipped: weaponEquipped && params.weapon >= 0 } };
 }
 
 const POSES = {
@@ -1042,7 +1050,9 @@ function normalizeParams(p) {
   d.hair = ((d.hair % HAIR_COLORS.length) + HAIR_COLORS.length) % HAIR_COLORS.length;
   d.gear = ((d.gear % GEAR_COLORS.length) + GEAR_COLORS.length) % GEAR_COLORS.length;
   d.skin = ((d.skin % SKIN_TONES.length) + SKIN_TONES.length) % SKIN_TONES.length;
-  d.weapon = ((d.weapon % WEAPONS.length) + WEAPONS.length) % WEAPONS.length;
+  if (d.weapon !== -1) {
+    d.weapon = ((d.weapon % WEAPONS.length) + WEAPONS.length) % WEAPONS.length;
+  }
   return d;
 }
 

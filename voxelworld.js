@@ -992,8 +992,10 @@
             const VC = getVC();
             if (VC) return VC.normalizeParams(base);
             const n = Object.assign({ classIdx: 0, body: 0, deco: 1, hair: 2, gear: 0, skin: 0, weapon: 0 }, base);
-            const wlen = weaponList().length || 1;
-            n.weapon = ((n.weapon % wlen) + wlen) % wlen;
+            if (n.weapon !== -1) {
+                const wlen = weaponList().length || 1;
+                n.weapon = ((n.weapon % wlen) + wlen) % wlen;
+            }
             return n;
         }
 
@@ -1057,10 +1059,31 @@
             return tpGrip;
         }
 
+        function clearHeldWeapon(grip) {
+            const target = resolveWeaponGrip(grip);
+            if (target && tpWeapon && tpWeapon.parent) tpWeapon.parent.remove(tpWeapon);
+            tpWeapon = null;
+            weaponDef = null;
+            if (av) {
+                if (av.weapon && av.weapon.parent) av.weapon.parent.remove(av.weapon);
+                av.weapon = null;
+                av.weaponDef = null;
+                av.twoHanded = false;
+                av.socket = null;
+                if (av.anim) av.anim.weaponEquipped = false;
+            }
+            resetMining();
+            updateWeaponLabel();
+        }
+
         function attachTpWeapon(grip) {
             const target = resolveWeaponGrip(grip);
             if (!target) return;
             tpGrip = target;
+            if (weaponIndex < 0) {
+                clearHeldWeapon(grip);
+                return;
+            }
             if (tpWeapon && tpWeapon.parent) tpWeapon.parent.remove(tpWeapon);
             const built = buildWeaponMesh(charAccent(), weaponIndex);
             weaponDef = built.def;
@@ -1077,6 +1100,7 @@
                 av.socket = tpWeapon.userData.socket || null;
                 av.weaponGrip = target;
                 if (!av.primaryHand) av.primaryHand = 'right';
+                if (av.anim) av.anim.weaponEquipped = true;
             }
             updateWeaponLabel();
         }
@@ -1084,6 +1108,12 @@
         function rebuildFpWeapon() {
             if (!fpMount) return;
             if (fpWeapon) fpMount.remove(fpWeapon);
+            fpWeapon = null;
+            if (weaponIndex < 0) {
+                weaponDef = null;
+                updateWeaponLabel();
+                return;
+            }
             const built = buildWeaponMesh(charAccent(), weaponIndex);
             weaponDef = built.def;
             weaponIndex = built.index;
@@ -1098,20 +1128,34 @@
             updateWeaponLabel();
         }
 
+        function weaponCycleList() {
+            const defs = weaponList();
+            const owned = defs.map((_, i) => i).filter((i) => ownedWeapons.has(i));
+            return [-1, ...owned];
+        }
+
         function setWeaponIndex(idx, quiet) {
-            const cfg = saveCharCfg({ weapon: idx });
+            const cfg = saveCharCfg({ weapon: idx | 0 });
             weaponIndex = cfg.weapon;
-            ownedWeapons.add(weaponIndex);
+            if (weaponIndex >= 0) ownedWeapons.add(weaponIndex);
             attachTpWeapon(av && av.weaponGrip);
             rebuildFpWeapon();
             syncFpTunerInputs();
             if (tpTunerEl && !tpTunerEl.hidden) syncTpTunerInputs();
             if (drawerOpen) renderDrawer();
-            if (!quiet && g.showMessage && weaponDef) g.showMessage('Equipped ' + weaponDef.name, 1400);
+            if (!quiet && g.showMessage) {
+                if (weaponDef) g.showMessage('Equipped ' + weaponDef.name, 1400);
+                else g.showMessage('Empty hands', 1200);
+            }
         }
 
         function cycleWeapon(dir) {
-            setWeaponIndex(weaponIndex + dir);
+            const list = weaponCycleList();
+            if (!list.length) return;
+            let pos = list.indexOf(weaponIndex);
+            if (pos < 0) pos = 0;
+            pos = (pos + dir + list.length) % list.length;
+            setWeaponIndex(list[pos]);
         }
 
         function isMineLaser() {
@@ -1189,7 +1233,7 @@
 
         function updateWeaponLabel() {
             const el = document.getElementById('voxel-weapon-label');
-            if (el && weaponDef) el.textContent = weaponDef.name;
+            if (el) el.textContent = weaponDef ? weaponDef.name : 'Empty hands';
         }
 
         function mapVcState(state) {
@@ -1240,7 +1284,7 @@
                     localAimPitch: aim.localPitch,
                     aimWorldDir: aimDir,
                     attackT: atk,
-                    weaponEquipped: true,
+                    weaponEquipped: weaponIndex >= 0,
                     showWeaponBeam: false
                 });
                 av.group.position.copy(player.pos);
@@ -1255,9 +1299,9 @@
           if (VC) {
             const cfg = loadCharCfg();
             weaponIndex = cfg.weapon;
-            const ch = VC.build(cfg, { weaponEquipped: true });
-            weaponDef = ch.weaponDef;
-            tpWeapon = ch.weapon;
+            const ch = VC.build(cfg, { weaponEquipped: cfg.weapon >= 0 });
+            weaponDef = ch.weaponDef || null;
+            tpWeapon = ch.weapon || null;
             tpGrip = ch.weaponGrip || (ch.weapon && ch.weapon.parent ? ch.weapon.parent : null);
             ch.group.visible = !firstPerson;
             if (!ch.group.parent) scene.add(ch.group);
@@ -3343,6 +3387,7 @@
         }
 
         function fireCombat() {
+            if (!weaponDef) return;
             const t = pickTarget();
             const hasBlock = !!(t && getBlock(t.x, t.y, t.z));
             triggerCombatAnim();
@@ -4391,6 +4436,38 @@
             return WEAPON_THUMB_CACHE[def.id];
         }
 
+        function paintEmptyHandsThumb() {
+            const c = document.createElement('canvas');
+            c.width = c.height = TILE;
+            const x = c.getContext('2d');
+            const tint = INV_TINT.empty;
+            x.fillStyle = tint.fill;
+            x.fillRect(0, 0, TILE, TILE);
+            x.strokeStyle = 'rgba(158, 184, 196, 0.55)';
+            x.lineWidth = 2;
+            x.strokeRect(10, 10, TILE - 20, TILE - 20);
+            x.fillStyle = 'rgba(158, 184, 196, 0.35)';
+            x.fillRect(14, 18, 8, 18);
+            x.fillRect(TILE - 22, 18, 8, 18);
+            return c.toDataURL();
+        }
+
+        function createEmptyHandsInvItem() {
+            const equipped = weaponIndex < 0;
+            const tint = INV_TINT.empty;
+            const item = document.createElement('div');
+            item.className = 'vx-item vx-weapon' + (equipped ? ' vx-equipped' : '');
+            item.style.cssText = invTintStyle(tint);
+            item.appendChild(createThumbWrap(tint, paintEmptyHandsThumb(), 'Empty hands'));
+            const name = document.createElement('div');
+            name.className = 'vx-name';
+            name.title = 'Empty hands';
+            name.textContent = 'Empty hands';
+            item.appendChild(name);
+            item.addEventListener('click', () => setWeaponIndex(-1));
+            return item;
+        }
+
         function createWeaponInvItem(def, index, ownedOnly) {
             const owned = ownedWeapons.has(index);
             const equipped = weaponIndex === index;
@@ -4491,6 +4568,7 @@
             const grid = document.createElement('div');
             grid.className = 'vx-grid';
             if (drawerTab === 'Weapons') {
+                grid.appendChild(createEmptyHandsInvItem());
                 const defs = weaponList();
                 const visible = ownedOnly
                     ? defs.map((d, i) => ({ def: d, i })).filter((x) => ownedWeapons.has(x.i))
@@ -5154,7 +5232,7 @@
             loadDrawerTab();
             loadHotbarLayout();
             weaponIndex = loadCharCfg().weapon;
-            ownedWeapons.add(weaponIndex);
+            if (weaponIndex >= 0) ownedWeapons.add(weaponIndex);
             updateWeaponLabel();
             on(window, 'keydown', e => {
                 keys[e.code] = true;
