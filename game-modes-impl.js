@@ -169,8 +169,15 @@
         },
 
         _setPreGameWorldVisible(visible) {
+            if (this.activeModeId === 'asteroid') {
+                this._hideLegacyPlayUI();
+                return;
+            }
             const ui = document.getElementById('ui');
-            if (ui) ui.style.visibility = visible ? '' : 'hidden';
+            if (ui) {
+                ui.style.visibility = visible ? '' : 'hidden';
+                ui.style.display = '';
+            }
             if (!this.player || !this.player.model) return;
             if (visible) {
                 // Respect FPV — do not force the body mesh visible in first person.
@@ -182,6 +189,61 @@
             } else {
                 this.player.model.visible = false;
             }
+        },
+
+        // Asteroid is a self-contained sandbox — nothing from maze/campaign HUD or hero rig.
+        _hideLegacyPlayUI() {
+            document.body.classList.add('mode-asteroid');
+            const ui = document.getElementById('ui');
+            if (ui) {
+                ui.style.visibility = 'hidden';
+                ui.style.display = 'none';
+            }
+            ['inventory-grid-ui', 'compass-ui', 'weapon-hud', 'controls-ui'].forEach((id) => {
+                const el = document.getElementById(id);
+                if (el) el.style.display = 'none';
+            });
+            if (this.player && this.player.model) this.player.model.visible = false;
+            if (this.facingIndicator) {
+                if (this.facingIndicator.groundDot) this.facingIndicator.groundDot.visible = false;
+                if (this.facingIndicator.light) this.facingIndicator.light.visible = false;
+            }
+            for (const id in (this.fpvMelees || {})) {
+                const m = this.fpvMelees[id];
+                if (m && m.pivot) m.pivot.visible = false;
+            }
+            if (this.fpvGun) this.fpvGun.visible = false;
+            this.isFiring = false;
+            this.jetpackArmed = false;
+            document.body.style.cursor = 'default';
+        },
+
+        _restoreLegacyPlayUI() {
+            document.body.classList.remove('mode-asteroid');
+            const ui = document.getElementById('ui');
+            if (ui) {
+                ui.style.visibility = '';
+                ui.style.display = '';
+            }
+            ['inventory-grid-ui', 'compass-ui', 'weapon-hud', 'controls-ui'].forEach((id) => {
+                const el = document.getElementById(id);
+                if (el) el.style.display = '';
+            });
+            if (this.facingIndicator) {
+                if (this.facingIndicator.groundDot) this.facingIndicator.groundDot.visible = true;
+                if (this.facingIndicator.light) this.facingIndicator.light.visible = true;
+            }
+            if (this.applyViewModeToPlayerModel) this.applyViewModeToPlayerModel();
+            if (this.viewMode === 'fpv' && this.fpvGun) this.fpvGun.visible = true;
+            for (const id in (this.fpvMelees || {})) {
+                const m = this.fpvMelees[id];
+                if (m && m.pivot && this.player && this.player.weapons) {
+                    const active = this.player.weapons[this.player.currentWeaponIndex];
+                    m.pivot.visible = this.viewMode === 'fpv' && active === id;
+                }
+            }
+            this.isFiring = false;
+            this.jetpackArmed = false;
         },
 
         _moveMetaCustomCursor(e) {
@@ -733,6 +795,9 @@
                 this._clearArenaObjects && this._clearArenaObjects();
             }
             if (this.creatorMode && this.creatorMode.active) this.exitCreatorMode();
+            if (this.activeModeId === 'asteroid' && this.voxelWorld) {
+                this.voxelWorld.exit();
+            }
             this.clearEnemies && this.clearEnemies();
         },
 
@@ -1334,10 +1399,14 @@
         }
 
         if (!this._isPreGameMeta || !this._isPreGameMeta()) {
-            this.updateSwordViewmodel(clampedDeltaTime);
-            this.updatePlacementGhost();
+            if (this.activeModeId !== 'asteroid') {
+                this.updateSwordViewmodel(clampedDeltaTime);
+                this.updatePlacementGhost();
+            }
         }
-        this.tickMultiplayer(clampedDeltaTime);
+        if (this.activeModeId !== 'asteroid') {
+            this.tickMultiplayer(clampedDeltaTime);
+        }
         this.render();
     };
 
@@ -1350,6 +1419,12 @@
     const _fixedUpdate = Game3D.prototype.fixedUpdate;
     Game3D.prototype.fixedUpdate = function (deltaTime) {
         if (this.simPaused) return;
+        // Asteroid: only the voxel sandbox tick — no maze combat, footsteps, or hero locomotion.
+        if (this.activeModeId === 'asteroid') {
+            this._hideLegacyPlayUI();
+            if (this.voxelWorld) this.voxelWorld.update(deltaTime);
+            return;
+        }
         _fixedUpdate.call(this, deltaTime);
         if (this.activeModeId === 'open_world' && this.worldStream) {
             this.worldStream.update(deltaTime);
@@ -1367,7 +1442,7 @@
     };
 
     Game3D.prototype.damagePlayer = function (amount) {
-        if (this.activeModeId === 'creator') return;
+        if (this.activeModeId === 'creator' || this.activeModeId === 'asteroid') return;
         if (this.player.invulnerable) return;
 
         this.player.hp = Math.max(0, this.player.hp - amount);
@@ -1552,7 +1627,7 @@
         // The open world and tiny planet surface the pickaxe tool; other play modes don't.
         const tools = this._pickaxeMode && this._pickaxeMode() ? (reg.tools || []) : [];
         // Tiny Planet is a build/explore sandbox — no combat, so hide weapons.
-        const weapons = this.activeModeId === 'planet' ? [] : reg.weapons;
+        const weapons = (this.activeModeId === 'planet' || this.activeModeId === 'asteroid') ? [] : reg.weapons;
         return {
             weapons,
             consumables: reg.consumables,
@@ -1660,6 +1735,7 @@
             while (layout.length < 9) layout.push(null);
             return layout;
         }
+        if (this.activeModeId === 'asteroid') return Array(9).fill(null);
         return _defaultQuickbarLayout.call(this).map((id) =>
             (id && this.BLOCK_DEFS && this.BLOCK_DEFS[id] ? null : id)
         );
@@ -1674,6 +1750,10 @@
         if (this.activeModeId === 'planet') {
             // Always the weapon-free build bar; don't restore a saved layout with weapons.
             this.quickbarLayout = this.defaultQuickbarLayout();
+            return;
+        }
+        if (this.activeModeId === 'asteroid') {
+            this.quickbarLayout = Array(9).fill(null);
             return;
         }
         _loadQuickbarLayout.call(this);
@@ -1713,6 +1793,7 @@
     // Tag wall meshes for creator raycast
     const _updatePlayer = Game3D.prototype.updatePlayer;
     Game3D.prototype.updatePlayer = function (deltaTime) {
+        if (this.activeModeId === 'asteroid') return;
         if (this.activeModeId === 'campaign' && this._campaignEls?.complete && !this._campaignEls.complete.hidden) {
             return;
         }

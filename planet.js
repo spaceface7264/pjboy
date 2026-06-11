@@ -80,10 +80,16 @@
     const FAR_CELLS = 200;       // far-LOD grid resolution (coarse, cheap)
     const FAR_RECESS = 4;        // sit the far mesh just under the voxel tops
     const ATMO_TOP = 2600;       // top of the atmosphere — above this (climbing) you're in space
-    const SPACE_RING = 600000;   // radius the planet cubes sit at (fixed, spread far apart)
-    const SPACE_CUBE = 160000;   // planet-cube size — utterly dwarfs the ~16u ship
-    const ENTRY_R = SPACE_CUBE * 0.5 * 2.1; // fly within this of a planet's centre → entry
-    const SPACE_FAR = 2500000;   // camera far-plane while in the (huge) space view
+    // Huge planets, kept depth-precise by the raised SPACE_NEAR + floating origin (the
+    // planet you're approaching renders near the origin). The ship stays a tiny speck.
+    const SPACE_RING = 80000000;   // radius the planet cubes sit at (fixed, far apart)
+    const SPACE_CUBE = 40000000;   // planet-cube size from space — enormous; ship is a speck
+    const ENTRY_R = SPACE_CUBE * 0.5 * 1.6; // distance to the surface where the descent begins
+    const ATMOS_R = SPACE_CUBE * 0.5 * 2.4; // atmosphere shell — white mist begins here
+    const SPACE_FAR = 400000000;   // camera far-plane for the space view
+    const SPACE_NEAR = 2500;       // camera near-plane in space (depth precision for the giant)
+    const SHIP_SPACE_SCALE = 8;    // ship scaled so it's a small-but-visible craft at the far chase dist
+    const ENTRY_SECONDS = 30;      // how long the atmospheric entry takes
     // Atmosphere layers (fractions of ATMO_TOP, ground → space) shown during entry/exit.
     const ATMO_LAYERS = [
         { name: 'Troposphere', top: 0.16 },
@@ -141,6 +147,28 @@
     const SHIP_PATH = 'assets/Spaceship_shaded.glb';  // imported spaceship (self-contained baked materials)
     const PLANET_GLB = 'assets/planets/Cube_World_baked.glb'; // cube-world (procedural shader baked to a texture)
     const WATER_GLB = 'assets/water.glb'; // baked wavy ocean disk (DAZ Water.obj → centered, ~2850 across, ±0.8 wave), shaded with the PBR water shader
+    const ALIEN_GLB = 'assets/alien/alien_worlds.glb'; // low-poly alien-world prop library (36 SP_* props, shared atlas, base-centred)
+    // Prop pools (node names in ALIEN_GLB).
+    const A_ROCK = ['SP_Rock01', 'SP_Rock02', 'SP_Rock03', 'SP_Rock04', 'SP_Rock05', 'SP_Rock06', 'SP_Rock07', 'SP_Rock08', 'SP_Rock09'];
+    const A_STONE = ['SP_Stone01', 'SP_Stone02'];
+    const A_CRYSTAL = ['SP_Crystal01', 'SP_Crystal02'];
+    const A_PLANT = ['SP_Plant01', 'SP_Plant02', 'SP_Plant03', 'SP_Plant04', 'SP_Plant05', 'SP_Plant06', 'SP_Plant07', 'SP_Plant08', 'SP_Plant09'];
+    const A_MTN = ['SP_Mountain01', 'SP_Mountain02', 'SP_Mountain03'];
+    const A_TREE = ['SP_Tree01', 'SP_Tree02', 'SP_Tree03', 'SP_Tree04'];
+    // Flat-world prop scatter, per planet key: perChunk count + weighted pools (w) with final scale range (s).
+    const FLAT_PROPS = {
+        // Ember (ash/volcanic): rocky & crystalline, sparse hardy plants, rare landmark peaks + antenna.
+        ember: { perChunk: 18, entries: [
+            { names: A_ROCK,    w: 0.34, s: [1.0, 2.2] },
+            { names: A_STONE,   w: 0.22, s: [1.0, 2.0] },
+            { names: A_CRYSTAL, w: 0.18, s: [1.2, 2.4] },
+            { names: A_PLANT,   w: 0.12, s: [1.2, 2.2] },
+            { names: A_MTN,     w: 0.08, s: [2.5, 5.0] },
+            { names: ['SP_Sci_fi_Antenna'], w: 0.03, s: [1.5, 2.2] },
+            { names: A_TREE,    w: 0.03, s: [1.4, 2.2] },
+        ] },
+    };
+    for (const k in FLAT_PROPS) FLAT_PROPS[k]._wsum = FLAT_PROPS[k].entries.reduce((a, e) => a + e.w, 0);
     const pick = (arr, rng) => arr[(rng() * arr.length) | 0];
 
     // --- deterministic noise / rng -----------------------------------------
@@ -628,7 +656,7 @@
             this._clearFlatChunks();
             if (this._flatClouds) { g.scene.remove(this._flatClouds); this._flatClouds = null; }
             this._clearSpacePlanets();
-            this._flying = false; this._space = false;
+            this._flying = false; this._space = false; this._descending = false;
             this._fx = null;
             this._setUnderwater(false);
             this._clearWaterFx();
@@ -1118,6 +1146,9 @@
 
             this._flatChunks = new Map();
             this._lastFlatKey = null;
+            // Per-planet alien-prop scatter (e.g. Ember); null → no props for this world.
+            this._flatPropCfg = FLAT_PROPS[(this._activeDef && this._activeDef.key)] || null;
+            if (this._flatPropCfg) this._loadAlienProps();
             this._placedMesh = null; this._placedCount = 0; // building deferred on flat
             // Spawn at the origin, on the ground.
             const p = g.player.position;
@@ -1194,7 +1225,9 @@
             if (open) {
                 const list = this._travelListEl;
                 list.innerHTML = '';
+                const SHOWN = ['home', 'ember'];
                 for (const key in PLANETS) {
+                    if (SHOWN.indexOf(key) < 0) continue; // only Terra + Ember for now
                     const d = PLANETS[key];
                     const here = (d === this._activeDef);
                     const b = document.createElement('button');
@@ -1535,6 +1568,7 @@
             if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
             this.game.scene.add(mesh);
             this._flatChunks.set(key, mesh);
+            this._scatterFlatProps(cx, cz); // alien props stream in with the terrain
         }
 
         _dropFlatChunk(key) {
@@ -1543,15 +1577,124 @@
             this.game.scene.remove(mesh);
             if (mesh.dispose) mesh.dispose(); // frees instance buffers (geo/mat are shared)
             this._flatChunks.delete(key);
+            this._dropFlatProps(key);
         }
 
         _clearFlatChunks() {
+            this._clearFlatProps();
             if (!this._flatChunks) return;
             for (const mesh of this._flatChunks.values()) {
                 this.game.scene.remove(mesh);
                 if (mesh.dispose) mesh.dispose();
             }
             this._flatChunks.clear();
+        }
+
+        // ---- alien prop scatter (flat worlds) -----------------------------------------
+        // Load the prop library once, convert its atlas material to Lambert (non-PBR
+        // renderer), then rebuild chunks so props populate the current world.
+        _loadAlienProps() {
+            if (this._alienScene) { this._afterAlienLoad(); return; }
+            const cached = this.assetCache.get(ALIEN_GLB);
+            const use = (gltf) => { this._buildAlienTpl(gltf); this._afterAlienLoad(); };
+            if (cached) { use(cached); return; }
+            if (!this.loader) this.loader = new THREE.GLTFLoader();
+            this.loader.load(ALIEN_GLB, (gltf) => { this.assetCache.set(ALIEN_GLB, gltf); use(gltf); },
+                undefined, (e) => console.warn('[planet] alien props load failed', e && e.message));
+        }
+
+        _buildAlienTpl(gltf) {
+            const src = gltf.scene || (gltf.scenes && gltf.scenes[0]);
+            if (!src) return;
+            // One shared Lambert material (atlas map) for all props → every chunk's props
+            // merge into a single mesh / draw call.
+            if (!this._alienMat) {
+                let map = null;
+                src.traverse((o) => { if (!map && o.isMesh && o.material) { const m = Array.isArray(o.material) ? o.material[0] : o.material; if (m && m.map) map = m.map; } });
+                this._alienMat = new THREE.MeshLambertMaterial({ map, color: 0xffffff });
+            }
+            src.updateMatrixWorld(true); // bake node transforms for per-prop geometry merge
+            this._alienScene = src;
+        }
+
+        _afterAlienLoad() {
+            // Re-stream so chunks built before the library arrived get their props.
+            if (FLAT_SURFACE && this._flatPropCfg && this._flatChunks) { this._clearFlatChunks(); this._streamFlat(true); }
+        }
+
+        _pickAlienEntry(cfg, rng) {
+            let r = rng() * cfg._wsum;
+            for (const e of cfg.entries) { r -= e.w; if (r <= 0) return e; }
+            return cfg.entries[cfg.entries.length - 1];
+        }
+
+        // Concatenate non-indexed geometries (shared attributes) into one BufferGeometry.
+        _mergeGeos(geos) {
+            let total = 0; for (const g of geos) total += g.attributes.position.count;
+            const pos = new Float32Array(total * 3), nor = new Float32Array(total * 3), uv = new Float32Array(total * 2);
+            let vo = 0;
+            for (const g of geos) {
+                const gp = g.attributes.position, gn = g.attributes.normal, gu = g.attributes.uv, n = gp.count;
+                pos.set(gp.array.subarray(0, n * 3), vo * 3);
+                if (gn) nor.set(gn.array.subarray(0, n * 3), vo * 3);
+                if (gu) uv.set(gu.array.subarray(0, n * 2), vo * 2);
+                vo += n;
+            }
+            const out = new THREE.BufferGeometry();
+            out.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+            out.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
+            out.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+            return out;
+        }
+
+        // Deterministically scatter props across one flat chunk (seeded by chunk+world),
+        // merged into ONE mesh so each populated chunk costs just one extra draw call.
+        _scatterFlatProps(cx, cz) {
+            const cfg = this._flatPropCfg;
+            if (!cfg || !this._alienScene) return;
+            const key = cx + ',' + cz;
+            if (!this._flatProps) this._flatProps = new Map();
+            if (this._flatProps.has(key)) return;
+            const rng = mulberry32((((cx * 73856093) ^ (cz * 19349663) ^ (SEED * 83492791)) >>> 0) || 1);
+            const x0 = cx * FCHUNK, z0 = cz * FCHUNK;
+            const m4 = new THREE.Matrix4(), qy = new THREE.Quaternion(), UP = this._UPY || (this._UPY = new THREE.Vector3(0, 1, 0));
+            const pv = new THREE.Vector3(), sv = new THREE.Vector3();
+            const geos = [];
+            for (let i = 0; i < cfg.perChunk; i++) {
+                const sx = x0 + rng() * FCHUNK, sz = z0 + rng() * FCHUNK;
+                const top = flatTopAt(sx, sz);
+                if (top < WATER_LEVEL) continue; // land only — no props in the sea
+                const e = this._pickAlienEntry(cfg, rng);
+                const node = this._alienScene.getObjectByName(e.names[(rng() * e.names.length) | 0]);
+                if (!node || !node.geometry) continue;
+                const s = e.s[0] + rng() * (e.s[1] - e.s[0]);
+                qy.setFromAxisAngle(UP, rng() * Math.PI * 2);
+                m4.compose(pv.set(sx, top, sz), qy, sv.set(s, s, s)); // place on the block top, random yaw
+                m4.multiply(node.matrixWorld);                        // bake the prop's own transform
+                let g = node.geometry.clone().applyMatrix4(m4);
+                if (g.index) { const ni = g.toNonIndexed(); g.dispose(); g = ni; }
+                geos.push(g);
+            }
+            if (!geos.length) { this._flatProps.set(key, null); return; }
+            const merged = this._mergeGeos(geos);
+            for (const g of geos) g.dispose();
+            const mesh = new THREE.Mesh(merged, this._alienMat);
+            mesh.frustumCulled = false; mesh.castShadow = false;
+            this.game.scene.add(mesh);
+            this._flatProps.set(key, mesh);
+        }
+
+        _dropFlatProps(key) {
+            if (!this._flatProps) return;
+            const mesh = this._flatProps.get(key);
+            if (mesh) { this.game.scene.remove(mesh); if (mesh.geometry) mesh.geometry.dispose(); }
+            this._flatProps.delete(key);
+        }
+
+        _clearFlatProps() {
+            if (!this._flatProps) return;
+            for (const mesh of this._flatProps.values()) { if (mesh) { this.game.scene.remove(mesh); if (mesh.geometry) mesh.geometry.dispose(); } }
+            this._flatProps.clear();
         }
 
         // Far-LOD terrain: one coarse mesh covering a big region (the toroidal world
@@ -1721,6 +1864,7 @@
                 this._shipMinY = box.min.y * scale;
                 obj.position.set(sx, flatTopAt(sx, sz) - this._shipMinY, sz);
                 g.scene.add(obj); this._ship = obj;
+                this._shipBaseScale = scale; // surface scale; flight scales up in space
                 this._shipHalf = longest * scale * 0.5;
                 this._shipHomeX = sx; this._shipHomeZ = sz; // resting spot (for toroidal re-anchoring)
             };
@@ -1733,13 +1877,103 @@
         // planet from space is automatic on approach — no key.)
         _flatInteract() {
             if (this._flying) {
-                if (!this._space) {
-                    const gy = flatTopAt(this._shipPos.x, this._shipPos.z);
-                    if (this._shipPos.y < gy + 8) this._disembark();
+                if (this._descending) return; // mid auto-descent
+                if (this._space) {
+                    if (this._descendTarget) this._startDescent(this._descendTarget); // E in proximity
+                    return;
                 }
+                const gy = flatTopAt(this._shipPos.x, this._shipPos.z);
+                if (this._shipPos.y < gy + 8) this._disembark();
                 return;
             }
             if (this._nearShip) this._boardShip();
+        }
+
+        // Automated cinematic descent: fly into the planet, hand off to the surface, fly down.
+        _startDescent(def) {
+            this._descending = true;
+            this._descendDef = def;
+            this._descendT = 0;
+            this._showPrompt('');
+            this.game.showMessage && this.game.showMessage('🛬 Beginning descent to ' + (def.name || def.key), 2600);
+        }
+
+        _descendGrp() { return (this._spacePlanets || []).find((c) => c.userData.def === this._descendDef); }
+
+        // Apply the white atmospheric mist in space: clear far out, thickening to a white-out
+        // as the ship penetrates the atmosphere shell (`dist` = ship→planet-centre distance).
+        _applyMist(dist) {
+            const g = this.game;
+            const surf = SPACE_CUBE * 0.5;
+            const m = Math.max(0, Math.min(1, (ATMOS_R - dist) / (ATMOS_R - surf))); // 0 at shell → 1 at surface
+            if (m <= 0.001) { g.scene.fog = null; return; }
+            if (!g.scene.fog) g.scene.fog = new THREE.Fog(0xeaf2ff, 1, SPACE_FAR);
+            g.scene.fog.color.setHex(0xeaf2ff);
+            if (g.scene.background && g.scene.background.lerp) g.scene.background.lerp(new THREE.Color(0xeaf2ff), m * 0.6);
+            const far = dist * (1.55 - m * 1.45); // 1.55·dist (planet visible) → 0.1·dist (white-out)
+            g.scene.fog.far = Math.max(far, 1500);
+            g.scene.fog.near = g.scene.fog.far * 0.12;
+        }
+
+        // Descent through the atmosphere: white mist up high (just penetrated the shell)
+        // clearing to the planet's own sky as the ship nears the ground.
+        _applyDescentMist() {
+            const g = this.game;
+            const gy = flatTopAt(this._shipPos.x, this._shipPos.z);
+            const t = Math.max(0, Math.min(1, (this._shipPos.y - gy) / ATMO_TOP)); // 1 high → 0 ground
+            const sky = this._skyDay || new THREE.Color(0x8ec6ff);
+            const col = (this._tmpMist || (this._tmpMist = new THREE.Color())).copy(sky).lerp(new THREE.Color(0xeaf2ff), t); // white at altitude
+            if (g.sky) g.sky.material.color.copy(col);
+            if (g.scene.background && g.scene.background.copy) g.scene.background.copy(col);
+            const far = this._fogFar || 1200;
+            if (!g.scene.fog) g.scene.fog = new THREE.Fog(col.getHex(), 1, far);
+            g.scene.fog.color.copy(col);
+            g.scene.fog.far = far * (0.35 + 0.65 * (1 - t)); // denser mist up high, opening up near the ground
+            g.scene.fog.near = g.scene.fog.far * 0.05;
+        }
+
+        _autoDescend(dt) {
+            const g = this.game, v = this._shipVel;
+            this._descendT = (this._descendT || 0) + dt;
+            const remain = Math.max(0, ENTRY_SECONDS - this._descendT);
+            const el = this._ensureAltUI();
+            if (el) { el.style.display = 'block'; el.textContent = '☁ Entering the Atmosphere · ' + Math.ceil(remain) + 's'; }
+            if (this._space) {
+                const grp = this._descendGrp();
+                if (!grp) { this._descending = false; return; }
+                const tgt = (this._tmpDir2 || (this._tmpDir2 = new THREE.Vector3())).copy(grp.userData.world).sub(this._shipPos);
+                const dist = tgt.length() || 1;
+                this._shipYaw = Math.atan2(tgt.x, tgt.z);
+                this._shipPitch = Math.asin(Math.max(-1, Math.min(1, tgt.y / dist)));
+                const surf = SPACE_CUBE * 0.55;
+                const step = Math.max(dist - surf, 0) * Math.min(1, dt * 0.55); // exponential ease toward the surface
+                this._shipPos.addScaledVector(tgt.normalize(), step);
+                this._applyMist(dist); // build the white mist as we close in
+                if (dist <= surf * 1.03) this._beginEntry(this._descendDef); // hand off deep in the white-out
+            } else {
+                this._shipPitch += (-0.5 - this._shipPitch) * Math.min(1, dt * 1.0); // ease nose down
+                const cy = Math.cos(this._shipYaw), sy = Math.sin(this._shipYaw), cp = Math.cos(this._shipPitch);
+                const fwd = (this._tmpFwd || (this._tmpFwd = new THREE.Vector3())).set(sy * cp, 0, cy * cp);
+                this._shipPos.addScaledVector(fwd, 90 * dt); // gentle forward drift
+                const gy = flatTopAt(this._shipPos.x, this._shipPos.z) + 2;
+                const rate = (this._shipPos.y - gy) / Math.max(remain, 0.5); // reach the ground exactly at ENTRY_SECONDS
+                this._shipPos.y -= rate * dt;
+                this._streamFlat(false); this._updateFlatSky(dt);
+                this._applyDescentMist(); // white mist clearing to the planet sky as we drop
+                if (this._shipPos.y <= gy + 6 || remain <= 0.05) { this._shipPos.y = gy; this._descending = false; this._descendT = 0; this._disembark(); return; }
+            }
+            // Render ship + camera (floating origin in space).
+            const rpos = this._shipRenderPos || (this._shipRenderPos = new THREE.Vector3());
+            if (this._space) rpos.set(0, 0, 0); else rpos.copy(this._shipPos);
+            if (this._ship) {
+                this._ship.position.copy(rpos);
+                this._ship.quaternion.setFromEuler(new THREE.Euler(-this._shipPitch, this._shipYaw, 0, 'YXZ'));
+                this._ship.scale.setScalar((this._shipBaseScale || 1) * (this._space ? SHIP_SPACE_SCALE : 1));
+                this._ship.visible = true;
+            }
+            g.player.position.copy(rpos);
+            if (this._space) for (const grp of this._spacePlanets || []) grp.position.copy(grp.userData.world).sub(this._shipPos);
+            this._flatFlightCamera();
         }
 
         // Full-screen atmospheric wash that masks the space↔surface representation swap.
@@ -1778,7 +2012,7 @@
         _boardShip() {
             const g = this.game;
             if (!this._ship) return;
-            this._flying = true; this._space = false;
+            this._flying = true; this._space = false; this._descending = false; this._descendTarget = null;
             this._showPrompt('');
             if (g.player.model) g.player.model.visible = false;
             this._shipPos = (this._shipPos || new THREE.Vector3()).copy(this._ship.position);
@@ -1822,7 +2056,7 @@
             const v = this._shipVel, boost = g.getSpeedBoostMultiplier ? g.getSpeedBoostMultiplier() : 1;
             // Thrust = acceleration (Newtonian). In space there's almost no drag, so you
             // build momentum and COAST — turning doesn't snap your velocity, you drift.
-            const TH = (this._space ? 9000 : 95) * boost;
+            const TH = (this._space ? 1400000 : 95) * boost;
             if (g.keys['KeyW']) v.addScaledVector(fwd, TH * dt);
             if (g.keys['KeyS']) v.addScaledVector(fwd, -TH * 0.6 * dt); // reverse / brake
             if (g.keys['Space']) v.y += TH * dt;
@@ -1831,7 +2065,7 @@
             // Inertia: near-frictionless coasting in space; mild air drag in atmosphere.
             v.multiplyScalar(1 - Math.min(1, dt * (this._space ? 0.04 : 0.6)));
             if (this._space) { // cap top speed so momentum stays controllable
-                const maxV = 55000 * boost, s2 = v.lengthSq();
+                const maxV = 9000000 * boost, s2 = v.lengthSq();
                 if (s2 > maxV * maxV) v.multiplyScalar(maxV / Math.sqrt(s2));
             }
             this._shipPos.addScaledVector(v, dt);
@@ -1845,8 +2079,13 @@
                 this._shipFloating = onWater && this._shipPos.y <= gy + 0.4 && !g.keys['Space'];
                 this._showPrompt(this._shipPos.y < gy + 4 ? 'Press E to disembark' : '');
             } else { this._shipFloating = false; }
+            // Floating origin: in space the ship renders at the ORIGIN and the planets are
+            // offset by -shipPos (see _updateSpace), so nothing sits at multi-million-unit
+            // coords where float32 would jitter. In the atmosphere it's just shipPos.
+            const rpos = this._shipRenderPos || (this._shipRenderPos = new THREE.Vector3());
+            if (this._space) rpos.set(0, 0, 0); else rpos.copy(this._shipPos);
             if (this._ship) {
-                this._ship.position.copy(this._shipPos);
+                this._ship.position.copy(rpos);
                 // Buoyant bob on the rendered hull while settled on water (camera tracks
                 // _shipPos, which stays steady — the hull bobs, the view doesn't lurch).
                 if (this._shipFloating) {
@@ -1857,18 +2096,21 @@
                 }
                 // -pitch so the nose follows the flight direction (matches cursor-up = nose-up).
                 this._ship.quaternion.setFromEuler(new THREE.Euler(-this._shipPitch, this._shipYaw, this._shipRoll || 0, 'YXZ'));
+                // Scale the ship up in space so it reads at the normal iso size despite the far camera.
+                const ssc = (this._shipBaseScale || this._ship.scale.x) * (this._space ? SHIP_SPACE_SCALE : 1);
+                this._ship.scale.setScalar(ssc);
                 this._ship.visible = !this._cockpit; // hidden in cockpit FPV — the drawn cockpit frames the view
             }
             // Engine thruster glow behind the ship, scaled by thrust input.
             {
                 const amt = (g.keys['KeyW'] ? 1 : 0) + (g.keys['Space'] ? 0.6 : 0);
-                const th = this._ensureThruster(); const h = this._shipHalf || 8;
-                th.position.set(this._shipPos.x - fwd.x * h * 0.95, this._shipPos.y - fwd.y * h * 0.95, this._shipPos.z - fwd.z * h * 0.95);
+                const th = this._ensureThruster(); const h = (this._shipHalf || 8) * (this._space ? SHIP_SPACE_SCALE : 1);
+                th.position.set(rpos.x - fwd.x * h * 0.95, rpos.y - fwd.y * h * 0.95, rpos.z - fwd.z * h * 0.95);
                 const sc = h * (0.5 + amt * 1.3); th.scale.set(sc, sc, sc);
                 th.material.opacity = 0.28 + amt * 0.55;
                 th.visible = !this._cockpit;
             }
-            g.player.position.copy(this._shipPos); // anchor streaming/camera to the ship
+            g.player.position.copy(rpos); // anchor streaming/camera to the (rendered) ship
             if (!this._space) {
                 this._streamFlat(false);
                 this._updateFlatSky(dt);
@@ -1947,7 +2189,7 @@
             if (this._sun) this._sun.intensity = 1.0;
             if (this._ambient) this._ambient.intensity = 0.4;
             if (this._altEl) this._altEl.style.display = 'none';
-            if (g.camera) { g.camera.far = SPACE_FAR; g.camera.updateProjectionMatrix(); } // see across the system
+            if (g.camera) { g.camera.near = SPACE_NEAR; g.camera.far = SPACE_FAR; g.camera.updateProjectionMatrix(); } // big depth range, kept precise by the raised near plane
             this._buildSpacePlanets();
             // Place the ship straight ABOVE the planet you just left (you climbed out along
             // +Y), keeping your heading + momentum — so you continue up and the planet sits
@@ -2019,14 +2261,10 @@
             model.scale.setScalar(SPACE_CUBE / longest);
             if (land && land.material) {
                 const mat = land.material.clone(); land.material = mat; // don't mutate the shared asset
-                if (mat.map) {
-                    // Baked landscape texture present: show it, with a gentle per-planet hue
-                    // (mostly white so the texture reads; multiply just tints it).
-                    if (mat.color) mat.color.copy(new THREE.Color(def.sky || 0x6f9e4a).lerp(new THREE.Color(0xffffff), 0.72));
-                } else if (mat.color) {
-                    mat.color.setHex(def.sky || 0x6f9e4a); // untextured fallback
-                }
-                if (mat.emissive) { mat.emissive.setScalar(0.06); mat.emissiveIntensity = 1; } // lift shadowed faces a touch
+                // Show the baked landscape texture (visible from a distance), gently hued.
+                if (mat.map && mat.color) mat.color.copy(new THREE.Color(def.sky || 0x6f9e4a).lerp(new THREE.Color(0xffffff), 0.7));
+                else if (mat.color) mat.color.setHex(def.sky || 0x6f9e4a);
+                if (mat.emissive) { mat.emissive.setScalar(0.05); mat.emissiveIntensity = 1; }
                 land.frustumCulled = false;
             }
             return model;
@@ -2037,7 +2275,10 @@
             this._clearSpacePlanets();
             this._spacePlanets = [];
             const glowTex = this._sunGlowTex(['rgba(255,255,255,0.5)', 'rgba(255,255,255,0.12)', 'rgba(255,255,255,0)']);
-            const keys = Object.keys(PLANETS), n = keys.length;
+            // Only show (and allow travel to) these worlds for now.
+            const SHOWN = ['home', 'ember'];
+            const keys = Object.keys(PLANETS).filter((k) => SHOWN.indexOf(k) >= 0);
+            const n = Math.max(keys.length, 2); // keep them spread apart even with just 2
             let i = 0;
             for (const key of keys) {
                 const d = PLANETS[key];
@@ -2045,13 +2286,14 @@
                 const grp = new THREE.Group();
                 const planet = this._spacePlanetModel(d) || this._makeSpacePlanetMesh(d);
                 grp.add(planet);
-                // Soft atmosphere halo, tinted by the planet's sky colour.
-                const halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color: (d.atm && d.atm[0]) || 0x88bbff, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
-                halo.scale.setScalar(SPACE_CUBE * 2.2);
+                // Soft additive atmosphere glow (keeps the planet texture readable from afar;
+                // the dense white mist is the fog you fly through on descent, not this sprite).
+                const halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color: 0xcfe2ff, transparent: true, opacity: 0.5, blending: THREE.AdditiveBlending, depthWrite: false }));
+                halo.scale.setScalar(ATMOS_R * 2.2);
                 halo.frustumCulled = false;
                 grp.add(halo);
-                grp.position.set(Math.cos(ang) * SPACE_RING, ((i % 3) - 1) * 420, Math.sin(ang) * SPACE_RING);
-                grp.userData.def = d; grp._cube = planet;
+                grp.position.set(Math.cos(ang) * SPACE_RING, ((i % 3) - 1) * SPACE_RING * 0.12, Math.sin(ang) * SPACE_RING);
+                grp.userData.def = d; grp.userData.world = grp.position.clone(); grp._cube = planet;
                 g.scene.add(grp);
                 this._spacePlanets.push(grp);
                 i++;
@@ -2077,18 +2319,20 @@
         _updateSpace(dt) {
             if (this._fx) return; // mid-transition — hold
             let nearest = null, nd = 1e9;
-            for (const grp of this._spacePlanets || []) { // planets stay fixed in place
-                const d = grp.position.distanceTo(this._shipPos);
+            for (const grp of this._spacePlanets || []) {
+                // Floating origin: render each planet relative to the ship (held at origin).
+                grp.position.copy(grp.userData.world).sub(this._shipPos);
+                const d = grp.position.length();
                 if (d < nd) { nd = d; nearest = grp; }
             }
-            // Pierce the atmosphere shell → drop straight onto the surface (no fade), the
-            // mirror of the exit: the planet fills the view, then you're standing on it.
-            if (nearest && nd < ENTRY_R) {
-                this._showPrompt('');
-                this._beginEntry(nearest.userData.def);
+            // Within range → offer an automated cinematic descent (E). The ship flies in,
+            // the planet fills the view, and it hands off to the surface + flies you down.
+            this._descendTarget = (nearest && nd < ENTRY_R * 2.4) ? nearest.userData.def : null;
+            if (this._descendTarget) {
+                this._showPrompt('Press E to descend to ' + (this._descendTarget.name || 'planet'));
                 return;
             }
-            this._showPrompt('Fly toward a planet to enter it');
+            this._showPrompt('Fly toward a planet');
             // Nav readout: nearest planet + distance.
             const el = this._ensureAltUI();
             if (el && nearest) {
@@ -2106,7 +2350,7 @@
             this._nearestPlanet = null;
             this._space = false;
             this._showPrompt('');
-            if (g.camera) { g.camera.far = 21000; g.camera.updateProjectionMatrix(); } // surface range
+            if (g.camera) { g.camera.near = 1.5; g.camera.far = 21000; g.camera.updateProjectionMatrix(); } // back to surface range
             this._teardownFlatScene();
             this._activeDef = def; this._activeKey = def.key; setActivePlanet(def); this._streamed = !!def.streamed;
             this._buildFlatScene();              // builds the world (also resets pose) ...
@@ -2170,7 +2414,7 @@
             cam.up.set(0, 1, 0);
             const cy = Math.cos(this._shipYaw), sy = Math.sin(this._shipYaw), cp = Math.cos(this._shipPitch), sp = Math.sin(this._shipPitch);
             const fx = sy * cp, fy = sp, fz = cy * cp;
-            const p = this._shipPos, h = this._shipHalf || 8;
+            const p = this._shipRenderPos || this._shipPos, h = this._shipHalf || 8;
             if (this._cockpit) {
                 // First-person from the seat, looking straight out; the drawn cockpit frames it.
                 const eyeY = p.y + h * 0.12;
@@ -2183,7 +2427,10 @@
                 // Locked behind the tail: sit directly behind the ship along its FULL
                 // heading (yaw + pitch) so steering turns the view with the ship; raised a
                 // little for the iso feel. Camera stays world-upright (no roll).
-                const dist = h * 3.5 + 18, lift = h * 1.0 + 7;
+                // In space the cam sits well back (past the raised near plane) so the ship
+                // reads as a small craft against the huge planets; close chase on the surface.
+                const dist = this._space ? 4000 : (h * 3.5 + 18);
+                const lift = this._space ? 1200 : (h * 1.0 + 7);
                 const target = (this._tmpCam || (this._tmpCam = new THREE.Vector3()))
                     .set(p.x - fx * dist, p.y - fy * dist + lift, p.z - fz * dist);
                 if (this._space) {
@@ -4520,7 +4767,7 @@
             // Toroidal flat world: ship flight when boarded, otherwise the walker.
             // _tickFx runs every frame (not just while flying) so the entry/exit wash
             // always finishes fading out — otherwise the bloom freezes the screen.
-            if (FLAT_SURFACE) { this._tickFx(dt); this._updateWater(dt); this._tickWaterFx(dt); if (this._flying) this._updateFlatFlight(dt); else this._updateFlatPlayer(dt); return; }
+            if (FLAT_SURFACE) { this._tickFx(dt); this._updateWater(dt); this._tickWaterFx(dt); if (this._flying) { if (this._descending) this._autoDescend(dt); else this._updateFlatFlight(dt); } else this._updateFlatPlayer(dt); return; }
             const p = g.player.position;
             const vel = g.player.velocity;
             const center = this._center;

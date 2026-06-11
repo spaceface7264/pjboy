@@ -1256,7 +1256,7 @@ class Game3D {
 
     updatePlacementGhost() {
         // The planet uses a center-screen surface raycast, not the flat ghost cube.
-        if (this.activeModeId === 'planet') {
+        if (this.activeModeId === 'planet' || this.activeModeId === 'asteroid') {
             if (this.placementGhost) this.placementGhost.visible = false;
             return;
         }
@@ -2472,7 +2472,8 @@ class Game3D {
         // the held weapon with its own viewmodel (managed by WorldStream).
         const blockArmed = !!this.activeBlockId
             || (this._pickaxeMode() && this.owPickaxeEquipped)
-            || this.activeModeId === 'planet'; // no combat on the planet — never show a weapon
+            || this.activeModeId === 'planet'
+            || this.activeModeId === 'asteroid';
 
         // ---- Melee viewmodels (all melee weapons share the swing animation; only the active one is visible) ----
         const meleeWeaponId = this.player.weapons[this.player.currentWeaponIndex];
@@ -3156,6 +3157,11 @@ class Game3D {
     // viewMode changes OR the player model is replaced (character swap, async load, etc.)
     applyViewModeToPlayerModel() {
         if (this.player && this.player.model) {
+            // Asteroid mode uses its own voxel avatar — never show the shared GLTF hero.
+            if (this.activeModeId === 'asteroid') {
+                this.player.model.visible = false;
+                return;
+            }
             this.player.model.visible = (this.viewMode !== 'fpv');
         }
     }
@@ -4128,6 +4134,7 @@ class Game3D {
         mesh.instanceMatrix.needsUpdate = true;
         this.scene.add(mesh);
         this.crystalRoof = mesh;
+        if (this.activeModeId === 'asteroid') this.crystalRoof.visible = false;
     }
 
     // Locate the roof tile under world coords (x, z). Returns the tile record
@@ -4296,6 +4303,7 @@ class Game3D {
         this.cheeseFloor = mesh;
         // Hide the fallback plane now that cheese tiles cover it (keep underneath as safety)
         if (this.ground) this.ground.visible = false;
+        if (this.activeModeId === 'asteroid') this.cheeseFloor.visible = false;
     }
 
     updateGroundAndFog(width, height) {
@@ -7098,6 +7106,8 @@ class Game3D {
 
     handlePlayClick(event) {
         if (this._worldMapOpen) return;
+        // Asteroid mode handles mine/place via its own pointer listeners.
+        if (this.activeModeId === 'asteroid' && this.voxelWorld) return;
         // Tiny Planet: build (block selected) or mine on the surface.
         if (this.activeModeId === 'planet' && this.planetWorld) {
             // handlePlayClick fires on BOTH mousedown and click for one physical
@@ -8847,6 +8857,11 @@ class Game3D {
         document.addEventListener('keydown', (event) => {
             this.keys[event.code] = true;
 
+            // Asteroid uses its own input + HUD; legacy maze bindings stay off.
+            if (this.activeModeId === 'asteroid' && this.appPhase === 'playing') {
+                return;
+            }
+
             // World map (K) — handled before shouldBlockInput so it can also
             // close itself while the modal is up. Esc closes it too.
             if (event.code === 'KeyK' && !event.repeat && this.activeModeId === 'open_world'
@@ -8936,6 +8951,7 @@ class Game3D {
             // V: swap FPV / iso — but while piloting the ship, V is the cockpit toggle
             // (handled in planet.js), so don't also flip the world view mode here.
             if (event.code === 'KeyV' && !event.repeat
+                && this.activeModeId !== 'asteroid'
                 && !(this.activeModeId === 'planet' && this.planetWorld && this.planetWorld._flying)) {
                 this.setViewMode(this.viewMode === 'fpv' ? 'iso' : 'fpv');
             }
@@ -9068,6 +9084,7 @@ class Game3D {
                 this.handleCreateModeHover();
                 return;
             } else if (this.gameMode === 'play' && !this.modalOpen) {
+                if (this.activeModeId === 'asteroid') return;
                 if (this.isGameplayActive && !this.isGameplayActive()) return;
                 // Pointer-lock deltas when locked, client coords otherwise.
                 const canvas = document.getElementById('gameCanvas');
@@ -9142,6 +9159,7 @@ class Game3D {
             if (this.isDrawerOpen) {
                 return;
             }
+            if (this.activeModeId === 'asteroid') return;
 
             if (this.gameMode === 'create' && !this.modalOpen) {
                 this.createMode.isMouseDown = true;
@@ -9177,6 +9195,7 @@ class Game3D {
         document.addEventListener('click', (event) => {
             // Drawer is a modal-ish overlay — don't grab pointer-lock or fire.
             if (this.isDrawerOpen) return;
+            if (this.activeModeId === 'asteroid') return;
             if (this.gameMode === 'create' && !this.modalOpen) {
                 this.handleCreateModeClick(event);
             } else if (this.gameMode === 'play' && !this.modalOpen) {
@@ -9208,6 +9227,7 @@ class Game3D {
         });
         
         document.addEventListener('pointerlockchange', () => {
+            if (this.activeModeId === 'asteroid') return;
             this.isPointerLocked = document.pointerLockElement === document.body;
             // If lock is re-acquired while the drawer is open (e.g. stray click
             // racing the drawer open), release it immediately so the cursor stays usable.
@@ -9227,7 +9247,8 @@ class Game3D {
             // (no aiming there — keeps the aim dot out of the ship's iso/chase view).
             const ch = document.getElementById('crosshair');
             if (ch) {
-                ch.style.display = (this.gameMode === 'play' && this.viewMode === 'fpv' && this.activeModeId !== 'planet') ? 'block' : 'none';
+                ch.style.display = (this.gameMode === 'play' && this.viewMode === 'fpv'
+                    && this.activeModeId !== 'planet' && this.activeModeId !== 'asteroid') ? 'block' : 'none';
             }
         });
 
@@ -9240,6 +9261,10 @@ class Game3D {
         // Mouse wheel switches weapon
         document.addEventListener('wheel', (event) => {
             if (this.isDrawerOpen) {
+                return;
+            }
+            // Asteroid uses wheel for camera zoom / blocks UI scroll — not maze weapons.
+            if (this.activeModeId === 'asteroid') {
                 return;
             }
 
@@ -9506,6 +9531,12 @@ class Game3D {
         // Tiny Planet mode runs its own spherical (radial-gravity) controller.
         if (this.activeModeId === 'planet' && this.planetWorld) {
             this.planetWorld.updatePlayer(deltaTime);
+            this.updateCamera();
+            return;
+        }
+        // Asteroid voxel sandbox — custom physics + orbit camera.
+        if (this.activeModeId === 'asteroid' && this.voxelWorld) {
+            this.voxelWorld.updatePlayer(deltaTime);
             this.updateCamera();
             return;
         }
@@ -10053,6 +10084,10 @@ class Game3D {
             this.planetWorld.updateCamera();
             return;
         }
+        if (this.activeModeId === 'asteroid' && this.voxelWorld) {
+            this.voxelWorld.updateCamera();
+            return;
+        }
         // Play-mode camera: Isometric or First-Person
         if (this.gameMode === 'play') {
             if (this.viewMode === 'fpv') {
@@ -10277,6 +10312,13 @@ class Game3D {
     }
     
     render() {
+        // Asteroid mode owns its HUD — skip the maze/campaign overlay stack.
+        if (this.activeModeId === 'asteroid') {
+            this.updateToasts();
+            this.renderer.render(this.scene, this.camera);
+            return;
+        }
+
         // All rendering and UI updates happen here at display refresh rate.
         this.clearAllUI();
         this.updateControlsUI();
@@ -10370,7 +10412,7 @@ class Game3D {
 
     updateHealthBarUI() {
         const el = this._ensureHealthBarEl();
-        if (this.gameMode !== 'play') { el.style.display = 'none'; return; }
+        if (this.gameMode !== 'play' || this.activeModeId === 'asteroid') { el.style.display = 'none'; return; }
         el.style.display = 'block';
 
         const hp = Math.max(0, Math.floor(this.player.hp));
@@ -10475,6 +10517,7 @@ class Game3D {
         if (arenaEl) arenaEl.style.display = 'none';
         if (lavaVignette) lavaVignette.style.opacity = '0';
         if (this.gameMode !== 'play') { el.style.display = 'none'; return; }
+        if (this.activeModeId === 'asteroid') { el.style.display = 'none'; return; }
         el.style.display = 'flex';
         const level = this.mazeDifficulty || 1;
         const enemiesLeft = (this.playMode && this.playMode.enemies) ? this.playMode.enemies.length : 0;
@@ -10860,6 +10903,12 @@ class Game3D {
     }
     
     updateInventoryGridUI() {
+        if (this.activeModeId === 'asteroid') {
+            const existing = document.getElementById('inventory-grid-ui');
+            if (existing) existing.style.display = 'none';
+            this._qbSig = null;
+            return;
+        }
         if (this.gameMode !== 'play') {
             const existing = document.getElementById('inventory-grid-ui');
             if (existing) existing.style.display = 'none';
@@ -11734,7 +11783,9 @@ class Game3D {
     }
     
     updateCompassUI() {
-        if (this.gameMode !== 'play') {
+        if (this.gameMode !== 'play' || this.activeModeId === 'asteroid') {
+            const c = document.getElementById('compass-ui');
+            if (c) c.style.display = 'none';
             return;
         }
 

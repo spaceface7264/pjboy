@@ -96,6 +96,40 @@
                 g.clearMaze && g.clearMaze();
             }
         },
+        asteroid: {
+            id: 'asteroid',
+            gameMode: 'play',
+            enter(g) {
+                g._teardownSpecialModes && g._teardownSpecialModes();
+                g.gameMode = 'play';
+                g.activeModeId = 'asteroid';
+                g.run = { startTime: performance.now() };
+                g.score = 0;
+                g.kills = 0;
+                g.flyMode = false;
+                g.fpvPitch = 0;
+                g.isFiring = false;
+                g.jetpackArmed = false;
+                g.activeBlockId = null;
+                g.owPickaxeEquipped = false;
+                g.clearMaze && g.clearMaze();
+                g.clearEnemies && g.clearEnemies();
+                if (!g.voxelWorld && typeof VoxelWorld !== 'undefined') {
+                    g.voxelWorld = new VoxelWorld(g);
+                }
+                if (g._hideLegacyPlayUI) g._hideLegacyPlayUI();
+                g.voxelWorld && g.voxelWorld.enter();
+            },
+            exit(g) {
+                g.flyMode = false;
+                g.fpvPitch = 0;
+                g.isFiring = false;
+                g.jetpackArmed = false;
+                g.voxelWorld && g.voxelWorld.exit();
+                g.clearEnemies && g.clearEnemies();
+                g.clearMaze && g.clearMaze();
+            }
+        },
         planet: {
             id: 'planet',
             gameMode: 'play',

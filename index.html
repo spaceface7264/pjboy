@@ -10,7 +10,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>3D Second-Person Game - 128-bit Style</title>
-    <link rel="stylesheet" href="style.css?v=20">
+    <link rel="stylesheet" href="style.css?v=29">
     <link rel="stylesheet" href="style-meta.css?v=4">
 </head>
 <body>
@@ -322,6 +322,10 @@
                         <span class="mode-card-title">Tiny Planet</span>
                         <span class="mode-card-desc">Walk a whole world — fly off to see it from space</span>
                     </button>
+                    <button type="button" class="mode-card" data-mode-id="asteroid">
+                        <span class="mode-card-title">Asteroid</span>
+                        <span class="mode-card-desc">Voxel sandbox — mine, build, jetpack on a procedurally generated rock</span>
+                    </button>
                 </div>
                 <div class="meta-mode-actions">
                     <button type="button" class="meta-btn" id="meta-settings-btn">Settings</button>
@@ -350,6 +354,23 @@
             </div>
             <div id="meta-level-banner" class="meta-level-banner" hidden></div>
         </div>
+
+        <!-- Asteroid mode HUD (pjboyv2 game-slice) -->
+        <div id="voxel-overlay" hidden>
+            <div id="voxel-cross"></div>
+            <div id="voxel-target-name"></div>
+            <div id="voxel-hud">
+                <div><b>WASD</b> move · <b>Space</b> jump / hold = jetpack · <b>Shift</b> aim (3rd person)</div>
+                <div id="voxel-view-hint"><b>mouse</b> aim · <b>click</b> mine · <b>hold click</b> laser · <b>right-click</b> place · <b>1-9</b> quickbar</div>
+                <div><b>V</b> view · <b>Esc</b> close drawer</div>
+                <div><b>Shift+R</b> new seed · <b>Q</b>/<b>E</b> switch weapon · <b>F8</b> FP weapon tuner</div>
+                <div><b id="voxel-tri-count">0</b> tris · <span id="voxel-seed-label"></span> · <span id="voxel-weapon-label">Pickaxe</span></div>
+            </div>
+            <div id="voxel-hotbar"></div>
+            <div id="voxel-drawer" class="vx-drawer" hidden>
+                <div class="vx-panel" id="voxel-drawer-panel"></div>
+            </div>
+        </div>
     </div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -360,9 +381,11 @@
     <script src="openworld.js?v=3"></script>
     <script src="worldstream.js?v=51"></script>
     <script src="planetgen.js?v=12"></script>
-    <script src="planet.js?v=164"></script>
-    <script src="modes.js?v=6"></script>
-    <script src="game.js?v=143"></script>
-    <script src="game-modes-impl.js?v=24"></script>
+    <script src="planet.js?v=173"></script>
+    <script src="voxel-character.js?v=16"></script>
+    <script src="voxelworld.js?v=63"></script>
+    <script src="modes.js?v=9"></script>
+    <script src="game.js?v=151"></script>
+    <script src="game-modes-impl.js?v=28"></script>
 </body>
 </html>
