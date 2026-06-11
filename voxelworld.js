@@ -1171,6 +1171,10 @@
             return !!(weaponDef && weaponDef.id === 'sword');
         }
 
+        function isLaserRifle() {
+            return !!(weaponDef && weaponDef.id === 'laser');
+        }
+
         const SWORD_SWING_LOCK = 0.62;
         const SWORD_FP_SWING_VARIANTS = [
             { dir: 1, phase: { anticEnd: 0.24, strikeEnd: 0.46, strikePeak: 1.35 },
@@ -1216,6 +1220,63 @@
 
         function tickSwordSwingLock(dt) {
             if (swordSwingLock > 0) swordSwingLock -= dt;
+            if (laserFireLock > 0) laserFireLock -= dt;
+        }
+
+        const LASER_RIFLE_FIRE_LOCK = 0.34;
+        const LASER_FP_RECOIL_VARIANTS = [
+            { phase: { anticEnd: 0.1, strikeEnd: 0.32, strikePeak: 1.1 },
+              pivot: { rx: [0.08, 0.18], ry: [0.04, 0.12], rz: [0.06, 0.1], pz: [0.05, 0.14], py: [0.02, 0.06], px: [0, 0.04] } },
+            { phase: { anticEnd: 0.12, strikeEnd: 0.38, strikePeak: 1.25 },
+              pivot: { rx: [0.12, 0.28], ry: [0.03, 0.08], rz: [0.08, 0.14], pz: [0.08, 0.2], py: [0.03, 0.08], px: [0, 0.03] } },
+            { phase: { anticEnd: 0.06, strikeEnd: 0.22, strikePeak: 0.9 },
+              pivot: { rx: [0.04, 0.12], ry: [0.02, 0.06], rz: [0.03, 0.06], pz: [0.03, 0.1], py: [0.01, 0.04], px: [0, 0.02] } },
+            { phase: { anticEnd: 0.1, strikeEnd: 0.34, strikePeak: 1.05 },
+              pivot: { rx: [0.06, 0.15], ry: [0.08, 0.14], rz: [0.1, 0.16], pz: [0.05, 0.12], py: [0.02, 0.05], px: [0.03, 0.05] } }
+        ];
+        let laserFireLock = 0;
+        let laserFireVariant = 0;
+        let laserFireNext = 0;
+
+        function laserFireVariantCount() {
+            const VC = getVC();
+            return (VC && VC.LASER_RIFLE_COUNT) || LASER_FP_RECOIL_VARIANTS.length;
+        }
+
+        function currentFpLaserRecoil() {
+            const n = LASER_FP_RECOIL_VARIANTS.length;
+            const i = ((laserFireVariant % n) + n) % n;
+            return LASER_FP_RECOIL_VARIANTS[i];
+        }
+
+        function canStartLaserFire() {
+            return laserFireLock <= 0;
+        }
+
+        function beginLaserFire() {
+            laserFireVariant = laserFireNext;
+            laserFireNext = (laserFireNext + 1) % laserFireVariantCount();
+            laserFireLock = LASER_RIFLE_FIRE_LOCK;
+            if (av && av.anim) av.anim.laserFireVariant = laserFireVariant;
+        }
+
+        function triggerFpLaserRecoil() {
+            fpSwingDurationActive = 0.24;
+            fpSwingTimer = fpSwingDurationActive;
+        }
+
+        function applyFpLaserRecoilPivot(t, k, out) {
+            const v = currentFpLaserRecoil();
+            const { antic, strike } = meleeSwingPhase(t, v.phase);
+            const dir = (laserFireVariant % 2 === 1 && v.pivot.ry[1] > 0.12) ? -1 : 1;
+            const p = v.pivot;
+            const r = fpRecoilStrength();
+            out.rx += (-antic * p.rx[0] + strike * p.rx[1]) * r;
+            out.ry += (-antic * p.ry[0] + strike * p.ry[1]) * dir * r;
+            out.rz += (-antic * p.rz[0] - strike * p.rz[1]) * dir * r;
+            out.pz += (-strike * p.pz[1] + antic * p.pz[0]) * r;
+            out.py += (antic * p.py[0] - strike * p.py[1]) * r;
+            out.px += (strike * p.px[1] - antic * p.px[0]) * dir * r;
         }
 
         function applyFpSwordSwingPivot(t, k, out) {
@@ -1315,7 +1376,11 @@
             if (tpRecoilT >= 0) return Math.max(0, 1 - tpRecoilT / TP_RECOIL_DUR);
             const atkT = (av && av.anim && av.anim.attackT >= 0) ? av.anim.attackT : attackT;
             if (atkT >= 0) {
-                const dur = weaponDef && weaponDef.ranged ? 0.6 : 0.42;
+                let dur = 0.42;
+                if (weaponDef && weaponDef.id === 'laser') {
+                    const VC = getVC();
+                    dur = (VC && VC.LASER_RIFLE_DURATION) || 0.38;
+                } else if (weaponDef && weaponDef.ranged) dur = 0.6;
                 return Math.max(0, 1 - atkT / dur);
             }
             return 0;
@@ -1543,7 +1608,7 @@
             if(attackT>=d) attackT=-1;
           }
           // Third-person ranged recoil — short shoulder kick, not a melee wind-up.
-          if(!firstPerson && tpRecoilT>=0){
+          if(!firstPerson && tpRecoilT>=0 && !isLaserRifle()){
             tpRecoilT+=dt;
             const k=Math.min(tpRecoilT/TP_RECOIL_DUR,1);
             const kick=Math.sin(k*Math.PI);
@@ -3234,7 +3299,7 @@
         const shotVfx = [];
         const SHOT_PROFILES = {
             blaster: { kind: 'beam', color: 0xffa04a, core: 0xfff2d0, width: 0.075, life: 0.11 },
-            laser:   { kind: 'beam', color: 0xff4a62, core: 0xffffff, width: 0.05,  life: 0.16, jagged: true },
+            laser:   { kind: 'beam', color: 0xff4a62, core: 0xfff0f4, width: 0.032, life: 0.14, jagged: true, jagCount: 2, jagScale: 0.72, sparkSize: 0.042, flashSize: 0.12 },
             minecutter: { kind: 'beam', color: 0x44d8ff, core: 0xe8ffff, width: 0.038, life: 0.1, jagged: true },
             plasma:  { kind: 'bolt',  color: 0x62ff6a, core: 0xe8ffe8, width: 0.13, life: 0.32 },
             railgun: { kind: 'beam', color: 0x7ec8ff, core: 0xffffff, width: 0.095, life: 0.24 }
@@ -3266,10 +3331,12 @@
         }
 
         function spawnImpactVfx(pos, profile) {
-            const n = profile.kind === 'bolt' ? 12 : 7;
+            const sparkSz = profile.sparkSize || 0.07;
+            const flashSz = profile.flashSize || 0.22;
+            const n = profile.kind === 'bolt' ? 12 : (profile.sparkSize ? 5 : 7);
             for (let i = 0; i < n; i++) {
                 const m = new THREE.Mesh(
-                    new THREE.BoxGeometry(0.07, 0.07, 0.07),
+                    new THREE.BoxGeometry(sparkSz, sparkSz, sparkSz),
                     new THREE.MeshBasicMaterial({
                         color: i % 2 ? profile.core : profile.color,
                         transparent: true,
@@ -3292,7 +3359,7 @@
                 });
             }
             const flash = new THREE.Mesh(
-                new THREE.BoxGeometry(0.22, 0.22, 0.22),
+                new THREE.BoxGeometry(flashSz, flashSz, flashSz),
                 new THREE.MeshBasicMaterial({ color: profile.core, transparent: true, opacity: 0.95 })
             );
             flash.position.copy(pos);
@@ -3345,13 +3412,15 @@
             layoutWorldBeam(origin, dir, a.len, grp, segs, 1);
 
             if (profile.jagged) {
-                for (let i = 0; i < 4; i++) {
+                const jagN = profile.jagCount || 4;
+                const jagMul = profile.jagScale || 1;
+                for (let i = 0; i < jagN; i++) {
                     const jag = addBeamSegment(
-                        grp, a.len * (0.18 + Math.random() * 0.12), profile.width * 0.18,
-                        0xffffff, 0.55, (i - 1.5) * a.len * 0.22
+                        grp, a.len * (0.16 + Math.random() * 0.1), profile.width * 0.16 * jagMul,
+                        0xfff4f6, 0.42, (i - (jagN - 1) * 0.5) * a.len * 0.18
                     );
-                    jag.position.x = (Math.random() - 0.5) * profile.width * 2.2;
-                    jag.position.y = (Math.random() - 0.5) * profile.width * 2.2;
+                    jag.position.x = (Math.random() - 0.5) * profile.width * 1.6;
+                    jag.position.y = (Math.random() - 0.5) * profile.width * 1.6;
                     segs.push(jag);
                 }
             }
@@ -3450,16 +3519,22 @@
         }
 
         function triggerCombatAnim() {
+            if (isLaserRifle() && !canStartLaserFire()) return;
             if (isSwordEquipped() && !canStartSwordSwing()) return;
             if (isSwordEquipped()) beginSwordSwing();
-            if (firstPerson) triggerFpSwing();
+            else if (isLaserRifle()) beginLaserFire();
+            if (firstPerson) {
+                if (isSwordEquipped()) triggerFpSwing();
+                else if (isLaserRifle()) triggerFpLaserRecoil();
+                else triggerFpSwing();
+            }
             if (!firstPerson) {
                 if (av && av.anim) {
                     if (weaponDef && weaponDef.ranged) av.anim.attackT = 0;
                     else { attackT = 0; av.anim.attackT = 0; }
-                } else if (weaponDef && weaponDef.ranged) {
+                } else if (weaponDef && weaponDef.ranged && !isLaserRifle()) {
                     tpRecoilT = 0;
-                } else {
+                } else if (!weaponDef || !weaponDef.ranged) {
                     attackT = 0;
                 }
             }
@@ -3530,6 +3605,7 @@
         function fireCombat() {
             if (!weaponDef) return;
             if (isSwordEquipped() && !canStartSwordSwing()) return;
+            if (isLaserRifle() && !canStartLaserFire()) return;
             const t = pickTarget();
             const hasBlock = !!(t && getBlock(t.x, t.y, t.z));
             triggerCombatAnim();
@@ -4453,6 +4529,15 @@
                     pz += swing.pz;
                     py += swing.py;
                     px += swing.px;
+                } else if (isLaserRifle()) {
+                    const recoil = { ry: 0, rz: 0, rx: 0, pz: 0, py: 0, px: 0 };
+                    applyFpLaserRecoilPivot(t, k, recoil);
+                    ry += recoil.ry;
+                    rz += recoil.rz;
+                    rx += recoil.rx;
+                    pz += recoil.pz;
+                    py += recoil.py;
+                    px += recoil.px;
                 } else {
                     const A = 0.18, S = 0.52;
                     let antic = 0, strike = 0, recover = 0;

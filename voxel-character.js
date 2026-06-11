@@ -336,23 +336,24 @@ function buildWeapon(def, accent){
     const cellFrame = box(.075,.04,.105,dark); cellFrame.position.set(0,-.09,.16); g.add(cellFrame);
     const leds=[]; for(let i=0;i<3;i++){ const led=box(.018,.018,.018,glow(0x9deeff)); led.position.set(-.05,.13,.0+i*.05); g.add(led); leds.push(led); }
     const stock = box(.07,.09,.14,dark); stock.position.set(0,.07,-.12); g.add(stock);
-    const haze = pool(4,0xffb070,.025);
+    const haze = pool(3,0xffc090,.012);
     let heat=0;
     g.userData.animate = (t,f)=>{ const d=dtOf(t);
-      focus.rotation.z += d*(1.2 + f*14);
-      focus2.rotation.z -= d*(.7 + f*9);
-      heat = Math.min(1, heat + f*d*4); heat *= Math.exp(-d*.9);
-      finM.emissive.setRGB(heat*.9, heat*.28, heat*.05);
-      doors.forEach(o=>{ o.m.rotation.z = o.s*heat*.8; o.m.position.x = o.s*(.05+heat*.025); }); // vents swing open
-      const cs = 1 + f*.5 + .05*Math.sin(t*6); core.scale.set(cs,cs,1);
+      focus.rotation.z += d*(1.2 + f*8);
+      focus2.rotation.z -= d*(.7 + f*5);
+      heat = Math.min(1, heat + f*d*3.2); heat *= Math.exp(-d*.9);
+      finM.emissive.setRGB(heat*.75, heat*.22, heat*.04);
+      doors.forEach(o=>{ o.m.rotation.z = o.s*heat*.65; o.m.position.x = o.s*(.05+heat*.018); });
+      const cs = 1 + f*.22 + .04*Math.sin(t*6); core.scale.set(cs,cs,1);
       coreM.color.setHex(f>0? 0xd6f6ff : 0x66e0ff);
-      const es = 1 + f*(.3+.3*Math.sin(t*40)); emitter.scale.set(es,es,1);   // emitter strobes
+      const es = 1 + f*(.16+.12*Math.sin(t*40)); emitter.scale.set(es,es,1);
       leds.forEach((l,i)=>{ l.visible = ((t*2)%3) > i*.9; });
-      if(heat>.3 && Math.random()<heat*.5) haze.spawn((Math.random()-.5)*.1,.13,.5+Math.random()*.25, 0,.5,0);
+      if(heat>.35 && Math.random()<heat*.22) haze.spawn((Math.random()-.5)*.07,.13,.5+Math.random()*.2, 0,.35,0);
       if(f>0 && prevF===0){
-        for(let i=0;i<2;i++) haze.spawn(0,.1,.85+i*.04, 0,0,22+i*4);
+        haze.spawn(0,.1,.85, 0,0,14);
+        haze.spawn(0,.1,.88, 0,0,11);
       }
-      haze.step(d,.7);
+      haze.step(d,.45);
       prevF=f;
     };
     socket.position.set(0,.04,.3);
@@ -714,6 +715,96 @@ function applySwordAttackPose(tgt, k, variantIdx) {
   v.apply(tgt, meleeSwingPhase(k, v.phase));
 }
 
+const LASER_RIFLE_DURATION = 0.38;
+
+const LASER_RIFLE_VARIANTS = [
+  {
+    id: 'burst',
+    phase: { anticEnd: 0.1, strikeEnd: 0.34, strikePeak: 1.12 },
+    apply(tgt, ph, canAim, ch) {
+      const { strike } = ph;
+      const kick = (strike > 0.52 && strike < 0.68) ? 0.26 : (strike > 0.72 && strike < 0.86) ? 0.2 : strike * 0.1;
+      if (canAim) {
+        tgt.shRx = (tgt.shRx || 0) + kick * 0.34;
+        tgt.elR = (tgt.elR || 0) + kick * 0.1;
+        tgt.torsoRX = (tgt.torsoRX || 0) + kick * 0.18;
+      } else if (charIs2H(ch)) {
+        const w = Math.min(strike / 0.22, 1) * (1 - Math.max(0, (strike - 0.72) / 0.28));
+        tgt.shRx = -1.42 * w + kick * 0.46; tgt.shRz = -0.2 * w; tgt.elR = 0.46 * w + 0.12;
+        tgt.shLx = -1.18 * w; tgt.shLz = -0.26 * w; tgt.elL = 0.92 * w;
+      }
+    }
+  },
+  {
+    id: 'heavy',
+    phase: { anticEnd: 0.14, strikeEnd: 0.4, strikePeak: 1.28 },
+    apply(tgt, ph, canAim, ch) {
+      const { antic, strike } = ph;
+      const kick = strike * 0.34 + antic * 0.08;
+      tgt.torsoRX = (tgt.torsoRX || 0) - kick * 0.28;
+      tgt.headRX = (tgt.headRX || 0) - kick * 0.12;
+      if (canAim) {
+        tgt.shRx = (tgt.shRx || 0) + kick * 0.42;
+        tgt.elR = (tgt.elR || 0) + kick * 0.14;
+      } else if (charIs2H(ch)) {
+        const w = Math.min(strike / 0.26, 1);
+        tgt.shRx = -1.55 * w - kick * 0.35; tgt.shRz = -0.24 * w; tgt.elR = 0.52 * w + kick * 0.18;
+        tgt.shLx = -1.28 * w; tgt.shLz = -0.32 * w; tgt.elL = 0.98 * w;
+      }
+    }
+  },
+  {
+    id: 'snap',
+    phase: { anticEnd: 0.08, strikeEnd: 0.24, strikePeak: 0.95 },
+    apply(tgt, ph, canAim, ch) {
+      const { strike } = ph;
+      const kick = strike * 0.22;
+      if (canAim) {
+        tgt.shRx = (tgt.shRx || 0) + kick * 0.22;
+        tgt.elR = (tgt.elR || 0) + kick * 0.06;
+        tgt.torsoRX = (tgt.torsoRX || 0) + kick * 0.1;
+      } else if (charIs2H(ch)) {
+        const w = Math.min(strike / 0.18, 1) * (1 - Math.max(0, (strike - 0.55) / 0.45));
+        tgt.shRx = -1.05 * w + kick * 0.28; tgt.shRz = -0.14 * w; tgt.elR = 0.34 * w + 0.08;
+        tgt.shLx = -0.95 * w; tgt.shLz = -0.2 * w; tgt.elL = 0.72 * w;
+      }
+    }
+  },
+  {
+    id: 'sweep',
+    phase: { anticEnd: 0.11, strikeEnd: 0.36, strikePeak: 1.05 },
+    apply(tgt, ph, canAim, ch) {
+      const { antic, strike } = ph;
+      const kick = strike * 0.24;
+      const side = ((ch.anim && ch.anim.laserFireVariant) || 0) % 2 ? 1 : -1;
+      tgt.torsoRY = (tgt.torsoRY || 0) + side * strike * 0.14;
+      if (canAim) {
+        tgt.shRx = (tgt.shRx || 0) + kick * 0.28;
+        tgt.shRz = (tgt.shRz || 0) + side * strike * 0.12;
+        tgt.elR = (tgt.elR || 0) + kick * 0.08;
+      } else if (charIs2H(ch)) {
+        const w = Math.min(strike / 0.2, 1);
+        tgt.shRx = -1.28 * w + kick * 0.32;
+        tgt.shRz = (-0.18 + side * strike * 0.16) * w;
+        tgt.elR = 0.4 * w + 0.1;
+        tgt.shLx = -1.12 * w; tgt.shLz = (-0.24 + side * 0.08) * w; tgt.elL = 0.86 * w;
+      }
+    }
+  }
+];
+
+function applyLaserRifleRecoilPose(tgt, k, variantIdx, canAim, ch) {
+  const v = LASER_RIFLE_VARIANTS[variantIdx % LASER_RIFLE_VARIANTS.length] || LASER_RIFLE_VARIANTS[0];
+  v.apply(tgt, meleeSwingPhase(k, v.phase), canAim, ch);
+}
+
+function laserRifleFireFactor(attackT, variantIdx) {
+  if (attackT < 0) return 0;
+  const v = LASER_RIFLE_VARIANTS[variantIdx % LASER_RIFLE_VARIANTS.length] || LASER_RIFLE_VARIANTS[0];
+  const ph = meleeSwingPhase(Math.min(attackT / LASER_RIFLE_DURATION, 1), v.phase);
+  return ph.strike + ph.antic * 0.15;
+}
+
 function buildCharacter(params, opts){
   opts = opts || {};
   const weaponEquipped = opts.weaponEquipped !== false;
@@ -932,7 +1023,7 @@ function buildCharacter(params, opts){
            socket, twoHanded,
            muzzleFlash, beam,
            flames, bike, hipY,
-           anim: { state: 'idle', elapsed: 0, attackT: -1, swordSwingVariant: 0, ikW: 0,
+           anim: { state: 'idle', elapsed: 0, attackT: -1, swordSwingVariant: 0, laserFireVariant: 0, ikW: 0,
                    cur: {}, curCharY: 0, weaponEquipped: weaponEquipped && params.weapon >= 0 } };
 }
 
@@ -1239,6 +1330,7 @@ function initAnimState(char, weaponEquipped) {
   anim.ikW = 0;
   anim.attackT = -1;
   anim.swordSwingVariant = 0;
+  anim.laserFireVariant = 0;
   anim.elapsed = 0;
   anim.weaponEquipped = weaponEquipped !== false;
   anim.state = 'idle';
@@ -1285,6 +1377,11 @@ function update(char, state, dt, opts) {
   if (attackT >= 0) {
     attackT += dt;
     if (charIsRanged(char)) {
+      if (char.weaponDef && char.weaponDef.id === 'laser') {
+        const d = LASER_RIFLE_DURATION, k = Math.min(attackT / d, 1);
+        applyLaserRifleRecoilPose(tgt, k, char.anim.laserFireVariant || 0, canAim, char);
+        if (attackT >= d) { attackT = -1; anim.attackT = -1; }
+      } else {
       const d = .6, k = Math.min(attackT / d, 1);
       const kick = (k > .3 && k < .4) || (k > .5 && k < .6) ? .3 : 0;
       rifleKick = kick;
@@ -1304,6 +1401,7 @@ function update(char, state, dt, opts) {
         tgt.torsoRX = (tgt.torsoRX || 0) + kick * .4;
       }
       if (attackT >= d) { attackT = -1; anim.attackT = -1; }
+      }
     } else if (char.weaponDef && char.weaponDef.id === 'sword') {
       const d = SWORD_SWING_DURATION, k = Math.min(attackT / d, 1);
       applySwordAttackPose(tgt, k, char.anim.swordSwingVariant || 0);
@@ -1366,8 +1464,11 @@ function update(char, state, dt, opts) {
   if (char.bike && char.bike.visible) char.bike.position.y = .5 + Math.sin(anim.elapsed * 3) * .015;
   if (char.weapon) char.weapon.visible = weaponEquipped;
   if (char.weapon && char.weapon.userData.animate && weaponEquipped) {
-    const meleeSwing = meleeSwingFactor(char, attackT);
-    char.weapon.userData.animate(anim.elapsed, rifleKick > 0 ? 1 : meleeSwing);
+    let fx = rifleKick > 0 ? 1 : meleeSwingFactor(char, attackT);
+    if (char.weaponDef && char.weaponDef.id === 'laser' && attackT >= 0) {
+      fx = Math.max(fx, laserRifleFireFactor(attackT, char.anim.laserFireVariant || 0));
+    }
+    char.weapon.userData.animate(anim.elapsed, fx);
   }
   if (char.muzzleFlash) {
     char.muzzleFlash.visible = weaponEquipped && rifleKick > 0;
@@ -1392,7 +1493,8 @@ window.VoxelCharacter = {
   DEFAULT_PARAMS, SAVE_KEY, weaponIdx,
   normalizeParams, loadSaved, saveParams, build, update, dispose, scaleToHeight,
   buildWeapon, mirrorWeaponForTpGrip, tpWeaponGripRest, addOutlines,
-  SWORD_SWING_DURATION, SWORD_SWING_COUNT: SWORD_SWING_VARIANTS.length, applySwordAttackPose
+  SWORD_SWING_DURATION, SWORD_SWING_COUNT: SWORD_SWING_VARIANTS.length, applySwordAttackPose,
+  LASER_RIFLE_DURATION, LASER_RIFLE_COUNT: LASER_RIFLE_VARIANTS.length, applyLaserRifleRecoilPose
 };
 
 
