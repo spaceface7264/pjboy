@@ -992,7 +992,8 @@
             const VC = getVC();
             if (VC) return VC.normalizeParams(base);
             const n = Object.assign({ classIdx: 0, body: 0, deco: 1, hair: 2, gear: 0, skin: 0, weapon: 0 }, base);
-            n.weapon = ((n.weapon % 7) + 7) % 7;
+            const wlen = weaponList().length || 1;
+            n.weapon = ((n.weapon % wlen) + wlen) % wlen;
             return n;
         }
 
@@ -1104,6 +1105,7 @@
             attachTpWeapon(av && av.weaponGrip);
             rebuildFpWeapon();
             syncFpTunerInputs();
+            if (tpTunerEl && !tpTunerEl.hidden) syncTpTunerInputs();
             if (drawerOpen) renderDrawer();
             if (!quiet && g.showMessage && weaponDef) g.showMessage('Equipped ' + weaponDef.name, 1400);
         }
@@ -1112,20 +1114,20 @@
             setWeaponIndex(weaponIndex + dir);
         }
 
-        function isLaserRifle() {
-            return !!(weaponDef && weaponDef.id === 'laser');
+        function isMineLaser() {
+            return !!(weaponDef && (weaponDef.id === 'laser' || weaponDef.id === 'minecutter'));
         }
 
         function isPickaxe() {
             return !!(weaponDef && weaponDef.id === 'pickaxe');
         }
 
-        function isBuilderMinerTool() {
-            return isPickaxe();
+        function isMiningTool() {
+            return isPickaxe() || isMineLaser();
         }
 
-        function isMiningTool() {
-            return isPickaxe() || isLaserRifle();
+        function mineLaserInterval() {
+            return (weaponDef && weaponDef.id === 'minecutter') ? MINECUTTER_FIRE_INTERVAL : LASER_FIRE_INTERVAL;
         }
 
         let mineProgress = 0;
@@ -1150,7 +1152,7 @@
         }
 
         function weaponFireFactor() {
-            if (fireHeld && isLaserRifle() && !voxelPanelOpen()) {
+            if (fireHeld && isMineLaser() && !voxelPanelOpen()) {
                 return 0.82 + 0.18 * Math.sin(elapsed * 28);
             }
             if (fpSwingTimer > 0) return Math.max(0, 1 - fpSwingTimer / fpSwingDuration);
@@ -1441,6 +1443,7 @@
         let fireHeld = false;
         let laserCooldown = 0;
         const LASER_FIRE_INTERVAL = 0.065;
+        const MINECUTTER_FIRE_INTERVAL = 0.072;
         let canvasEl = null;
         const _fpEyeOff = new THREE.Vector3();
         const _fpEyePos = new THREE.Vector3();
@@ -1534,9 +1537,49 @@
                 wrench:  { wx: -0.15, wy: -0.11, wz: -0.12, wrx: 1.33, wry: 0,     wrz: 0,    meleeRot: true },
                 blaster: { wx: -0.09, wy: -0.05, wz: -0.2,  wrx: 0.22, wry: -0.05, wrz: -0.04, meleeRot: true },
                 laser:   { wx: -0.08, wy: -0.12, wz: -0.18, wrx: 0.2,  wry: 0.02,  wrz: 0.03,  meleeRot: true },
+                minecutter: { wx: -0.1, wy: 0.02, wz: -0.19, wrx: 0.14, wry: 0.12, wrz: -0.02, meleeRot: true },
                 plasma:  { wx: -0.11, wy: 0.01,  wz: -0.21, wrx: 0.16, wry: 0.14,  wrz: -0.02, meleeRot: true },
                 railgun: { wx: -0.13, wy: -0.07, wz: -0.18, wrx: 0.3,  wry: -0.03, wrz: -0.03, meleeRot: true }
             };
+        }
+
+        function defaultWeaponGameplayStats() {
+            const out = {};
+            weaponList().forEach((w) => {
+                const s = w.stats || {};
+                let power = (s.Damage || 5) / 10;
+                let range = (s.Range || 5) / 10;
+                if (w.id === 'minecutter') { power = 0.18; range = 0.4; }
+                else if (w.id === 'laser') { power = 0.55; range = 0.88; }
+                else if (w.id === 'pickaxe') { power = 0.42; range = 0.2; }
+                out[w.id] = { power, range };
+            });
+            return out;
+        }
+
+        function mergeWeaponStats(saved) {
+            const base = defaultWeaponGameplayStats();
+            const out = {};
+            Object.keys(base).forEach((id) => {
+                out[id] = Object.assign({}, base[id], (saved && saved[id]) || {});
+            });
+            return out;
+        }
+
+        function weaponGameplayFor(id) {
+            if (!fpTune) fpTune = loadFpTune();
+            const defs = defaultWeaponGameplayStats();
+            if (!fpTune.weaponStats) fpTune.weaponStats = mergeWeaponStats(null);
+            if (!fpTune.weaponStats[id]) {
+                fpTune.weaponStats[id] = Object.assign({}, defs[id] || { power: 0.5, range: 0.5 });
+            }
+            return fpTune.weaponStats[id];
+        }
+
+        function currentAimReach() {
+            if (!weaponDef) return AIM_REACH;
+            const g = weaponGameplayFor(weaponDef.id);
+            return AIM_REACH * THREE.MathUtils.clamp(g.range, 0.12, 1);
         }
 
         function defaultFpCam() {
@@ -1564,7 +1607,8 @@
                     rx: 0.1, ry: 0, rz: 0.01,
                     mountRx: 0.37, mountYaw: 0.08, mountRz: 0.04
                 },
-                weapons: defaultWeaponTunes()
+                weapons: defaultWeaponTunes(),
+                weaponStats: mergeWeaponStats(null)
             };
         }
 
@@ -1580,7 +1624,8 @@
                     dismissed: !!saved.dismissed,
                     cam,
                     global: Object.assign({}, base.global, saved.global || {}),
-                    weapons: Object.assign({}, base.weapons, saved.weapons || {})
+                    weapons: Object.assign({}, base.weapons, saved.weapons || {}),
+                    weaponStats: mergeWeaponStats(saved.weaponStats)
                 };
             } catch (e) {
                 return defaultFpTune();
@@ -1696,7 +1741,8 @@
 
             ray.setFromCamera({ x: 0, y: 0 }, camera);
             const hit = ray.intersectObjects(collectAimMeshes(), true)[0];
-            const inRange = hit && hit.point.distanceTo(player.pos) <= AIM_REACH;
+            const reach = currentAimReach();
+            const inRange = hit && hit.point.distanceTo(player.pos) <= reach;
             if (inRange) {
                 _aimState.hasSurfaceHit = true;
                 _aimState.normal.copy(hit.face.normal);
@@ -1705,7 +1751,7 @@
             } else {
                 _aimState.hasSurfaceHit = false;
                 _aimState.normal.set(0, 1, 0);
-                _aimState.len = AIM_REACH;
+                _aimState.len = reach;
             }
             _aimState.end.copy(_aimState.origin).addScaledVector(_aimState.dir, _aimState.len);
             _aimState.hit.copy(_aimState.end);
@@ -1727,7 +1773,7 @@
           ray.setFromCamera({x:0,y:0}, camera);
           const hit=ray.intersectObjects(collectAimMeshes())[0];
           if(!hit) return null;
-          if(hit.point.distanceTo(player.pos)>AIM_REACH) return null;
+          if(hit.point.distanceTo(player.pos)>currentAimReach()) return null;
           const p = hit.point.clone().sub(WORLD_OFFSET);
           const nx = Math.round(hit.face.normal.x);
           const ny = Math.round(hit.face.normal.y);
@@ -1958,7 +2004,11 @@
                 if (aimOutline) aimOutline.visible = false;
                 return;
             }
-            t = stabilizeAimTarget(t);
+            if (isMineLaser() && mineTarget && mineProgress > 0.001) {
+                t = mineTarget;
+            } else {
+                t = stabilizeAimTarget(t);
+            }
             if (!t) {
                 if (aimOutline) aimOutline.visible = false;
                 return;
@@ -1970,6 +2020,179 @@
                 ? mineProgress : 0;
             applyAimOutlineStyle(cracking);
             aimOutline.visible = true;
+        }
+
+        let mineBlockFx = null;
+        let mineBlockFxKey = '';
+        const _mineFxBaseCol = new THREE.Color();
+        const _mineFxAccentCol = new THREE.Color();
+        const MINE_FX_CRACK_COUNT = 6;
+
+        function mineFxAccentHex() {
+            if (weaponDef && weaponDef.id === 'minecutter') return 0x66e8ff;
+            if (weaponDef && weaponDef.id === 'laser') return 0xff6080;
+            return 0x66e8ff;
+        }
+
+        function buildMineBlockFx() {
+            const g = new THREE.Group();
+            g.frustumCulled = false;
+            g.renderOrder = 155;
+
+            const shellMat = new THREE.MeshBasicMaterial({
+                color: 0xffffff,
+                transparent: true,
+                opacity: 0.42,
+                depthWrite: false
+            });
+            const shell = new THREE.Mesh(new THREE.BoxGeometry(1.008, 1.008, 1.008), shellMat);
+            g.add(shell);
+
+            const edgeMat = new THREE.LineBasicMaterial({
+                color: 0x66e8ff,
+                transparent: true,
+                opacity: 0.85
+            });
+            const edges = new THREE.LineSegments(
+                new THREE.EdgesGeometry(new THREE.BoxGeometry(1.018, 1.018, 1.018)),
+                edgeMat
+            );
+            g.add(edges);
+
+            const cracks = [];
+            for (let i = 0; i < MINE_FX_CRACK_COUNT; i++) {
+                const crackMat = new THREE.MeshBasicMaterial({
+                    color: 0x0a1020,
+                    transparent: true,
+                    opacity: 0.88
+                });
+                const crack = new THREE.Mesh(
+                    new THREE.BoxGeometry(0.018, 0.42 + (i % 3) * 0.12, 0.018),
+                    crackMat
+                );
+                crack.rotation.set(
+                    (i * 1.17) % Math.PI,
+                    (i * 2.03) % Math.PI,
+                    (i * 0.81) % Math.PI
+                );
+                crack.position.set(
+                    ((i * 0.37) % 1) - 0.5,
+                    ((i * 0.53) % 1) - 0.5,
+                    ((i * 0.29) % 1) - 0.5
+                );
+                crack.visible = false;
+                g.add(crack);
+                cracks.push(crack);
+            }
+
+            const burnMat = new THREE.MeshBasicMaterial({
+                color: 0xffffff,
+                transparent: true,
+                opacity: 0.9,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false
+            });
+            const burn = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.14, 0.14), burnMat);
+            g.add(burn);
+
+            g.userData = { shell, shellMat, edges, edgeMat, cracks, burn, burnMat, baseCol: new THREE.Color() };
+            scene.add(g);
+            return g;
+        }
+
+        function disposeMineBlockFx() {
+            if (!mineBlockFx) return;
+            scene.remove(mineBlockFx);
+            mineBlockFx.traverse((o) => {
+                if (o.geometry) o.geometry.dispose();
+                if (o.material) {
+                    if (Array.isArray(o.material)) o.material.forEach((m) => m.dispose());
+                    else o.material.dispose();
+                }
+            });
+            mineBlockFx = null;
+            mineBlockFxKey = '';
+        }
+
+        function updateMineBlockAnim() {
+            const active = mineTarget && mineProgress > 0.001 && isMineLaser() && !voxelPanelOpen();
+            if (!active) {
+                if (mineBlockFx) mineBlockFx.visible = false;
+                return;
+            }
+            const { x, y, z } = mineTarget;
+            const id = getBlock(x, y, z);
+            if (!id) {
+                if (mineBlockFx) mineBlockFx.visible = false;
+                return;
+            }
+
+            if (!mineBlockFx) mineBlockFx = buildMineBlockFx();
+            const ud = mineBlockFx.userData;
+            const key = `${x},${y},${z}`;
+            if (key !== mineBlockFxKey) {
+                mineBlockFxKey = key;
+                ud.baseCol.setHex(blockColor(id));
+                ud.shellMat.color.copy(ud.baseCol);
+            }
+
+            const p = mineProgress;
+            const accent = mineFxAccentHex();
+            const pulse = 0.5 + 0.5 * Math.sin(elapsed * 26);
+            const shake = p * 0.024;
+            const t = elapsed;
+            mineBlockFx.position.set(
+                WORLD_OFFSET.x + x + 0.5 + Math.sin(t * 53) * shake,
+                WORLD_OFFSET.y + y + 0.5 + Math.sin(t * 47 + 1.2) * shake,
+                WORLD_OFFSET.z + z + 0.5 + Math.cos(t * 41) * shake
+            );
+
+            const shrink = 1 - p * 0.13;
+            const wobble = p * 0.07;
+            ud.shell.rotation.set(Math.sin(t * 9) * wobble, Math.cos(t * 8) * wobble, Math.sin(t * 11) * wobble * 0.5);
+            ud.shell.scale.setScalar(shrink * (1 - pulse * 0.018 * p));
+
+            _mineFxAccentCol.setHex(accent);
+            ud.shellMat.color.copy(ud.baseCol).lerp(_mineFxAccentCol, p * 0.45 * (0.55 + pulse * 0.45));
+            ud.shellMat.opacity = 0.14 + p * 0.38 + pulse * 0.14 * p;
+
+            ud.edgeMat.color.setHex(accent);
+            ud.edgeMat.opacity = 0.3 + p * 0.7;
+            ud.edges.rotation.copy(ud.shell.rotation);
+            ud.edges.scale.setScalar(shrink * 1.012);
+
+            ud.cracks.forEach((crack, i) => {
+                const threshold = (i + 1) / (MINE_FX_CRACK_COUNT + 1.5);
+                const show = p > threshold * 0.85;
+                crack.visible = show;
+                if (show) {
+                    crack.material.opacity = Math.min(1, (p - threshold * 0.7) * 2.2);
+                    crack.scale.set(1, shrink * (0.55 + p * 0.65), 1);
+                    crack.rotation.z += 0.002 * (i + 1);
+                }
+            });
+
+            const aim = resolveAim();
+            const aimT = pickTarget();
+            const hitSame = aim.hasSurfaceHit && aimT
+                && aimT.x === x && aimT.y === y && aimT.z === z;
+            if (hitSame) {
+                ud.burn.position.set(
+                    aim.normal.x * 0.44,
+                    aim.normal.y * 0.44,
+                    aim.normal.z * 0.44
+                );
+            } else {
+                ud.burn.position.set(0, 0, 0);
+            }
+            ud.burn.visible = p > 0.02;
+            ud.burnMat.color.setHex(accent);
+            ud.burnMat.opacity = 0.35 + pulse * 0.6 * p;
+            const burnS = (0.07 + p * 0.22) * (1 + pulse * 0.4);
+            ud.burn.scale.setScalar(burnS);
+            ud.burn.rotation.copy(ud.shell.rotation);
+
+            mineBlockFx.visible = true;
         }
 
         function canPlaceBlockAt(x, y, z) {
@@ -2011,7 +2234,7 @@
         const _scanWorld = new THREE.Vector3();
 
         function isScanCompactActive(t) {
-            return !voxelPanelOpen() && isBuilderMinerTool() && focusAimBlend > 0.08
+            return !voxelPanelOpen() && isMiningTool() && focusAimBlend > 0.08
                 && t && getBlock(t.x, t.y, t.z);
         }
 
@@ -2771,6 +2994,7 @@
         const SHOT_PROFILES = {
             blaster: { kind: 'beam', color: 0xffa04a, core: 0xfff2d0, width: 0.075, life: 0.11 },
             laser:   { kind: 'beam', color: 0xff4a62, core: 0xffffff, width: 0.05,  life: 0.16, jagged: true },
+            minecutter: { kind: 'beam', color: 0x44d8ff, core: 0xe8ffff, width: 0.038, life: 0.1, jagged: true },
             plasma:  { kind: 'bolt',  color: 0x62ff6a, core: 0xe8ffe8, width: 0.13, life: 0.32 },
             railgun: { kind: 'beam', color: 0x7ec8ff, core: 0xffffff, width: 0.095, life: 0.24 }
         };
@@ -3016,9 +3240,17 @@
         }
 
         function mineProgressGain(block) {
+            const g = weaponDef ? weaponGameplayFor(weaponDef.id) : { power: 0.5 };
             const speed = (weaponDef && weaponDef.stats && weaponDef.stats.Speed) || 5;
             const hardness = (block && block.hardness) || 1;
-            return speed / (hardness * 1.75);
+            return g.power * speed / (hardness * 1.75);
+        }
+
+        function laserMineGain(block) {
+            const g = weaponGameplayFor(weaponDef.id);
+            const speed = (weaponDef.stats && weaponDef.stats.Speed) || 5;
+            const hardness = (block && block.hardness) || 1;
+            return g.power * speed / (hardness * 3.2);
         }
 
         function tryMineSwing() {
@@ -3065,22 +3297,35 @@
         }
 
         function tryLaserMine() {
-            if (!isLaserRifle()) return false;
+            if (!isMineLaser()) return false;
             const t = pickTarget();
             triggerMineAnim({ laserPulse: true });
-            if (!t || !getBlock(t.x, t.y, t.z)) return false;
+            if (!t || !getBlock(t.x, t.y, t.z)) {
+                resetMining();
+                return false;
+            }
             if (weaponDef && weaponDef.ranged) spawnRangedShotVfxAt(false);
             const id = getBlock(t.x, t.y, t.z);
-            completeMine(t, id);
-            return true;
+            const block = blockById(id);
+            if (!block) return false;
+            if (mineTarget && (mineTarget.x !== t.x || mineTarget.y !== t.y || mineTarget.z !== t.z)) {
+                mineProgress = 0;
+            }
+            mineTarget = { x: t.x, y: t.y, z: t.z };
+            mineProgress += laserMineGain(block);
+            if (mineProgress >= 1) {
+                completeMine(t, id);
+                return true;
+            }
+            return false;
         }
 
         function updateLaserHoldFire(dt) {
-            if (!fireHeld || !isLaserRifle() || voxelPanelOpen()) return;
+            if (!fireHeld || !isMineLaser() || voxelPanelOpen()) return;
             laserCooldown -= dt;
             if (laserCooldown <= 0) {
                 tryLaserMine();
-                laserCooldown = LASER_FIRE_INTERVAL;
+                laserCooldown = mineLaserInterval();
             }
         }
 
@@ -3145,6 +3390,53 @@
             ['wry', 'Wpn yaw', -3.14, 3.14, 0.01],
             ['wrz', 'Wpn roll', -3.14, 3.14, 0.01]
         ];
+        const WEAPON_STAT_SLIDERS = [
+            ['power', 'Power', 0.05, 1.5, 0.01],
+            ['range', 'Range', 0.12, 1.0, 0.01]
+        ];
+
+        function fmtWeaponStatVal(key, val) {
+            if (key === 'range') return (val * AIM_REACH).toFixed(1) + 'm';
+            return (+val).toFixed(2);
+        }
+
+        function weaponStatsSectionHtml() {
+            let h = `<div class="vx-fp-section"><b>Weapon stats</b>`;
+            WEAPON_STAT_SLIDERS.forEach(([key, label, min, max, step]) => {
+                const id = `weapon-stat-${key}`;
+                h += `<label class="vx-fp-row" for="${id}">
+                    <span class="vx-fp-lbl">${label}</span>
+                    <span class="vx-tp-val" data-ws-v="${key}">—</span>
+                    <input type="range" id="${id}" data-ws="${key}"
+                        min="${min}" max="${max}" step="${step}">
+                </label>`;
+            });
+            return h + '</div>';
+        }
+
+        function syncWeaponStatInputs(root) {
+            if (!root || !weaponDef) return;
+            const g = weaponGameplayFor(weaponDef.id);
+            WEAPON_STAT_SLIDERS.forEach(([key]) => {
+                const input = root.querySelector(`[data-ws="${key}"]`);
+                const out = root.querySelector(`[data-ws-v="${key}"]`);
+                if (input) input.value = g[key];
+                if (out) out.textContent = fmtWeaponStatVal(key, g[key]);
+            });
+        }
+
+        function applyWeaponStatInput(key, val) {
+            if (!weaponDef) return;
+            const g = weaponGameplayFor(weaponDef.id);
+            g[key] = val;
+        }
+
+        function resetWeaponStatsForCurrent() {
+            const id = weaponDef ? weaponDef.id : 'blaster';
+            const defs = defaultWeaponGameplayStats();
+            if (!fpTune.weaponStats) fpTune.weaponStats = mergeWeaponStats(null);
+            fpTune.weaponStats[id] = Object.assign({}, defs[id] || { power: 0.5, range: 0.5 });
+        }
 
         function fmtFpCamVal(key, val) {
             if (key === 'theta' || key === 'phi' || key === 'pitchMin' || key === 'pitchMax') {
@@ -3188,9 +3480,22 @@
                 meleeRot.checked = !!w.meleeRot;
                 meleeRot.disabled = !!(weaponDef && weaponDef.ranged);
             }
+            syncWeaponStatInputs(fpTunerEl);
+        }
+
+        function onWeaponStatInput(e) {
+            const key = e.target.dataset.ws;
+            if (!key) return false;
+            const val = parseFloat(e.target.value);
+            applyWeaponStatInput(key, val);
+            const root = e.target.closest('.vx-fp-tuner');
+            const out = root && root.querySelector(`[data-ws-v="${key}"]`);
+            if (out) out.textContent = fmtWeaponStatVal(key, val);
+            return true;
         }
 
         function onFpTunerInput(e) {
+            if (onWeaponStatInput(e)) return;
             const cKey = e.target.dataset.fpC;
             const gKey = e.target.dataset.fpG;
             const wKey = e.target.dataset.fpW;
@@ -3270,13 +3575,15 @@
                 <h4>FP tuner</h4>
                 <span class="vx-fp-weapon" data-fp-tune-weapon>—</span>
             </div>
-            <p class="vx-fp-hint">Camera + weapon pose (Q/E). <b>F8</b> reopens after save.</p>`;
+            <p class="vx-fp-hint">Camera, pose (Q/E), power &amp; range. <b>F8</b> reopens after save.</p>`;
             html += camSection('Camera', FP_TUNER_CAM);
             html += `<div class="vx-fp-section"><b>Pivot &amp; mount</b>`;
             FP_TUNER_GLOBAL.forEach(([key, label, min, max, step]) => {
                 html += sliderRow('g', key, label, min, max, step);
             });
-            html += `</div><div class="vx-fp-section"><b>Current weapon</b>`;
+            html += `</div>`;
+            html += weaponStatsSectionHtml();
+            html += `<div class="vx-fp-section"><b>Current weapon pose</b>`;
             FP_TUNER_WEAPON.forEach(([key, label, min, max, step]) => {
                 html += sliderRow('w', key, label, min, max, step);
             });
@@ -3309,6 +3616,7 @@
                 const id = weaponDef ? weaponDef.id : 'blaster';
                 const defs = defaultWeaponTunes();
                 fpTune.weapons[id] = Object.assign({}, defs[id] || defs.blaster);
+                resetWeaponStatsForCurrent();
                 syncFpTunerInputs();
                 rebuildFpWeapon();
             });
@@ -3444,6 +3752,9 @@
 
         function syncTpTunerInputs() {
             if (!tpTunerEl || !tpTune) return;
+            const title = tpTunerEl.querySelector('[data-tp-tune-weapon]');
+            if (title) title.textContent = weaponDef ? weaponDef.name : '—';
+            syncWeaponStatInputs(tpTunerEl);
             const c = getTpCam();
             [['theta', orbit.theta], ['phi', orbit.phi], ['dist', orbit.dist]].forEach(([key, val]) => {
                 const input = tpTunerEl.querySelector(`[data-tp-c="${key}"]`);
@@ -3469,6 +3780,7 @@
         }
 
         function onTpTunerInput(e) {
+            if (onWeaponStatInput(e)) return;
             const key = e.target.dataset.tpC;
             if (!key) return;
             const c = getTpCam();
@@ -3512,9 +3824,10 @@
 
             let html = `<div class="vx-fp-head">
                 <h4>TP camera tuner</h4>
-                <span class="vx-fp-weapon">live</span>
+                <span class="vx-fp-weapon" data-tp-tune-weapon>—</span>
             </div>
-            <p class="vx-fp-hint">Orbit angle + shoulder framing. <b>F8</b> in 3rd person. Mouse/scroll still work.</p>`;
+            <p class="vx-fp-hint">Camera + weapon power/range (Q/E). <b>F8</b> in 3rd person.</p>`;
+            html += weaponStatsSectionHtml();
             html += section('Orbit angle', TP_TUNER_ORBIT);
             html += section('Shoulder &amp; lens', TP_TUNER_CAM);
             html += section('Limits', TP_TUNER_LIMITS);
@@ -3530,9 +3843,10 @@
             el.addEventListener('change', onTpTunerInput);
             el.addEventListener('wheel', (e) => e.stopPropagation(), { passive: true });
             el.querySelector('[data-tp-save]').addEventListener('click', () => {
+                saveFpTune();
                 saveTpTune(true);
                 el.hidden = true;
-                if (g.showMessage) g.showMessage('TP camera saved (F8 to tweak again)', 2800);
+                if (g.showMessage) g.showMessage('Camera & weapon stats saved (F8 to tweak again)', 2800);
             });
             el.querySelector('[data-tp-reset]').addEventListener('click', () => {
                 tpTune = defaultTpTune();
@@ -3826,7 +4140,7 @@
         }
         function placeBlock() {
             if (!isMiningTool()) {
-                showToolMsg('Equip pickaxe or laser to place blocks (Q/E)');
+                showToolMsg('Equip a mining tool to place blocks (Q/E)');
                 return;
             }
             const t = pickTarget();
@@ -3917,6 +4231,10 @@
                 const cls = VC.CLASSES[cfg.classIdx | 0];
                 const idx = defs.findIndex((w) => w.id === cls.weapon);
                 if (idx >= 0) start = idx;
+                if (cls.id === 'miner') {
+                    const cutter = defs.findIndex((w) => w.id === 'minecutter');
+                    if (cutter >= 0) ownedWeapons.add(cutter);
+                }
             }
             ownedWeapons.add(start);
             ownedWeapons.add(cfg.weapon | 0);
@@ -3938,7 +4256,7 @@
         }
 
         function weaponTint(def) {
-            if (def.id === 'pickaxe' || def.id === 'wrench') return INV_TINT.weapon_tool;
+            if (def.id === 'pickaxe' || def.id === 'wrench' || def.id === 'minecutter') return INV_TINT.weapon_tool;
             return def.ranged ? INV_TINT.weapon_ranged : INV_TINT.weapon_melee;
         }
 
@@ -3994,6 +4312,11 @@
                 px(6, 12, 20, 5, '#d04058');
                 px(24, 10, 10, 9, '#ff6080');
                 px(4, 13, 6, 3, '#60c0ff');
+            } else if (def.id === 'minecutter') {
+                px(12, 12, 8, 10, '#404858');
+                px(14, 10, 4, 4, '#6fe3ff');
+                px(18, 14, 6, 4, '#9deeff');
+                px(10, 16, 4, 3, '#6b4a2a');
             } else if (def.id === 'plasma') {
                 px(12, 10, 12, 10, '#d04848');
                 px(20, 12, 6, 6, '#ff9060');
@@ -4562,6 +4885,7 @@
             });
             shotVfx.length = 0;
             disposeAimEdgeHighlight();
+            disposeMineBlockFx();
             disposePlaceGhost();
             if (fpPivot && fpPivot.parent) fpPivot.parent.remove(fpPivot);
             if (g._voxelLights) {
@@ -4654,12 +4978,13 @@
             if(decoMat&&decoMat.userData.shader) decoMat.userData.shader.uniforms.uTime.value=elapsed;
             const t = pickTarget();
             updateAimEdgeHighlight(t);
+            updateMineBlockAnim();
             updatePlaceGhost(t);
             updateBlockScan(t);
             updateFormulaViewer(dt);
             const targetNameEl = document.getElementById('voxel-target-name');
             if (targetNameEl) {
-                const scanOpen = scanExpanded || (isBuilderMinerTool() && focusAimBlend > 0.35
+                const scanOpen = scanExpanded || (isMiningTool() && focusAimBlend > 0.35
                     && t && getBlock(t.x, t.y, t.z));
                 if (scanOpen) {
                     targetNameEl.textContent = '';
@@ -4896,7 +5221,7 @@
                     fireHeld = true;
                     laserCooldown = 0;
                     mineRepeatCooldown = 0;
-                    if (isLaserRifle()) tryLaserMine();
+                    if (isMineLaser()) tryLaserMine();
                     else if (isPickaxe()) {
                         tryMineSwing();
                         mineRepeatCooldown = MINE_SWING_INTERVAL;
@@ -4918,7 +5243,7 @@
                 if (btn === 2) {
                     placeBlock();
                     if (firstPerson || wasLockedOnDown) restoreViewPointerLock();
-                } else if (btn === 0 && !isLaserRifle() && !isPickaxe()) fireCombat();
+                } else if (btn === 0 && !isMineLaser() && !isPickaxe()) fireCombat();
             }
 
             function onCanvasPointerMove(e) {

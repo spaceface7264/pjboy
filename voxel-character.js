@@ -40,6 +40,9 @@ const WEAPONS = [
   { id:'laser',   name:'Laser Rifle',   twoHanded:true,  ranged:true,
     desc:'Focused beam emitter with active cooling fins. Pinpoint accuracy.',
     stats:{Damage:6, Speed:8, Range:9} },
+  { id:'minecutter', name:'Laser Handgun', twoHanded:false, ranged:true,
+    desc:'Pocket-sized mining cutter. Hold fire to carve blocks at close range.',
+    stats:{Damage:2, Speed:8, Range:4} },
   { id:'plasma',  name:'Plasma Pistol', twoHanded:false, ranged:true,
     desc:'Compact sidearm that lobs superheated bolts from a containment coil.',
     stats:{Damage:4, Speed:7, Range:4} },
@@ -415,6 +418,41 @@ function buildWeapon(def, accent){
     };
     socket.position.set(0,-.02,.5);
     muzzleZ = {y:.13,z:1.04}; beamColor = 0xbfe8ff; flashColor = 0x8ad8ff;
+
+  } else if(type==='minecutter'){
+    const body = box(.07,.08,.26,dark); body.position.set(0,.07,.06); g.add(body);
+    const gripPad = box(.08,.04,.1,grip); gripPad.position.set(0,.02,.0); g.add(gripPad);
+    for(let i=0;i<2;i++){ const rib=box(.075,.025,.035,metal); rib.position.set(0,.04+i*.045,-.02); g.add(rib); }
+    const trigger = box(.02,.05,.05,metal); trigger.position.set(0,-.01,.03); g.add(trigger);
+    const cellM = glow(0x6fe3ff);
+    const cell = box(.06,.08,.04,cellM); cell.position.set(0,.12,.0); g.add(cell);
+    const cellCap = box(.07,.03,.05,acc); cellCap.position.set(0,.16,.0); g.add(cellCap);
+    const barrel = box(.04,.04,.1,metal); barrel.position.set(0,.08,.28); g.add(barrel);
+    const shroud = box(.06,.06,.06,dark); shroud.position.set(0,.08,.34); g.add(shroud);
+    const focusM = glow(0x9deeff);
+    const focus = box(.045,.045,.03,focusM); focus.position.set(0,.08,.38); g.add(focus);
+    const sight = box(.02,.02,.02,glow(0xff7a5c)); sight.position.set(0,.13,.02); g.add(sight);
+    const ventMats=[];
+    [-1,1].forEach(s=>{ const vm=glow(0x3a8a9a); ventMats.push(vm);
+      const vent=box(.015,.035,.05,vm); vent.position.set(s*.042,.1,.12); g.add(vent); });
+    const chips = pool(5,0xc8f0ff,.022);
+    const haze = pool(3,0x88d8ff,.028);
+    g.userData.animate = (t,f)=>{ const d=dtOf(t);
+      sight.visible = (t*3)%1 < .75;
+      cellM.color.setHex(f>0? 0xe8ffff : 0x6fe3ff);
+      const cs = 1 + .08*Math.sin(t*4) + f*.45; cell.scale.set(cs,cs,1);
+      focus.scale.set(1+f*.55, 1+f*.55, 1+f*.35);
+      focusM.color.setHex(f>0? 0xffffff : 0x9deeff);
+      ventMats.forEach(vm=>{ vm.color.setHex(f>0? 0x9deeff : 0x3a8a9a); });
+      if(f>0 && prevF===0){
+        for(let i=0;i<3;i++) chips.spawn((Math.random()-.5)*.05,.08,.36,(Math.random()-.5)*1.2,.5,(Math.random()-.5)*1.2);
+        haze.spawn(0,.08,.4,0,0,10);
+      }
+      chips.step(d,.32,2.5);
+      haze.step(d,.45);
+      prevF=f;
+    };
+    muzzleZ = {y:.08,z:.42}; beamColor = 0x66e8ff; flashColor = 0x9deeff;
   }
 
   // muzzle point + flash + (optional) beam for ranged weapons
@@ -449,6 +487,7 @@ function tpWeaponGripRest(def) {
   if (id === 'wrench') return { x: 1.3, y: fy, z: 0, px: 0, py: -0.03, pz: 0.05 };
   if (id === 'sword') return { x: 1.1, y: fy, z: 0, px: 0, py: -0.03, pz: 0.05 };
   if (id === 'plasma') return { x: -0.05, y: fy, z: 0.04, px: 0, py: -0.03, pz: 0.04 };
+  if (id === 'minecutter') return { x: -0.05, y: fy, z: 0.05, px: 0, py: -0.03, pz: 0.04 };
   if (id === 'railgun') return { x: -0.02, y: fy, z: -0.02, px: 0, py: -0.04, pz: 0.04 };
   if (id === 'laser') return { x: -0.05, y: fy, z: 0.02, px: 0, py: -0.03, pz: 0.05 };
   if (id === 'blaster') return { x: -0.05, y: fy, z: 0, px: 0, py: -0.03, pz: 0.05 };
