@@ -1120,6 +1120,10 @@
             return !!(weaponDef && weaponDef.id === 'pickaxe');
         }
 
+        function isBuilderMinerTool() {
+            return isPickaxe();
+        }
+
         function isMiningTool() {
             return isPickaxe() || isLaserRifle();
         }
@@ -1724,63 +1728,136 @@
           const hit=ray.intersectObjects(collectAimMeshes())[0];
           if(!hit) return null;
           if(hit.point.distanceTo(player.pos)>AIM_REACH) return null;
-          const p=hit.point.clone().sub(WORLD_OFFSET), n=hit.face.normal;
-          const vox=p.clone().addScaledVector(n,-.5).floor();
-          const place=p.clone().addScaledVector(n,.5).floor();
-          return {x:vox.x,y:vox.y,z:vox.z,place};
+          const p = hit.point.clone().sub(WORLD_OFFSET);
+          const nx = Math.round(hit.face.normal.x);
+          const ny = Math.round(hit.face.normal.y);
+          const nz = Math.round(hit.face.normal.z);
+          // Nudge into the struck block before flooring — stops boundary jitter.
+          const vox = {
+            x: Math.floor(p.x - nx * 0.002),
+            y: Math.floor(p.y - ny * 0.002),
+            z: Math.floor(p.z - nz * 0.002)
+          };
+          const place = {
+            x: Math.floor(p.x + nx * 0.002),
+            y: Math.floor(p.y + ny * 0.002),
+            z: Math.floor(p.z + nz * 0.002)
+          };
+          return { x: vox.x, y: vox.y, z: vox.z, place };
         }
 
-        const AIM_EDGE_EPS = 0.012;
-        const AIM_EDGE_THICK = 0.038;
-        const AIM_EDGE_GLOW_THICK = 0.095;
-        const AIM_CORNER_R = 0.09;
-        const AIM_ARC_SEGS = 6;
-        const AIM_FACE_LOOP = [0, 1, 3, 2];
-        let aimEdgeMesh = null;
-        let aimEdgeGlow = null;
-        let aimEdgeKey = '';
-        let aimEdgeMat = null;
-        let aimEdgeGlowMat = null;
-        const _edgeDir = new THREE.Vector3();
-        const _edgeUp = new THREE.Vector3();
-        const _edgeSide = new THREE.Vector3();
-        const _arcA = new THREE.Vector3();
-        const _arcB = new THREE.Vector3();
-        const _arcP = new THREE.Vector3();
+        let aimOutline = null;
+        let aimOutlineKey = '';
+        let aimOutlineMat = null;
+        let _aimShownTarget = null;
+        let _aimCandidateTarget = null;
+        let _aimCandidateFrames = 0;
 
-        function ensureAimEdgeMats() {
-            if (aimEdgeMat) return;
-            aimEdgeGlowMat = new THREE.MeshBasicMaterial({
-                color: 0x5ce8ff,
-                transparent: true,
-                opacity: 0.34,
-                side: THREE.DoubleSide,
-                depthWrite: false,
-                blending: THREE.AdditiveBlending
-            });
-            aimEdgeMat = new THREE.MeshBasicMaterial({
-                color: 0x46d0ff,
-                transparent: true,
-                opacity: 1,
-                side: THREE.DoubleSide,
-                depthWrite: false,
-                blending: THREE.AdditiveBlending
-            });
+        // Unit-cube edges only — each entry is [cornerA, cornerB, faceDirA, faceDirB].
+        const AIM_CUBE_EDGES = [
+            [[0,0,0],[1,0,0], [0,-1,0], [0,0,-1]],
+            [[0,1,0],[1,1,0], [0, 1,0], [0,0,-1]],
+            [[0,0,1],[1,0,1], [0,-1,0], [0,0, 1]],
+            [[0,1,1],[1,1,1], [0, 1,0], [0,0, 1]],
+            [[0,0,0],[0,1,0], [-1,0,0], [0,0,-1]],
+            [[1,0,0],[1,1,0], [ 1,0,0], [0,0,-1]],
+            [[0,0,1],[0,1,1], [-1,0,0], [0,0, 1]],
+            [[1,0,1],[1,1,1], [ 1,0,0], [0,0, 1]],
+            [[0,0,0],[0,0,1], [-1,0,0], [0,-1,0]],
+            [[1,0,0],[1,0,1], [ 1,0,0], [0,-1,0]],
+            [[0,1,0],[0,1,1], [-1,0,0], [0, 1,0]],
+            [[1,1,0],[1,1,1], [ 1,0,0], [0, 1,0]]
+        ];
+
+        function isFaceExposed(x, y, z, face, blockId) {
+            const [dx, dy, dz] = face.dir;
+            const nid = getBlock(x + dx, y + dy, z + dz);
+            if (!nid) return true;
+            const nb = blockById(nid);
+            if (!nb || !nb.transparent) return false;
+            return nid !== blockId;
         }
 
-        function pushThickEdge(pos, idx, ca, cb, halfThick) {
-            const ax = ca[0], ay = ca[1], az = ca[2];
-            const bx = cb[0], by = cb[1], bz = cb[2];
-            _edgeDir.set(bx - ax, by - ay, bz - az);
-            if (_edgeDir.lengthSq() < 1e-8) return;
-            _edgeDir.normalize();
-            _edgeUp.set(0, 1, 0);
-            if (Math.abs(_edgeDir.y) > 0.92) _edgeUp.set(1, 0, 0);
-            _edgeSide.crossVectors(_edgeDir, _edgeUp).normalize().multiplyScalar(halfThick);
-            const a1x = ax + _edgeSide.x, a1y = ay + _edgeSide.y, a1z = az + _edgeSide.z;
-            const a2x = ax - _edgeSide.x, a2y = ay - _edgeSide.y, a2z = az - _edgeSide.z;
-            const b1x = bx + _edgeSide.x, b1y = by + _edgeSide.y, b1z = bz + _edgeSide.z;
-            const b2x = bx - _edgeSide.x, b2y = by - _edgeSide.y, b2z = bz - _edgeSide.z;
+        function isDirExposed(x, y, z, dx, dy, dz, blockId) {
+            for (const face of FACES) {
+                if (face.dir[0] === dx && face.dir[1] === dy && face.dir[2] === dz) {
+                    return isFaceExposed(x, y, z, face, blockId);
+                }
+            }
+            return false;
+        }
+
+        function getAimTune() {
+            if (!aimTune) aimTune = loadAimTune();
+            return aimTune;
+        }
+
+        function positionAimCorner(vx, vy, vz, expand) {
+            if (!expand) return [vx, vy, vz];
+            return [
+                vx + (vx - 0.5) * expand * 2,
+                vy + (vy - 0.5) * expand * 2,
+                vz + (vz - 0.5) * expand * 2
+            ];
+        }
+
+        function stabilizeAimTarget(raw) {
+            if (!raw || !getBlock(raw.x, raw.y, raw.z)) {
+                _aimShownTarget = null;
+                _aimCandidateTarget = null;
+                _aimCandidateFrames = 0;
+                return null;
+            }
+            const key = `${raw.x},${raw.y},${raw.z}`;
+            const candKey = _aimCandidateTarget
+                ? `${_aimCandidateTarget.x},${_aimCandidateTarget.y},${_aimCandidateTarget.z}` : '';
+            if (key === candKey) _aimCandidateFrames++;
+            else {
+                _aimCandidateTarget = raw;
+                _aimCandidateFrames = 1;
+            }
+            if (_aimCandidateFrames >= 2) _aimShownTarget = _aimCandidateTarget;
+            return _aimShownTarget;
+        }
+
+        const _aimEdgeDir = new THREE.Vector3();
+        const _aimEdgeUp = new THREE.Vector3();
+        const _aimFaceN = new THREE.Vector3();
+
+        function aimOutwardPerp(edgeDir, faceDir, mx, my, mz) {
+            _aimFaceN.set(faceDir[0], faceDir[1], faceDir[2]);
+            _aimEdgeUp.crossVectors(edgeDir, _aimFaceN);
+            if (_aimEdgeUp.lengthSq() < 1e-10) return false;
+            _aimEdgeUp.normalize();
+            if (_aimEdgeUp.x * mx + _aimEdgeUp.y * my + _aimEdgeUp.z * mz < 0) _aimEdgeUp.negate();
+            return true;
+        }
+
+        // Stroke sits in the face crease (bisector of adjacent face normals), not flat on a face.
+        function pushAimStrokeQuad(pos, idx, ax, ay, az, bx, by, bz, halfW, d1, d2, d1On, d2On) {
+            _aimEdgeDir.set(bx - ax, by - ay, bz - az);
+            if (_aimEdgeDir.lengthSq() < 1e-10) return;
+            _aimEdgeDir.normalize();
+            const mx = (ax + bx) * 0.5 - 0.5;
+            const my = (ay + by) * 0.5 - 0.5;
+            const mz = (az + bz) * 0.5 - 0.5;
+            let sx = 0, sy = 0, sz = 0, n = 0;
+            if (d1On && aimOutwardPerp(_aimEdgeDir, d1, mx, my, mz)) {
+                sx += _aimEdgeUp.x; sy += _aimEdgeUp.y; sz += _aimEdgeUp.z; n++;
+            }
+            if (d2On && aimOutwardPerp(_aimEdgeDir, d2, mx, my, mz)) {
+                sx += _aimEdgeUp.x; sy += _aimEdgeUp.y; sz += _aimEdgeUp.z; n++;
+            }
+            if (!n) return;
+            const len = Math.hypot(sx, sy, sz);
+            if (len < 1e-8) return;
+            sx = sx / len * halfW;
+            sy = sy / len * halfW;
+            sz = sz / len * halfW;
+            const a1x = ax + sx, a1y = ay + sy, a1z = az + sz;
+            const a2x = ax - sx, a2y = ay - sy, a2z = az - sz;
+            const b1x = bx + sx, b1y = by + sy, b1z = bz + sz;
+            const b2x = bx - sx, b2y = by - sy, b2z = bz - sz;
             const base = pos.length / 3;
             pos.push(
                 a1x, a1y, a1z, b1x, b1y, b1z, a2x, a2y, a2z,
@@ -1789,171 +1866,110 @@
             idx.push(base, base + 1, base + 2, base + 3, base + 4, base + 5);
         }
 
-        function norm3(ax, ay, az, out) {
-            const len = Math.hypot(ax, ay, az) || 1;
-            out[0] = ax / len;
-            out[1] = ay / len;
-            out[2] = az / len;
-            return len;
-        }
-
-        function pushPathPoint(path, x, y, z) {
-            const n = path.length;
-            if (n >= 3) {
-                const lx = path[n - 3], ly = path[n - 2], lz = path[n - 1];
-                if (Math.abs(lx - x) < 1e-5 && Math.abs(ly - y) < 1e-5 && Math.abs(lz - z) < 1e-5) return;
-            }
-            path.push(x, y, z);
-        }
-
-        function pushCornerArc(path, cx, cy, cz, inX, inY, inZ, outX, outY, outZ, radius) {
-            _arcA.set(-inX, -inY, -inZ);
-            _arcB.set(outX, outY, outZ);
-            for (let s = 0; s <= AIM_ARC_SEGS; s++) {
-                const t = s / AIM_ARC_SEGS;
-                const s1 = Math.sin((1 - t) * Math.PI * 0.5);
-                const s2 = Math.sin(t * Math.PI * 0.5);
-                _arcP.set(
-                    cx + radius * (_arcA.x * s1 + _arcB.x * s2),
-                    cy + radius * (_arcA.y * s1 + _arcB.y * s2),
-                    cz + radius * (_arcA.z * s1 + _arcB.z * s2)
-                );
-                pushPathPoint(path, _arcP.x, _arcP.y, _arcP.z);
-            }
-        }
-
-        function buildRoundedFacePath(corners) {
-            const path = [];
-            const n = AIM_FACE_LOOP.length;
-            const dirs = [];
-            for (let i = 0; i < n; i++) {
-                const prev = corners[AIM_FACE_LOOP[(i + n - 1) % n]];
-                const curr = corners[AIM_FACE_LOOP[i]];
-                const next = corners[AIM_FACE_LOOP[(i + 1) % n]];
-                const inD = [curr[0] - prev[0], curr[1] - prev[1], curr[2] - prev[2]];
-                const outD = [next[0] - curr[0], next[1] - curr[1], next[2] - curr[2]];
-                norm3(inD[0], inD[1], inD[2], inD);
-                norm3(outD[0], outD[1], outD[2], outD);
-                dirs.push({ curr, inD, outD });
-            }
-            for (let i = 0; i < n; i++) {
-                const prev = dirs[(i + n - 1) % n];
-                const cur = dirs[i];
-                const edgeLen = Math.hypot(
-                    cur.curr[0] - prev.curr[0],
-                    cur.curr[1] - prev.curr[1],
-                    cur.curr[2] - prev.curr[2]
-                );
-                const r = Math.min(AIM_CORNER_R, edgeLen * 0.46);
-                const sx = prev.curr[0] + prev.outD[0] * r;
-                const sy = prev.curr[1] + prev.outD[1] * r;
-                const sz = prev.curr[2] + prev.outD[2] * r;
-                const ex = cur.curr[0] - cur.inD[0] * r;
-                const ey = cur.curr[1] - cur.inD[1] * r;
-                const ez = cur.curr[2] - cur.inD[2] * r;
-                pushPathPoint(path, sx, sy, sz);
-                pushPathPoint(path, ex, ey, ez);
-                pushCornerArc(path, cur.curr[0], cur.curr[1], cur.curr[2],
-                    cur.inD[0], cur.inD[1], cur.inD[2],
-                    cur.outD[0], cur.outD[1], cur.outD[2], r);
-            }
-            return path;
-        }
-
-        function pushRibbonPath(pos, idx, path, halfThick) {
-            for (let i = 0; i < path.length - 3; i += 3) {
-                const ca = [path[i], path[i + 1], path[i + 2]];
-                const cb = [path[i + 3], path[i + 4], path[i + 5]];
-                pushThickEdge(pos, idx, ca, cb, halfThick);
-            }
-            if (path.length >= 6) {
-                const last = [path[path.length - 3], path[path.length - 2], path[path.length - 1]];
-                const first = [path[0], path[1], path[2]];
-                pushThickEdge(pos, idx, last, first, halfThick);
-            }
-        }
-
-        function buildAimEdgeMeshData(x, y, z, halfThick) {
-            const id = getBlock(x, y, z);
-            if (!id) return null;
+        function buildAimOutlineMeshData(x, y, z) {
+            const blockId = getBlock(x, y, z);
+            if (!blockId) return null;
+            const tune = getAimTune();
+            const expand = tune.expand || 0;
+            const halfW = Math.max(0.0008, (tune.strokeWidth ?? 0.022) * 0.5);
             const pos = [];
             const idx = [];
-            for (const face of FACES) {
-                const [dx, dy, dz] = face.dir;
-                const nid = getBlock(x + dx, y + dy, z + dz);
-                if (nid) {
-                    const nb = blockById(nid);
-                    if (!nb.transparent) continue;
-                    if (nid === id) continue;
-                }
-                const corners = face.corners.map(c => [
-                    c.pos[0] + dx * AIM_EDGE_EPS,
-                    c.pos[1] + dy * AIM_EDGE_EPS,
-                    c.pos[2] + dz * AIM_EDGE_EPS
-                ]);
-                const path = buildRoundedFacePath(corners);
-                pushRibbonPath(pos, idx, path, halfThick);
+            for (const [a, b, d1, d2] of AIM_CUBE_EDGES) {
+                const d1On = isDirExposed(x, y, z, d1[0], d1[1], d1[2], blockId);
+                const d2On = isDirExposed(x, y, z, d2[0], d2[1], d2[2], blockId);
+                if (!d1On && !d2On) continue;
+                const pa = positionAimCorner(a[0], a[1], a[2], expand);
+                const pb = positionAimCorner(b[0], b[1], b[2], expand);
+                pushAimStrokeQuad(pos, idx, pa[0], pa[1], pa[2], pb[0], pb[1], pb[2], halfW, d1, d2, d1On, d2On);
             }
             return pos.length ? { pos, idx } : null;
         }
 
-        function makeAimEdgeMesh(data, mat, order) {
-            const geo = new THREE.BufferGeometry();
-            geo.setAttribute('position', new THREE.Float32BufferAttribute(data.pos, 3));
-            geo.setIndex(data.idx);
-            const mesh = new THREE.Mesh(geo, mat);
-            mesh.frustumCulled = false;
-            mesh.renderOrder = order;
-            scene.add(mesh);
-            return mesh;
+        function applyAimOutlineStyle(cracking) {
+            if (!aimOutlineMat) return;
+            const t = getAimTune();
+            const pulseWave = 0.78 + 0.22 * Math.sin(elapsed * (t.pulseHz || 7));
+            aimOutlineMat.opacity = Math.min(1,
+                (t.opacity ?? 0.55) + pulseWave * (t.pulse ?? 0.25) + cracking * (t.mineGlow ?? 0.2));
+            _aimBaseCol.set(t.color || '#5ce8ff');
+            _aimMineCol.set(t.mineColor || '#7af0ff');
+            aimOutlineMat.color.copy(_aimBaseCol);
+            if (cracking > 0.01) aimOutlineMat.color.lerp(_aimMineCol, Math.min(1, cracking));
+        }
+
+        function refreshAimOutlineGeometry() {
+            if (!aimOutlineKey) return;
+            const parts = aimOutlineKey.split(',');
+            if (parts.length !== 3) return;
+            rebuildAimEdgeHighlight(+parts[0], +parts[1], +parts[2]);
+        }
+
+        function ensureAimOutlineMat() {
+            if (aimOutlineMat) return;
+            aimOutlineMat = new THREE.MeshBasicMaterial({
+                color: 0x5ce8ff,
+                transparent: true,
+                opacity: 0.9,
+                side: THREE.DoubleSide,
+                depthTest: true,
+                depthWrite: false,
+                polygonOffset: true,
+                polygonOffsetFactor: -1,
+                polygonOffsetUnits: -1
+            });
         }
 
         function disposeAimEdgeHighlight() {
-            for (const mesh of [aimEdgeMesh, aimEdgeGlow]) {
-                if (!mesh) continue;
-                scene.remove(mesh);
-                mesh.geometry.dispose();
+            if (!aimOutline) {
+                aimOutlineKey = '';
+                return;
             }
-            aimEdgeMesh = aimEdgeGlow = null;
-            aimEdgeKey = '';
-        }
-
-        function setAimEdgePosition(t) {
-            const px = WORLD_OFFSET.x + t.x;
-            const py = WORLD_OFFSET.y + t.y;
-            const pz = WORLD_OFFSET.z + t.z;
-            for (const mesh of [aimEdgeMesh, aimEdgeGlow]) {
-                if (mesh) mesh.position.set(px, py, pz);
-            }
+            scene.remove(aimOutline);
+            aimOutline.geometry.dispose();
+            aimOutline = null;
+            aimOutlineKey = '';
         }
 
         function rebuildAimEdgeHighlight(x, y, z) {
-            const core = buildAimEdgeMeshData(x, y, z, AIM_EDGE_THICK * 0.5);
-            const glow = buildAimEdgeMeshData(x, y, z, AIM_EDGE_GLOW_THICK * 0.5);
-            disposeAimEdgeHighlight();
-            if (!core) return;
-            ensureAimEdgeMats();
-            aimEdgeGlow = glow ? makeAimEdgeMesh(glow, aimEdgeGlowMat, 59) : null;
-            aimEdgeMesh = makeAimEdgeMesh(core, aimEdgeMat, 60);
-            aimEdgeKey = `${x},${y},${z}`;
+            const data = buildAimOutlineMeshData(x, y, z);
+            if (aimOutline) {
+                scene.remove(aimOutline);
+                aimOutline.geometry.dispose();
+                aimOutline = null;
+            }
+            if (!data) {
+                aimOutlineKey = '';
+                return;
+            }
+            ensureAimOutlineMat();
+            const geo = new THREE.BufferGeometry();
+            geo.setAttribute('position', new THREE.Float32BufferAttribute(data.pos, 3));
+            geo.setIndex(data.idx);
+            aimOutline = new THREE.Mesh(geo, aimOutlineMat);
+            aimOutline.frustumCulled = false;
+            aimOutline.renderOrder = 200;
+            aimOutline.position.set(WORLD_OFFSET.x + x, WORLD_OFFSET.y + y, WORLD_OFFSET.z + z);
+            scene.add(aimOutline);
+            aimOutlineKey = `${x},${y},${z}`;
         }
 
         function updateAimEdgeHighlight(t) {
-            if (!t || drawerOpen || !getBlock(t.x, t.y, t.z) || !isMiningTool()) {
-                if (aimEdgeMesh) aimEdgeMesh.visible = false;
-                if (aimEdgeGlow) aimEdgeGlow.visible = false;
+            if (drawerOpen || !isMiningTool()) {
+                if (aimOutline) aimOutline.visible = false;
+                return;
+            }
+            t = stabilizeAimTarget(t);
+            if (!t) {
+                if (aimOutline) aimOutline.visible = false;
                 return;
             }
             const key = `${t.x},${t.y},${t.z}`;
-            if (key !== aimEdgeKey) rebuildAimEdgeHighlight(t.x, t.y, t.z);
-            setAimEdgePosition(t);
-            const pulse = 0.82 + 0.18 * Math.sin(elapsed * 8);
+            if (key !== aimOutlineKey) rebuildAimEdgeHighlight(t.x, t.y, t.z);
+            if (!aimOutline) return;
             const cracking = mineTarget && mineTarget.x === t.x && mineTarget.y === t.y && mineTarget.z === t.z
                 ? mineProgress : 0;
-            if (aimEdgeGlowMat) aimEdgeGlowMat.opacity = 0.26 + pulse * 0.14 + cracking * 0.38;
-            if (aimEdgeMat) aimEdgeMat.opacity = 0.72 + cracking * 0.28;
-            if (aimEdgeMesh) aimEdgeMesh.visible = true;
-            if (aimEdgeGlow) aimEdgeGlow.visible = true;
+            applyAimOutlineStyle(cracking);
+            aimOutline.visible = true;
         }
 
         function canPlaceBlockAt(x, y, z) {
@@ -1989,9 +2005,737 @@
             placeGhost = null;
         }
 
+        let _scanBlockId = -1;
+        let scanExpanded = false;
+        let _scanSticky = null;
+        const _scanWorld = new THREE.Vector3();
+
+        function isScanCompactActive(t) {
+            return !drawerOpen && isBuilderMinerTool() && focusAimBlend > 0.08
+                && t && getBlock(t.x, t.y, t.z);
+        }
+
+        function fillScanTags(tagsEl, tags, full) {
+            if (!tagsEl) return;
+            tagsEl.innerHTML = '';
+            const list = tags || [];
+            const show = full ? list : list.slice(0, 4);
+            show.forEach((tag) => {
+                const chip = document.createElement('span');
+                chip.className = 'vx-scan-tag';
+                chip.textContent = tag;
+                tagsEl.appendChild(chip);
+            });
+            if (!full && list.length > show.length) {
+                const more = document.createElement('span');
+                more.className = 'vx-scan-tag';
+                more.textContent = `+${list.length - show.length}`;
+                tagsEl.appendChild(more);
+            }
+        }
+
+        function fillScanPanelContent(b, id, cracking, expanded) {
+            const catEl = document.getElementById('voxel-scan-cat');
+            const nameEl = document.getElementById('voxel-scan-name');
+            const descEl = document.getElementById('voxel-scan-desc');
+            const formulaEl = document.getElementById('voxel-scan-formula');
+            const mineralEl = document.getElementById('voxel-scan-mineral');
+            const factEl = document.getElementById('voxel-scan-fact');
+            const tagsEl = document.getElementById('voxel-scan-tags');
+            const thumbEl = document.getElementById('voxel-scan-thumb');
+            const metaEl = document.getElementById('voxel-scan-meta');
+            const badgeText = document.querySelector('.vx-scan-badge-text');
+            const dots = document.querySelector('.vx-scan-dots');
+            const compactHint = document.getElementById('voxel-scan-compact-hint');
+            const closeHint = document.getElementById('voxel-scan-close-hint');
+
+            if (catEl) catEl.textContent = `${CAT_ICONS[b.cat] || '▪'} ${b.cat || ''}`;
+            if (nameEl) nameEl.textContent = b.name;
+            if (descEl) descEl.textContent = b.desc || '';
+            const formulaText = (b.sci && b.sci.formula) || '—';
+            if (formulaEl) formulaEl.textContent = formulaText;
+            setFormulaVisual(formulaText);
+            if (mineralEl) mineralEl.textContent = (b.sci && b.sci.mineral) || '—';
+            if (factEl) factEl.textContent = (b.sci && b.sci.fact) || '';
+            if (thumbEl) thumbEl.style.backgroundImage = `url(${thumbUrl(id)})`;
+            fillScanTags(tagsEl, b.tags, expanded);
+            if (metaEl) {
+                let meta = `Hardness ${b.hardness ?? '?'}`;
+                if (cracking > 0.01) meta += ` · Mining ${Math.round(cracking * 100)}%`;
+                metaEl.textContent = meta;
+            }
+            if (badgeText) badgeText.textContent = expanded ? 'Block Analysis' : 'Scanning';
+            if (dots) dots.style.display = expanded ? 'none' : '';
+            if (compactHint) compactHint.hidden = expanded;
+            if (closeHint) closeHint.hidden = !expanded;
+        }
+
+        function resizeFormulaCanvas(expanded) {
+            const size = expanded ? { w: 200, h: 152 } : { w: 168, h: 128 };
+            const canvas = document.getElementById('voxel-scan-formula-canvas');
+            if (!canvas) return;
+            if (canvas.width === size.w && canvas.height === size.h) return;
+            canvas.width = size.w;
+            canvas.height = size.h;
+            if (formulaViewer.renderer) {
+                formulaViewer.renderer.setSize(size.w, size.h, false);
+                formulaViewer.camera.aspect = size.w / size.h;
+                formulaViewer.camera.updateProjectionMatrix();
+            }
+        }
+
+        function layoutScanExpanded() {
+            const panel = document.getElementById('voxel-scan');
+            if (!panel) return;
+            const h = window.innerHeight;
+            panel.style.left = '50%';
+            panel.style.top = '50%';
+            panel.style.right = 'auto';
+            panel.style.bottom = 'auto';
+            panel.style.transform = 'translate(-50%, -50%)';
+            panel.style.height = 'auto';
+            panel.style.maxHeight = `${Math.min(h * 0.82, h - 40)}px`;
+            const fit = panel.querySelector('.vx-scan-fit');
+            if (fit) fit.style.transform = 'none';
+        }
+
+        function setScanExpanded(on) {
+            const next = !!on;
+            if (scanExpanded === next) return;
+            scanExpanded = next;
+            const backdrop = document.getElementById('voxel-scan-backdrop');
+            const panel = document.getElementById('voxel-scan');
+            if (backdrop) backdrop.hidden = !scanExpanded;
+            if (panel) panel.classList.toggle('vx-scan-expanded', scanExpanded);
+            resizeFormulaCanvas(scanExpanded);
+            if (scanExpanded) {
+                if (isViewPointerLocked()) {
+                    releasePointerLock();
+                    syncViewCursor();
+                }
+                if (_scanBlockId >= 0) {
+                    const b = blockById(_scanBlockId);
+                    if (b) fillScanPanelContent(b, _scanBlockId, 0, true);
+                }
+                layoutScanExpanded();
+            } else {
+                _scanSticky = null;
+                if (panel) {
+                    panel.style.left = '0';
+                    panel.style.top = '0';
+                    panel.style.transform = 'none';
+                    panel.style.height = '';
+                    panel.style.maxHeight = '';
+                }
+                if (_scanBlockId >= 0) {
+                    const b = blockById(_scanBlockId);
+                    if (b) fillScanPanelContent(b, _scanBlockId, 0, false);
+                }
+            }
+        }
+
+        const FORMULA_SUB = { '₀': '0', '₁': '1', '₂': '2', '₃': '3', '₄': '4', '₅': '5', '₆': '6', '₇': '7', '₈': '8', '₉': '9' };
+        const FORMULA_ELM = {
+            H: { color: 0xf2f6ff, r: 0.18, name: 'Hydrogen' },
+            C: { color: 0x505050, r: 0.28, name: 'Carbon' },
+            N: { color: 0x4a6dff, r: 0.27, name: 'Nitrogen' },
+            O: { color: 0xff4a4a, r: 0.26, name: 'Oxygen' },
+            S: { color: 0xffd84a, r: 0.3, name: 'Sulfur' },
+            P: { color: 0xff8a2a, r: 0.3, name: 'Phosphorus' },
+            F: { color: 0x7aff9a, r: 0.24, name: 'Fluorine' },
+            Cl: { color: 0x62d962, r: 0.32, name: 'Chlorine' },
+            Si: { color: 0xd4b896, r: 0.32, name: 'Silicon' },
+            Al: { color: 0xb8b8c8, r: 0.32, name: 'Aluminum' },
+            Fe: { color: 0xff8844, r: 0.32, name: 'Iron' },
+            Cu: { color: 0xd4885a, r: 0.32, name: 'Copper' },
+            Au: { color: 0xffd700, r: 0.34, name: 'Gold' },
+            Ti: { color: 0xb8c0c8, r: 0.32, name: 'Titanium' },
+            Co: { color: 0x6a8fd8, r: 0.32, name: 'Cobalt' },
+            Mg: { color: 0x8fd88f, r: 0.3, name: 'Magnesium' },
+            Na: { color: 0x8a9aff, r: 0.34, name: 'Sodium' },
+            K: { color: 0x9a7aff, r: 0.38, name: 'Potassium' },
+            Ca: { color: 0xb8c8d8, r: 0.34, name: 'Calcium' },
+            Be: { color: 0xa8d8a8, r: 0.28, name: 'Beryllium' },
+            U: { color: 0x62ff62, r: 0.34, name: 'Uranium' },
+            Ga: { color: 0xc8b8d8, r: 0.32, name: 'Gallium' },
+            As: { color: 0xbd80e3, r: 0.32, name: 'Arsenic' }
+        };
+        function countsKey(counts) {
+            return Object.entries(counts)
+                .sort((a, b) => a[0].localeCompare(b[0]))
+                .map(([el, n]) => el + n)
+                .join('');
+        }
+
+        const FORMULA_PRESETS = {
+            H2O1: {
+                atoms: [
+                    { el: 'O', pos: [0, 0, 0] },
+                    { el: 'H', pos: [0.78, 0.58, 0] },
+                    { el: 'H', pos: [-0.78, 0.58, 0] }
+                ],
+                bonds: [[0, 1], [0, 2]]
+            },
+            C1O2: {
+                atoms: [
+                    { el: 'C', pos: [0, 0, 0] },
+                    { el: 'O', pos: [-1.05, 0, 0] },
+                    { el: 'O', pos: [1.05, 0, 0] }
+                ],
+                bonds: [[0, 1], [0, 2]]
+            },
+            O2Si1: {
+                atoms: [
+                    { el: 'Si', pos: [0, 0, 0] },
+                    { el: 'O', pos: [0.9, 0.55, 0] },
+                    { el: 'O', pos: [-0.9, 0.55, 0] }
+                ],
+                bonds: [[0, 1], [0, 2]]
+            },
+            Fe2O3: {
+                atoms: [
+                    { el: 'Fe', pos: [0, 0.45, 0] },
+                    { el: 'Fe', pos: [-0.78, -0.45, 0] },
+                    { el: 'Fe', pos: [0.78, -0.45, 0] },
+                    { el: 'O', pos: [0, -0.15, 0.85] },
+                    { el: 'O', pos: [-0.68, 0.15, -0.55] },
+                    { el: 'O', pos: [0.68, 0.15, -0.55] }
+                ],
+                bonds: [[0, 3], [0, 4], [1, 4], [1, 5], [2, 3], [2, 5]]
+            },
+            H2O4S1: {
+                atoms: [
+                    { el: 'S', pos: [0, 0, 0] },
+                    { el: 'O', pos: [0.95, 0.35, 0] },
+                    { el: 'O', pos: [-0.95, 0.35, 0] },
+                    { el: 'O', pos: [0, -0.55, 0.85] },
+                    { el: 'O', pos: [0, -0.55, -0.85] },
+                    { el: 'H', pos: [0.35, -1.05, 1.05] },
+                    { el: 'H', pos: [0.35, -1.05, -1.05] }
+                ],
+                bonds: [[0, 1], [0, 2], [0, 3], [0, 4], [3, 5], [4, 6]]
+            },
+            Ga1N1: {
+                atoms: [
+                    { el: 'Ga', pos: [-0.55, 0, 0] },
+                    { el: 'N', pos: [0.55, 0, 0] }
+                ],
+                bonds: [[0, 1]]
+            }
+        };
+
+        function formulaElm(sym) {
+            return FORMULA_ELM[sym] || { color: 0x9eb8c4, r: 0.3, name: sym };
+        }
+
+        function parseFormulaCounts(raw) {
+            if (!raw || raw === '—' || raw === '??' || /unknown/i.test(raw)) return null;
+            let s = String(raw).split('+')[0].trim();
+            s = s.replace(/\([^)]*(amorphous|organic|coating|traces)[^)]*\)/gi, '');
+            s = s.replace(/[~%].*$/, '').trim();
+            for (const ch in FORMULA_SUB) s = s.split(ch).join(FORMULA_SUB[ch]);
+            s = s.replace(/\(n\)|ₙ/gi, '').replace(/[()]/g, '');
+            if (/ on /i.test(raw)) {
+                const bits = raw.split(/\s+on\s+/i);
+                const counts = {};
+                bits.forEach((bit) => {
+                    const part = parseFormulaCounts(bit.trim());
+                    if (part) Object.entries(part).forEach(([el, n]) => { counts[el] = (counts[el] || 0) + n; });
+                });
+                return Object.keys(counts).length ? counts : null;
+            }
+            const counts = {};
+            const re = /([A-Z][a-z]?)(\d*)/g;
+            let m;
+            while ((m = re.exec(s))) {
+                const el = m[1];
+                const n = m[2] ? parseInt(m[2], 10) : 1;
+                if (!n || Number.isNaN(n)) continue;
+                counts[el] = (counts[el] || 0) + n;
+            }
+            return Object.keys(counts).length ? counts : null;
+        }
+
+        function formulaBreakdownText(counts) {
+            return Object.entries(counts)
+                .sort((a, b) => b[1] - a[1])
+                .map(([el, n]) => `${n} × ${formulaElm(el).name}`)
+                .join(' · ');
+        }
+
+        function expandFormulaAtoms(counts, maxAtoms) {
+            const total = Object.values(counts).reduce((a, b) => a + b, 0);
+            const scale = total > maxAtoms ? maxAtoms / total : 1;
+            const atoms = [];
+            Object.entries(counts).forEach(([el, n]) => {
+                const c = Math.max(1, Math.round(n * scale));
+                for (let i = 0; i < c; i++) atoms.push(el);
+            });
+            while (atoms.length > maxAtoms) atoms.pop();
+            return atoms;
+        }
+
+        function goldenSpherePositions(n, radius) {
+            const pts = [];
+            const phi = Math.PI * (3 - Math.sqrt(5));
+            for (let i = 0; i < n; i++) {
+                const y = 1 - (i / Math.max(1, n - 1)) * 2;
+                const r = Math.sqrt(Math.max(0, 1 - y * y));
+                const theta = phi * i;
+                pts.push(new THREE.Vector3(Math.cos(theta) * r * radius, y * radius, Math.sin(theta) * r * radius));
+            }
+            return pts;
+        }
+
+        function addBond(group, a, b, bondMats) {
+            const dir = new THREE.Vector3().subVectors(b, a);
+            const len = dir.length();
+            if (len < 0.05) return;
+            const mid = new THREE.Vector3().addVectors(a, b).multiplyScalar(0.5);
+            const cyl = new THREE.Mesh(
+                new THREE.CylinderGeometry(0.05, 0.05, len, 8),
+                bondMats[(a.x + b.x + a.y + b.y) & 1]
+            );
+            cyl.position.copy(mid);
+            cyl.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.normalize());
+            group.add(cyl);
+        }
+
+        function buildFormulaMolecule(counts) {
+            const key = countsKey(counts);
+            const preset = FORMULA_PRESETS[key];
+            const group = new THREE.Group();
+            const atomMeshes = [];
+            const bondMats = [
+                new THREE.MeshPhongMaterial({ color: 0x8ab4c4, transparent: true, opacity: 0.55, shininess: 20 }),
+                new THREE.MeshPhongMaterial({ color: 0x6fe3ff, transparent: true, opacity: 0.45, shininess: 20 })
+            ];
+
+            if (preset) {
+                const positions = preset.atoms.map((a) => new THREE.Vector3(...a.pos));
+                preset.atoms.forEach((a, i) => {
+                    const info = formulaElm(a.el);
+                    const mesh = new THREE.Mesh(
+                        new THREE.SphereGeometry(info.r, 16, 12),
+                        new THREE.MeshPhongMaterial({ color: info.color, shininess: 40, specular: 0x334455 })
+                    );
+                    mesh.position.copy(positions[i]);
+                    group.add(mesh);
+                    atomMeshes.push(mesh);
+                });
+                (preset.bonds || []).forEach(([i, j]) => addBond(group, positions[i], positions[j], bondMats));
+            } else {
+                const els = expandFormulaAtoms(counts, 24);
+                const positions = goldenSpherePositions(els.length, 1.05);
+                const pts = [];
+                els.forEach((el, i) => {
+                    const info = formulaElm(el);
+                    const mesh = new THREE.Mesh(
+                        new THREE.SphereGeometry(info.r, 14, 10),
+                        new THREE.MeshPhongMaterial({ color: info.color, shininess: 35, specular: 0x334455 })
+                    );
+                    mesh.position.copy(positions[i]);
+                    group.add(mesh);
+                    atomMeshes.push(mesh);
+                    pts.push(mesh.position.clone());
+                });
+                if (els.length <= 14) {
+                    for (let i = 0; i < pts.length; i++) {
+                        const nearest = [];
+                        for (let j = 0; j < pts.length; j++) {
+                            if (i === j) continue;
+                            nearest.push({ j, d: pts[i].distanceTo(pts[j]) });
+                        }
+                        nearest.sort((a, b) => a.d - b.d);
+                        const links = els.length <= 4 ? 2 : 1;
+                        for (let k = 0; k < links && k < nearest.length; k++) {
+                            if (nearest[k].d < 1.35) addBond(group, pts[i], pts[nearest[k].j], bondMats);
+                        }
+                    }
+                }
+            }
+
+            const box = new THREE.Box3().setFromObject(group);
+            const size = box.getSize(new THREE.Vector3());
+            const maxDim = Math.max(size.x, size.y, size.z, 0.01);
+            group.scale.setScalar(1.65 / maxDim);
+            group.userData.bondMats = bondMats;
+            group.userData.atomMeshes = atomMeshes;
+            return group;
+        }
+
+        function disposeFormulaGroup(group) {
+            if (!group) return;
+            group.traverse((obj) => {
+                if (obj.isMesh) {
+                    if (obj.geometry) obj.geometry.dispose();
+                    if (obj.material) obj.material.dispose();
+                }
+            });
+            if (group.userData.bondMats) group.userData.bondMats.forEach((m) => m.dispose());
+        }
+
+        const formulaViewer = {
+            active: false,
+            renderer: null,
+            scene: null,
+            camera: null,
+            group: null,
+            spin: 0,
+            formulaKey: ''
+        };
+
+        function ensureFormulaViewer() {
+            if (formulaViewer.renderer) return;
+            const canvas = document.getElementById('voxel-scan-formula-canvas');
+            if (!canvas) return;
+            formulaViewer.renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+            formulaViewer.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+            formulaViewer.renderer.setSize(canvas.width, canvas.height, false);
+            formulaViewer.scene = new THREE.Scene();
+            formulaViewer.camera = new THREE.PerspectiveCamera(34, canvas.width / canvas.height, 0.1, 40);
+            formulaViewer.camera.position.set(0, 0.2, 3.4);
+            formulaViewer.scene.add(new THREE.AmbientLight(0xc8e8ff, 0.75));
+            const key = new THREE.DirectionalLight(0xffffff, 0.95);
+            key.position.set(2.2, 2.8, 3.5);
+            formulaViewer.scene.add(key);
+            const rim = new THREE.DirectionalLight(0x6fe3ff, 0.45);
+            rim.position.set(-2.5, -1.2, -2);
+            formulaViewer.scene.add(rim);
+        }
+
+        function setFormulaVisual(raw) {
+            const canvas = document.getElementById('voxel-scan-formula-canvas');
+            const fallback = document.getElementById('voxel-scan-formula-fallback');
+            const breakdownEl = document.getElementById('voxel-scan-formula-breakdown');
+            const legendEl = document.getElementById('voxel-scan-formula-legend');
+            const counts = parseFormulaCounts(raw);
+            const key = counts ? countsKey(counts) : String(raw || '');
+
+            if (breakdownEl) breakdownEl.textContent = counts ? formulaBreakdownText(counts) : '';
+            if (legendEl) {
+                legendEl.innerHTML = '';
+                if (counts) {
+                    Object.entries(counts).sort((a, b) => b[1] - a[1]).forEach(([el, n]) => {
+                        const chip = document.createElement('span');
+                        chip.className = 'vx-scan-elm-chip';
+                        const dot = document.createElement('span');
+                        dot.className = 'vx-scan-elm-dot';
+                        dot.style.background = '#' + formulaElm(el).color.toString(16).padStart(6, '0');
+                        chip.appendChild(dot);
+                        chip.appendChild(document.createTextNode(`${el}${n > 1 ? '×' + n : ''}`));
+                        legendEl.appendChild(chip);
+                    });
+                }
+            }
+
+            if (!counts) {
+                formulaViewer.active = false;
+                formulaViewer.formulaKey = key;
+                if (canvas) canvas.style.opacity = '0';
+                if (fallback) {
+                    fallback.hidden = false;
+                    fallback.textContent = raw && raw !== '—' ? raw : '?';
+                }
+                if (formulaViewer.group) {
+                    formulaViewer.scene.remove(formulaViewer.group);
+                    disposeFormulaGroup(formulaViewer.group);
+                    formulaViewer.group = null;
+                }
+                return;
+            }
+
+            ensureFormulaViewer();
+            if (!formulaViewer.renderer) return;
+            if (canvas) canvas.style.opacity = '1';
+            if (fallback) fallback.hidden = true;
+
+            if (formulaViewer.formulaKey !== key) {
+                formulaViewer.formulaKey = key;
+                if (formulaViewer.group) {
+                    formulaViewer.scene.remove(formulaViewer.group);
+                    disposeFormulaGroup(formulaViewer.group);
+                }
+                formulaViewer.group = buildFormulaMolecule(counts);
+                formulaViewer.scene.add(formulaViewer.group);
+                formulaViewer.spin = Math.random() * Math.PI * 2;
+            }
+            formulaViewer.active = true;
+        }
+
+        function updateFormulaViewer(dt) {
+            if (!formulaViewer.active || !formulaViewer.renderer || !formulaViewer.group) return;
+            formulaViewer.spin += dt * 0.95;
+            formulaViewer.group.rotation.y = formulaViewer.spin;
+            formulaViewer.group.rotation.x = Math.sin(formulaViewer.spin * 0.55) * 0.18;
+            formulaViewer.renderer.render(formulaViewer.scene, formulaViewer.camera);
+        }
+
+        function disposeFormulaViewer() {
+            formulaViewer.active = false;
+            if (formulaViewer.group) {
+                formulaViewer.scene.remove(formulaViewer.group);
+                disposeFormulaGroup(formulaViewer.group);
+                formulaViewer.group = null;
+            }
+            if (formulaViewer.renderer) {
+                formulaViewer.renderer.dispose();
+                formulaViewer.renderer = null;
+            }
+            formulaViewer.scene = null;
+            formulaViewer.camera = null;
+            formulaViewer.formulaKey = '';
+        }
+
+        function hideScanChrome() {
+            scanExpanded = false;
+            _scanSticky = null;
+            const backdrop = document.getElementById('voxel-scan-backdrop');
+            const panel = document.getElementById('voxel-scan');
+            const link = document.getElementById('voxel-scan-link');
+            const marker = document.getElementById('voxel-scan-target');
+            if (backdrop) backdrop.hidden = true;
+            if (panel) {
+                panel.hidden = true;
+                panel.classList.remove('vx-scan-expanded');
+                panel.style.height = '';
+                panel.style.maxHeight = '';
+                panel.style.transform = 'none';
+                const fit = panel.querySelector('.vx-scan-fit');
+                if (fit) fit.style.transform = 'none';
+                const compactHint = document.getElementById('voxel-scan-compact-hint');
+                const closeHint = document.getElementById('voxel-scan-close-hint');
+                if (compactHint) compactHint.hidden = true;
+                if (closeHint) closeHint.hidden = true;
+            }
+            if (link) link.hidden = true;
+            if (marker) marker.hidden = true;
+            formulaViewer.active = false;
+            _scanBlockId = -1;
+            resizeFormulaCanvas(false);
+        }
+
+        function buildScanElbowPath(x1, y1, x2, y2) {
+            const dx = x2 - x1;
+            const elbowX = x1 + dx * 0.58;
+            return `M ${x1} ${y1} L ${elbowX} ${y1} L ${elbowX} ${y2} L ${x2} ${y2}`;
+        }
+
+        function updateScanConnector(t, alpha) {
+            const link = document.getElementById('voxel-scan-link');
+            const pathGlow = document.getElementById('voxel-scan-path-glow');
+            const pathCore = document.getElementById('voxel-scan-path');
+            const pathPulse = document.getElementById('voxel-scan-path-pulse');
+            const anchorBlock = document.getElementById('voxel-scan-anchor-block');
+            const anchorPanel = document.getElementById('voxel-scan-anchor-panel');
+            const marker = document.getElementById('voxel-scan-target');
+            const panel = document.getElementById('voxel-scan');
+            const port = document.getElementById('voxel-scan-port');
+            const grad = document.getElementById('voxel-scan-grad');
+            if (!link || !pathGlow || !pathCore || !pathPulse || !anchorBlock || !anchorPanel
+                || !marker || !panel || !camera) return;
+
+            const screen = getScanBlockScreen(t);
+            const { bx, by, inFrustum, w, h } = screen;
+            link.setAttribute('viewBox', `0 0 ${w} ${h}`);
+
+            if (!inFrustum) {
+                link.hidden = true;
+                marker.hidden = true;
+                return;
+            }
+
+            let px = panel.getBoundingClientRect().left + 2;
+            let py = panel.getBoundingClientRect().top + panel.getBoundingClientRect().height * 0.38;
+            if (port) {
+                const pr = port.getBoundingClientRect();
+                px = pr.left + pr.width * 0.5;
+                py = pr.top + pr.height * 0.5;
+            }
+
+            const dx = px - bx;
+            const dy = py - by;
+            const dist = Math.hypot(dx, dy) || 1;
+            const startX = bx + (dx / dist) * 22;
+            const startY = by + (dy / dist) * 22;
+            const pathD = buildScanElbowPath(startX, startY, px, py);
+
+            if (grad) {
+                grad.setAttribute('x1', String(startX));
+                grad.setAttribute('y1', String(startY));
+                grad.setAttribute('x2', String(px));
+                grad.setAttribute('y2', String(py));
+            }
+
+            pathGlow.setAttribute('d', pathD);
+            pathCore.setAttribute('d', pathD);
+            pathPulse.setAttribute('d', pathD);
+            [pathGlow, pathCore, pathPulse].forEach((p) => { p.style.opacity = String(alpha); });
+
+            anchorBlock.setAttribute('cx', String(startX));
+            anchorBlock.setAttribute('cy', String(startY));
+            anchorBlock.style.opacity = String(alpha);
+            anchorPanel.setAttribute('cx', String(px));
+            anchorPanel.setAttribute('cy', String(py));
+            anchorPanel.style.opacity = String(alpha);
+            link.hidden = false;
+
+            marker.style.left = `${bx}px`;
+            marker.style.top = `${by}px`;
+            marker.style.opacity = String(alpha);
+            marker.hidden = false;
+        }
+
+        const SCAN_PAD = 12;
+        const SCAN_BLOCK_GAP = 26;
+        const SCAN_BOTTOM_RESERVE = 108;
+
+        function getScanBlockScreen(t) {
+            const w = window.innerWidth;
+            const h = window.innerHeight;
+            _scanWorld.set(
+                WORLD_OFFSET.x + t.x + 0.5,
+                WORLD_OFFSET.y + t.y + 0.5,
+                WORLD_OFFSET.z + t.z + 0.5
+            );
+            _scanWorld.project(camera);
+            let bx = (_scanWorld.x * 0.5 + 0.5) * w;
+            let by = (-_scanWorld.y * 0.5 + 0.5) * h;
+            const inFrustum = _scanWorld.z <= 1;
+            bx = Math.max(SCAN_PAD, Math.min(w - SCAN_PAD, bx));
+            by = Math.max(SCAN_PAD, Math.min(h - SCAN_PAD, by));
+            return { bx, by, inFrustum, w, h };
+        }
+
+        function scanPanelMaxHeight(h) {
+            return Math.max(140, h - SCAN_BOTTOM_RESERVE - SCAN_PAD);
+        }
+
+        function fitScanPanelContent(maxH) {
+            const shell = document.getElementById('voxel-scan');
+            const fit = shell && shell.querySelector('.vx-scan-fit');
+            const panel = shell && shell.querySelector('.vx-scan-panel');
+            if (!shell || !fit || !panel) return 0;
+
+            fit.style.transform = 'none';
+            shell.style.height = 'auto';
+            shell.style.maxHeight = `${maxH}px`;
+
+            const naturalH = panel.offsetHeight;
+            if (naturalH <= maxH) {
+                shell.style.height = `${naturalH}px`;
+                return naturalH;
+            }
+
+            const scale = Math.max(0.68, maxH / naturalH);
+            fit.style.transform = `scale(${scale})`;
+            const scaledH = Math.ceil(naturalH * scale);
+            shell.style.height = `${scaledH}px`;
+            return scaledH;
+        }
+
+        function clampScanPanelRect(left, top, pw, ph, w, h) {
+            const maxBottom = h - SCAN_BOTTOM_RESERVE;
+            let x = Math.max(SCAN_PAD, Math.min(w - SCAN_PAD - pw, left));
+            let y = Math.max(SCAN_PAD, Math.min(maxBottom - ph, top));
+            if (y + ph > maxBottom) y = Math.max(SCAN_PAD, maxBottom - ph);
+            return { left: x, top: y };
+        }
+
+        function layoutScanPanel(t) {
+            const panel = document.getElementById('voxel-scan');
+            if (!panel || !camera) return null;
+            const { bx, by, w, h } = getScanBlockScreen(t);
+
+            panel.style.transform = 'none';
+            panel.style.right = 'auto';
+            panel.style.bottom = 'auto';
+
+            const maxH = scanPanelMaxHeight(h);
+            const ph = fitScanPanelContent(maxH);
+            const pw = panel.offsetWidth || Math.min(380, w - 24);
+            const spaceRight = w - bx - SCAN_PAD;
+            const spaceLeft = bx - SCAN_PAD;
+
+            let left = spaceRight >= pw + SCAN_BLOCK_GAP || spaceRight >= spaceLeft
+                ? bx + SCAN_BLOCK_GAP
+                : bx - SCAN_BLOCK_GAP - pw;
+            let top = by - ph * 0.36;
+
+            const clamped = clampScanPanelRect(left, top, pw, ph, w, h);
+            panel.style.left = `${clamped.left}px`;
+            panel.style.top = `${clamped.top}px`;
+            return { bx, by, w, h };
+        }
+
+        function updateBlockScan(t) {
+            const panel = document.getElementById('voxel-scan');
+            if (!panel) return;
+            if (drawerOpen) {
+                if (scanExpanded) setScanExpanded(false);
+                hideScanChrome();
+                return;
+            }
+
+            const compactActive = isScanCompactActive(t);
+            if (compactActive) {
+                _scanSticky = {
+                    x: t.x, y: t.y, z: t.z,
+                    id: getBlock(t.x, t.y, t.z)
+                };
+            }
+            if (!compactActive && !scanExpanded) {
+                hideScanChrome();
+                return;
+            }
+
+            const ref = compactActive ? t : _scanSticky;
+            if (!ref) {
+                hideScanChrome();
+                return;
+            }
+            const aimT = compactActive ? t : { x: ref.x, y: ref.y, z: ref.z };
+            const id = compactActive ? getBlock(t.x, t.y, t.z) : ref.id;
+            const b = blockById(id);
+            if (!b) {
+                hideScanChrome();
+                return;
+            }
+
+            const alpha = scanExpanded ? 1 : (0.4 + focusAimBlend * 0.6);
+            panel.hidden = false;
+            panel.style.opacity = String(alpha);
+
+            const cracking = compactActive && mineTarget
+                && mineTarget.x === t.x && mineTarget.y === t.y && mineTarget.z === t.z
+                ? mineProgress : 0;
+            if (_scanBlockId !== id) {
+                _scanBlockId = id;
+                fillScanPanelContent(b, id, cracking, scanExpanded);
+            } else {
+                const metaEl = document.getElementById('voxel-scan-meta');
+                if (metaEl) {
+                    let meta = `Hardness ${b.hardness ?? '?'}`;
+                    if (cracking > 0.01) meta += ` · Mining ${Math.round(cracking * 100)}%`;
+                    metaEl.textContent = meta;
+                }
+            }
+
+            if (scanExpanded) {
+                layoutScanExpanded();
+                const link = document.getElementById('voxel-scan-link');
+                const marker = document.getElementById('voxel-scan-target');
+                if (link) link.hidden = true;
+                if (marker) marker.hidden = true;
+            } else {
+                layoutScanPanel(aimT);
+                updateScanConnector(aimT, alpha);
+            }
+        }
+
         function updatePlaceGhost(t) {
             const slot = hotbar[selected];
-            if (!slot || slot.count <= 0 || drawerOpen || !t) {
+            if (!isMiningTool() || !slot || slot.count <= 0 || drawerOpen || !t) {
                 if (placeGhost) placeGhost.visible = false;
                 return;
             }
@@ -2815,6 +3559,162 @@
             if (tpTunerEl) tpTunerEl.hidden = true;
         }
 
+        let aimTune = null;
+        let aimTunerEl = null;
+        const AIM_TUNE_KEY = 'pjboy.voxelAimTune.v1';
+        const AIM_TUNER_SLIDERS = [
+            ['strokeWidth', 'Stroke width', 0.006, 0.14, 0.002],
+            ['opacity', 'Opacity', 0.1, 1, 0.01],
+            ['pulse', 'Pulse amount', 0, 0.5, 0.01],
+            ['pulseHz', 'Pulse speed', 0, 24, 0.5],
+            ['mineGlow', 'Mining glow', 0, 0.6, 0.01],
+            ['expand', 'Edge puff', 0, 0.12, 0.002]
+        ];
+        const _aimBaseCol = new THREE.Color();
+        const _aimMineCol = new THREE.Color();
+
+        function defaultAimTune() {
+            return {
+                dismissed: true,
+                opacity: 0.55,
+                pulse: 0.25,
+                pulseHz: 7,
+                mineGlow: 0.2,
+                expand: 0,
+                strokeWidth: 0.022,
+                color: '#5ce8ff',
+                mineColor: '#7af0ff'
+            };
+        }
+
+        function loadAimTune() {
+            try {
+                const raw = localStorage.getItem(AIM_TUNE_KEY);
+                if (raw) return Object.assign(defaultAimTune(), JSON.parse(raw));
+            } catch (_) {}
+            return defaultAimTune();
+        }
+
+        function saveAimTune(dismiss) {
+            if (dismiss) getAimTune().dismissed = true;
+            try {
+                localStorage.setItem(AIM_TUNE_KEY, JSON.stringify(getAimTune()));
+            } catch (_) {}
+        }
+
+        function syncAimTunerInputs() {
+            if (!aimTunerEl) return;
+            const t = getAimTune();
+            AIM_TUNER_SLIDERS.forEach(([key]) => {
+                const input = aimTunerEl.querySelector(`[data-aim-k="${key}"]`);
+                const out = aimTunerEl.querySelector(`[data-aim-v="${key}"]`);
+                const val = t[key];
+                if (input) input.value = val;
+                if (out) {
+                    out.textContent = (+val).toFixed(
+                        key === 'pulseHz' ? 1 : (key === 'strokeWidth' || key === 'expand' ? 3 : 2));
+                }
+            });
+            const colorIn = aimTunerEl.querySelector('[data-aim-c="color"]');
+            const mineIn = aimTunerEl.querySelector('[data-aim-c="mineColor"]');
+            if (colorIn) colorIn.value = t.color || '#5ce8ff';
+            if (mineIn) mineIn.value = t.mineColor || '#7af0ff';
+        }
+
+        function onAimTunerInput(e) {
+            const t = getAimTune();
+            const key = e.target.dataset.aimK;
+            if (key) {
+                t[key] = +e.target.value;
+                const out = aimTunerEl.querySelector(`[data-aim-v="${key}"]`);
+                if (out) {
+                    out.textContent = (+t[key]).toFixed(
+                        key === 'pulseHz' ? 1 : (key === 'strokeWidth' || key === 'expand' ? 3 : 2));
+                }
+                if (key === 'expand' || key === 'strokeWidth') refreshAimOutlineGeometry();
+                return;
+            }
+            const ckey = e.target.dataset.aimC;
+            if (ckey) {
+                t[ckey] = e.target.value;
+            }
+        }
+
+        function buildAimTunerUI() {
+            if (aimTunerEl) return aimTunerEl;
+            const overlay = document.getElementById('voxel-overlay');
+            if (!overlay) return null;
+            const el = document.createElement('div');
+            el.id = 'voxel-aim-tuner';
+            el.className = 'vx-fp-tuner vx-aim-tuner';
+            el.hidden = true;
+
+            function sliderRow(key, label, min, max, step) {
+                const id = `aim-tune-${key}`;
+                return `<label class="vx-fp-row vx-fp-cam-row" for="${id}">
+                    <span class="vx-fp-lbl">${label}</span>
+                    <span class="vx-tp-val" data-aim-v="${key}">—</span>
+                    <input type="range" id="${id}" data-aim-k="${key}"
+                        min="${min}" max="${max}" step="${step}">
+                </label>`;
+            }
+
+            let html = `<div class="vx-fp-head">
+                <h4>Aim highlight</h4>
+                <span class="vx-fp-weapon">block outline</span>
+            </div>
+            <p class="vx-fp-hint">Mining target edges. <b>F9</b> toggles · aim at a block to preview.</p>
+            <div class="vx-fp-section"><b>Look</b>`;
+            html += `<label class="vx-fp-row vx-aim-color-row">
+                <span class="vx-fp-lbl">Base color</span>
+                <input type="color" data-aim-c="color" value="#5ce8ff">
+            </label>`;
+            html += `<label class="vx-fp-row vx-aim-color-row">
+                <span class="vx-fp-lbl">Mining color</span>
+                <input type="color" data-aim-c="mineColor" value="#7af0ff">
+            </label>`;
+            AIM_TUNER_SLIDERS.forEach(([key, label, min, max, step]) => {
+                html += sliderRow(key, label, min, max, step);
+            });
+            html += `</div><div class="vx-fp-actions">
+                <button type="button" class="vx-btn" data-aim-save>Save &amp; close</button>
+                <button type="button" class="vx-btn" data-aim-reset>Reset defaults</button>
+            </div>`;
+            el.innerHTML = html;
+            overlay.appendChild(el);
+
+            el.addEventListener('input', onAimTunerInput);
+            el.addEventListener('change', onAimTunerInput);
+            el.addEventListener('wheel', (e) => e.stopPropagation(), { passive: true });
+            el.querySelector('[data-aim-save]').addEventListener('click', () => {
+                saveAimTune(true);
+                el.hidden = true;
+                if (g.showMessage) g.showMessage('Aim highlight saved (F9 to tweak)', 2400);
+            });
+            el.querySelector('[data-aim-reset]').addEventListener('click', () => {
+                aimTune = defaultAimTune();
+                aimTune.dismissed = false;
+                syncAimTunerInputs();
+                refreshAimOutlineGeometry();
+            });
+
+            aimTunerEl = el;
+            return el;
+        }
+
+        function showAimTuner() {
+            hideFpTuner();
+            hideTpTuner();
+            const el = buildAimTunerUI();
+            if (!el) return;
+            el.hidden = false;
+            syncAimTunerInputs();
+        }
+
+        function hideAimTuner() {
+            if (aimTunerEl) aimTunerEl.hidden = true;
+        }
+
         function setFirstPerson(on) {
             firstPerson = !!on;
             if (av && av.group) av.group.visible = !firstPerson;
@@ -2846,8 +3746,8 @@
             const el = document.getElementById('voxel-view-hint');
             if (!el) return;
             el.innerHTML = firstPerson
-                ? '<b>mouse</b> aim · <b>Shift</b> focus · <b>pickaxe + click/hold</b> mine · <b>laser + hold</b> cut · <b>right-click</b> place · <b>1-9</b> quickbar'
-                : '<b>click</b> capture mouse · <b>move</b> look · <b>Shift</b> focus · <b>pickaxe + click/hold</b> mine · <b>right-click</b> place · <b>scroll</b> zoom';
+                ? '<b>mouse</b> aim · <b>Shift</b> focus / scan · <b>pickaxe + click/hold</b> mine · <b>laser + hold</b> cut · <b>right-click</b> place · <b>1-9</b> quickbar · <b>F9</b> aim tune'
+                : '<b>click</b> capture mouse · <b>move</b> look · <b>Shift</b> focus / scan · <b>pickaxe + click/hold</b> mine · <b>right-click</b> place · <b>scroll</b> zoom · <b>F9</b> aim tune';
         }
 
         function updateFpViewmodel(dt, sp) {
@@ -2913,6 +3813,10 @@
             return tryMineSwing();
         }
         function placeBlock() {
+            if (!isMiningTool()) {
+                showToolMsg('Equip pickaxe or laser to place blocks (Q/E)');
+                return;
+            }
             const t = pickTarget();
             if (!t) return;
             const slot = hotbar[selected];
@@ -3410,6 +4314,9 @@
             fireHeld = false;
             laserCooldown = 0;
             resetMining();
+            _aimShownTarget = null;
+            _aimCandidateTarget = null;
+            _aimCandidateFrames = 0;
             releasePointerLock();
             syncViewCursor();
         }
@@ -3526,9 +4433,15 @@
             const t = pickTarget();
             updateAimEdgeHighlight(t);
             updatePlaceGhost(t);
+            updateBlockScan(t);
+            updateFormulaViewer(dt);
             const targetNameEl = document.getElementById('voxel-target-name');
             if (targetNameEl) {
-                if (t && getBlock(t.x, t.y, t.z) && isMiningTool()) {
+                const scanOpen = scanExpanded || (isBuilderMinerTool() && focusAimBlend > 0.35
+                    && t && getBlock(t.x, t.y, t.z));
+                if (scanOpen) {
+                    targetNameEl.textContent = '';
+                } else if (t && getBlock(t.x, t.y, t.z) && isMiningTool()) {
                     const b = blockById(getBlock(t.x, t.y, t.z));
                     const crack = mineTarget && mineTarget.x === t.x && mineTarget.y === t.y && mineTarget.z === t.z
                         ? ` · ${Math.round(mineProgress * 100)}%` : '';
@@ -3643,6 +4556,10 @@
                 if (e.code === 'KeyQ') { cycleWeapon(-1); return; }
                 if (e.code === 'KeyE' && !e.shiftKey) { cycleWeapon(1); return; }
                 if (e.code === 'Escape') {
+                    if (scanExpanded) {
+                        setScanExpanded(false);
+                        return;
+                    }
                     if (drawerOpen) {
                         toggleDrawer(false);
                         return;
@@ -3652,6 +4569,17 @@
                         syncViewCursor();
                         return;
                     }
+                }
+                if (e.code === 'KeyO' && !drawerOpen) {
+                    if (scanExpanded) {
+                        setScanExpanded(false);
+                    } else {
+                        const shell = document.getElementById('voxel-scan');
+                        if (shell && !shell.hidden && isScanCompactActive(pickTarget())) {
+                            setScanExpanded(true);
+                        }
+                    }
+                    return;
                 }
                 if (e.code === 'Tab' || e.code === 'KeyM') {
                     e.preventDefault();
@@ -3667,8 +4595,14 @@
                 }
                 if (e.code === 'F8') {
                     e.preventDefault();
+                    hideAimTuner();
                     if (firstPerson) showFpTuner();
                     else showTpTuner();
+                }
+                if (e.code === 'F9') {
+                    e.preventDefault();
+                    if (aimTunerEl && !aimTunerEl.hidden) hideAimTuner();
+                    else showAimTuner();
                 }
                 if (e.code === 'KeyR' && (e.shiftKey || e.metaKey)) {
                     SEED = (Math.random() * 1e9) | 0;
@@ -3687,7 +4621,14 @@
             }
             const voxelHud = document.getElementById('voxel-overlay');
             if (voxelHud) {
-                on(voxelHud, 'wheel', (e) => e.preventDefault(), { passive: false });
+                on(voxelHud, 'wheel', (e) => {
+                    if (scanExpanded && e.target.closest('#voxel-scan')) return;
+                    e.preventDefault();
+                }, { passive: false });
+            }
+            const scanBackdrop = document.getElementById('voxel-scan-backdrop');
+            if (scanBackdrop) {
+                on(scanBackdrop, 'click', () => setScanExpanded(false));
             }
             canvasEl = g.renderer && g.renderer.domElement;
 
@@ -3794,12 +4735,14 @@
             }
             fpTune = loadFpTune();
             tpTune = loadTpTune();
+            aimTune = loadAimTune();
             applyFpCamToOrbit();
             applyTpTuneToOrbit();
             ensureFpViewmodel();
             setFirstPerson(firstPerson);
             buildFpTunerUI();
             buildTpTunerUI();
+            buildAimTunerUI();
             if (firstPerson && !fpTune.dismissed) showFpTuner();
             else hideFpTuner();
             if (!firstPerson && !tpTune.dismissed) showTpTuner();
@@ -3816,6 +4759,8 @@
             _active = false;
             hideFpTuner();
             hideTpTuner();
+            hideAimTuner();
+            disposeFormulaViewer();
             _resetInput();
             _clearWorld();
             _restoreScene();

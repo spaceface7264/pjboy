@@ -10,7 +10,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>3D Second-Person Game - 128-bit Style</title>
-    <link rel="stylesheet" href="style.css?v=31">
+    <link rel="stylesheet" href="style.css?v=42">
     <link rel="stylesheet" href="style-meta.css?v=4">
 </head>
 <body>
@@ -359,11 +359,82 @@
         <div id="voxel-overlay" hidden>
             <div id="voxel-cross"></div>
             <div id="voxel-target-name"></div>
+            <svg id="voxel-scan-link" class="vx-scan-link" hidden aria-hidden="true">
+                <defs>
+                    <linearGradient id="voxel-scan-grad" gradientUnits="userSpaceOnUse">
+                        <stop offset="0%" stop-color="#6fe3ff" stop-opacity="1"></stop>
+                        <stop offset="55%" stop-color="#9ef0ff" stop-opacity="0.95"></stop>
+                        <stop offset="100%" stop-color="#d4faff" stop-opacity="0.9"></stop>
+                    </linearGradient>
+                    <filter id="voxel-scan-glow" x="-40%" y="-40%" width="180%" height="180%">
+                        <feGaussianBlur stdDeviation="2.8" result="blur"></feGaussianBlur>
+                        <feMerge>
+                            <feMergeNode in="blur"></feMergeNode>
+                            <feMergeNode in="SourceGraphic"></feMergeNode>
+                        </feMerge>
+                    </filter>
+                </defs>
+                <path id="voxel-scan-path-glow" class="vx-scan-path-glow"></path>
+                <path id="voxel-scan-path" class="vx-scan-path"></path>
+                <path id="voxel-scan-path-pulse" class="vx-scan-path-pulse"></path>
+                <circle id="voxel-scan-anchor-block" class="vx-scan-anchor-node" r="4"></circle>
+                <circle id="voxel-scan-anchor-panel" class="vx-scan-anchor-node" r="4"></circle>
+            </svg>
+            <div id="voxel-scan-backdrop" class="vx-scan-backdrop" hidden></div>
+            <div id="voxel-scan-target" class="vx-scan-target" hidden aria-hidden="true">
+                <span class="vx-scan-corner vx-scan-corner-tl"></span>
+                <span class="vx-scan-corner vx-scan-corner-tr"></span>
+                <span class="vx-scan-corner vx-scan-corner-bl"></span>
+                <span class="vx-scan-corner vx-scan-corner-br"></span>
+                <span class="vx-scan-target-core"></span>
+            </div>
+            <div id="voxel-scan" class="vx-scan" hidden>
+                <div class="vx-scan-fit">
+                <div class="vx-scan-panel">
+                    <span id="voxel-scan-port" class="vx-scan-port" aria-hidden="true"></span>
+                    <div class="vx-scan-head">
+                        <span class="vx-scan-badge" aria-live="polite">
+                            <span class="vx-scan-badge-text">Scanning</span><span class="vx-scan-dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span>
+                        </span>
+                        <span id="voxel-scan-cat" class="vx-scan-cat"></span>
+                    </div>
+                    <div class="vx-scan-row">
+                        <div id="voxel-scan-thumb" class="vx-scan-thumb"></div>
+                        <div class="vx-scan-ident">
+                            <div id="voxel-scan-name" class="vx-scan-name"></div>
+                            <div id="voxel-scan-meta" class="vx-scan-meta"></div>
+                        </div>
+                    </div>
+                    <p id="voxel-scan-desc" class="vx-scan-desc"></p>
+                    <div class="vx-scan-formula-block">
+                        <div class="vx-scan-formula-visual">
+                            <canvas id="voxel-scan-formula-canvas" width="168" height="128" aria-hidden="true"></canvas>
+                            <div id="voxel-scan-formula-fallback" class="vx-scan-formula-fallback" hidden></div>
+                        </div>
+                        <div class="vx-scan-formula-copy">
+                            <div class="vx-scan-formula-line">
+                                <span class="vx-scan-formula-label">Formula</span>
+                                <span id="voxel-scan-formula" class="vx-scan-formula-text"></span>
+                            </div>
+                            <div id="voxel-scan-formula-breakdown" class="vx-scan-formula-breakdown"></div>
+                            <div id="voxel-scan-formula-legend" class="vx-scan-formula-legend"></div>
+                        </div>
+                    </div>
+                    <dl class="vx-scan-sci">
+                        <div><dt>Mineral</dt><dd id="voxel-scan-mineral"></dd></div>
+                    </dl>
+                    <p id="voxel-scan-fact" class="vx-scan-fact"></p>
+                    <div id="voxel-scan-tags" class="vx-scan-tags"></div>
+                    <p id="voxel-scan-compact-hint" class="vx-scan-expand-hint"><b>O</b> to expand</p>
+                    <p id="voxel-scan-close-hint" class="vx-scan-expand-hint" hidden><b>Esc</b> to close</p>
+                </div>
+                </div>
+            </div>
             <div id="voxel-hud">
                 <div><b>WASD</b> move · <b>Space</b> jump / hold = jetpack · <b>Shift</b> aim (3rd person)</div>
                 <div id="voxel-view-hint"><b>mouse</b> aim · <b>click</b> mine · <b>hold click</b> laser · <b>right-click</b> place · <b>1-9</b> quickbar</div>
                 <div><b>V</b> view · <b>Esc</b> close drawer</div>
-                <div><b>Shift+R</b> new seed · <b>Q</b>/<b>E</b> switch weapon · <b>F8</b> FP weapon tuner</div>
+                <div><b>Shift+R</b> new seed · <b>Q</b>/<b>E</b> switch weapon · <b>F8</b> FP weapon tuner · scan open: <b>O</b> expand</div>
                 <div><b id="voxel-tri-count">0</b> tris · <span id="voxel-seed-label"></span> · <span id="voxel-weapon-label">Pickaxe</span></div>
             </div>
             <div id="voxel-hotbar"></div>
@@ -383,7 +454,7 @@
     <script src="planetgen.js?v=12"></script>
     <script src="planet.js?v=173"></script>
     <script src="voxel-character.js?v=18"></script>
-    <script src="voxelworld.js?v=72"></script>
+    <script src="voxelworld.js?v=87"></script>
     <script src="modes.js?v=9"></script>
     <script src="game.js?v=151"></script>
     <script src="game-modes-impl.js?v=28"></script>
