@@ -1116,6 +1116,35 @@
             return !!(weaponDef && weaponDef.id === 'laser');
         }
 
+        function isPickaxe() {
+            return !!(weaponDef && weaponDef.id === 'pickaxe');
+        }
+
+        function isMiningTool() {
+            return isPickaxe() || isLaserRifle();
+        }
+
+        let mineProgress = 0;
+        let mineTarget = null;
+        let mineRepeatCooldown = 0;
+        const MINE_SWING_INTERVAL = 0.42;
+        let placeGhost = null;
+        let lastToolMsg = 0;
+
+        function showToolMsg(text) {
+            const now = performance.now();
+            if (g.showMessage && now - lastToolMsg > 900) {
+                lastToolMsg = now;
+                g.showMessage(text, 1400);
+            }
+        }
+
+        function resetMining() {
+            mineProgress = 0;
+            mineTarget = null;
+            mineRepeatCooldown = 0;
+        }
+
         function weaponFireFactor() {
             if (fireHeld && isLaserRifle() && !drawerOpen) {
                 return 0.82 + 0.18 * Math.sin(elapsed * 28);
@@ -1398,8 +1427,6 @@
         const keys = {};
         let firstPerson = true;
         const orbit = { theta: 0.6, phi: 0.92, dist: 2.35 };
-        const TP_FP_FOV = 55;
-        const TP_FP_ADS_FOV = 49;
         const MOVE_RUN_SPEED = 6.4;
         const MOVE_ADS_SPEED = 1.7;
         let focusAimBlend = 0;
@@ -1411,14 +1438,38 @@
         let laserCooldown = 0;
         const LASER_FIRE_INTERVAL = 0.065;
         let canvasEl = null;
-        const FP_AIM_SENS = 0.0022;
-        const FP_PITCH_MIN = 0.12;
-        const FP_PITCH_MAX = 2.85;
+        const _fpEyeOff = new THREE.Vector3();
+        const _fpEyePos = new THREE.Vector3();
+
+        function getFpCam() {
+            if (!fpTune) fpTune = loadFpTune();
+            if (!fpTune.cam) fpTune.cam = defaultFpCam();
+            return fpTune.cam;
+        }
+
+        function getFpEyeWorld(out) {
+            const c = getFpCam();
+            return out.copy(player.pos).add(_fpEyeOff.set(c.eyeX || 0, c.eyeH, c.eyeZ || 0));
+        }
+
+        function applyFpCamToOrbit() {
+            const c = getFpCam();
+            orbit.theta = wrapAngleRad(c.theta);
+            orbit.phi = c.phi;
+            c.theta = orbit.theta;
+        }
+
+        function syncFpCamFromOrbit() {
+            const c = getFpCam();
+            c.theta = wrapAngleRad(orbit.theta);
+            c.phi = orbit.phi;
+        }
 
         function applyFpMouseLook(dx, dy) {
             if (!firstPerson || drawerOpen) return;
-            orbit.theta -= dx * FP_AIM_SENS;
-            orbit.phi = Math.max(FP_PITCH_MIN, Math.min(FP_PITCH_MAX, orbit.phi - dy * FP_AIM_SENS));
+            const fc = getFpCam();
+            orbit.theta -= dx * fc.aimSens;
+            orbit.phi = Math.max(fc.pitchMin, Math.min(fc.pitchMax, orbit.phi - dy * fc.aimSens));
             player.yaw = orbit.theta + Math.PI;
         }
 
@@ -1441,6 +1492,15 @@
         function requestFpPointerLock() {
             if (!firstPerson || drawerOpen) return;
             requestViewPointerLock();
+        }
+
+        function restoreViewPointerLock() {
+            if (drawerOpen || !canvasEl) return;
+            // Browsers often drop pointer lock when the right mouse button is released;
+            // defer re-lock until after that release finishes.
+            setTimeout(() => {
+                if (!drawerOpen && !isViewPointerLocked()) requestViewPointerLock();
+            }, 0);
         }
 
         function releasePointerLock() {
@@ -1475,9 +1535,25 @@
             };
         }
 
+        function defaultFpCam() {
+            return {
+                theta: 0.6,
+                phi: 0.92,
+                eyeH: 1.62,
+                eyeX: 0,
+                eyeZ: 0,
+                fov: 55,
+                adsFov: 49,
+                aimSens: 0.0022,
+                pitchMin: 0.12,
+                pitchMax: 2.85
+            };
+        }
+
         function defaultFpTune() {
             return {
                 dismissed: true,
+                cam: defaultFpCam(),
                 global: {
                     scale: 0.6,
                     px: 0.08, py: -0.22, pz: -0.64,
@@ -1494,8 +1570,11 @@
                 if (!raw) return defaultFpTune();
                 const saved = JSON.parse(raw);
                 const base = defaultFpTune();
+                const cam = Object.assign({}, base.cam, saved.cam || {});
+                if (typeof cam.theta === 'number') cam.theta = wrapAngleRad(cam.theta);
                 return {
                     dismissed: !!saved.dismissed,
+                    cam,
                     global: Object.assign({}, base.global, saved.global || {}),
                     weapons: Object.assign({}, base.weapons, saved.weapons || {})
                 };
@@ -1505,6 +1584,7 @@
         }
 
         function saveFpTune(dismiss) {
+            syncFpCamFromOrbit();
             if (dismiss) fpTune.dismissed = true;
             try {
                 localStorage.setItem(FP_TUNE_KEY, JSON.stringify(fpTune));
@@ -1859,7 +1939,7 @@
         }
 
         function updateAimEdgeHighlight(t) {
-            if (!t || drawerOpen || !getBlock(t.x, t.y, t.z)) {
+            if (!t || drawerOpen || !getBlock(t.x, t.y, t.z) || !isMiningTool()) {
                 if (aimEdgeMesh) aimEdgeMesh.visible = false;
                 if (aimEdgeGlow) aimEdgeGlow.visible = false;
                 return;
@@ -1868,9 +1948,64 @@
             if (key !== aimEdgeKey) rebuildAimEdgeHighlight(t.x, t.y, t.z);
             setAimEdgePosition(t);
             const pulse = 0.82 + 0.18 * Math.sin(elapsed * 8);
-            if (aimEdgeGlowMat) aimEdgeGlowMat.opacity = 0.26 + pulse * 0.14;
+            const cracking = mineTarget && mineTarget.x === t.x && mineTarget.y === t.y && mineTarget.z === t.z
+                ? mineProgress : 0;
+            if (aimEdgeGlowMat) aimEdgeGlowMat.opacity = 0.26 + pulse * 0.14 + cracking * 0.38;
+            if (aimEdgeMat) aimEdgeMat.opacity = 0.72 + cracking * 0.28;
             if (aimEdgeMesh) aimEdgeMesh.visible = true;
             if (aimEdgeGlow) aimEdgeGlow.visible = true;
+        }
+
+        function canPlaceBlockAt(x, y, z) {
+            if (getBlock(x, y, z)) return false;
+            const wx = x + WORLD_OFFSET.x, wy = y + WORLD_OFFSET.y, wz = z + WORLD_OFFSET.z;
+            const p = player.pos;
+            if (wx + 1 > p.x - player.half.x && wx < p.x + player.half.x &&
+                wz + 1 > p.z - player.half.z && wz < p.z + player.half.z &&
+                wy + 1 > p.y && wy < p.y + player.height) return false;
+            return true;
+        }
+
+        function ensurePlaceGhost() {
+            if (placeGhost) return;
+            placeGhost = new THREE.Mesh(
+                new THREE.BoxGeometry(1.002, 1.002, 1.002),
+                new THREE.MeshBasicMaterial({
+                    color: 0x66ff88,
+                    transparent: true,
+                    opacity: 0.36,
+                    depthWrite: false
+                })
+            );
+            placeGhost.frustumCulled = false;
+            scene.add(placeGhost);
+        }
+
+        function disposePlaceGhost() {
+            if (!placeGhost) return;
+            scene.remove(placeGhost);
+            placeGhost.geometry.dispose();
+            placeGhost.material.dispose();
+            placeGhost = null;
+        }
+
+        function updatePlaceGhost(t) {
+            const slot = hotbar[selected];
+            if (!slot || slot.count <= 0 || drawerOpen || !t) {
+                if (placeGhost) placeGhost.visible = false;
+                return;
+            }
+            const { x, y, z } = t.place;
+            const valid = canPlaceBlockAt(x, y, z);
+            ensurePlaceGhost();
+            placeGhost.position.set(
+                WORLD_OFFSET.x + x + 0.5,
+                WORLD_OFFSET.y + y + 0.5,
+                WORLD_OFFSET.z + z + 0.5
+            );
+            placeGhost.material.color.setHex(valid ? 0x66ff88 : 0xff5555);
+            placeGhost.material.opacity = valid ? 0.38 : 0.26;
+            placeGhost.visible = true;
         }
 
         function updateTpAimVisuals() {
@@ -1906,7 +2041,7 @@
                 w.userData.muzzle.getWorldPosition(pos);
                 return pos;
             }
-            const eye = player.pos.clone().add(new THREE.Vector3(0, 1.62, 0));
+            const eye = getFpEyeWorld(new THREE.Vector3());
             return eye.clone().add(syncAimRay().clone().multiplyScalar(0.55));
         }
 
@@ -2092,12 +2227,8 @@
             fpSwingTimer = Math.max(fpSwingTimer, 0.06);
         }
 
-        function fireWeapon(opts) {
+        function triggerMineAnim(opts) {
             opts = opts || {};
-            const t = pickTarget();
-            const aim = resolveAim();
-            const hasBlock = !!(t && getBlock(t.x, t.y, t.z));
-
             if (opts.laserPulse) {
                 if (firstPerson) triggerLaserPulse();
             } else if (firstPerson) {
@@ -2105,30 +2236,99 @@
             }
             if (!firstPerson) {
                 if (av && av.anim) {
-                    if (weaponDef && weaponDef.ranged) av.anim.attackT = 0;
-                    else if (!opts.laserPulse) { attackT = 0; av.anim.attackT = 0; }
-                } else if (weaponDef && weaponDef.ranged) {
-                    tpRecoilT = 0;
+                    if (!opts.laserPulse) { attackT = 0; av.anim.attackT = 0; }
                 } else if (!opts.laserPulse) {
                     attackT = 0;
                 }
             }
+        }
 
-            if (weaponDef && weaponDef.ranged) {
-                spawnRangedShotVfxAt(!hasBlock);
+        function triggerCombatAnim() {
+            if (firstPerson) triggerFpSwing();
+            if (!firstPerson) {
+                if (av && av.anim) {
+                    if (weaponDef && weaponDef.ranged) av.anim.attackT = 0;
+                    else { attackT = 0; av.anim.attackT = 0; }
+                } else if (weaponDef && weaponDef.ranged) {
+                    tpRecoilT = 0;
+                } else {
+                    attackT = 0;
+                }
             }
+        }
 
-            if (!hasBlock) return false;
-            const id = getBlock(t.x, t.y, t.z);
-            burst(t.x + 0.5 + WORLD_OFFSET.x, t.y + 0.5 + WORLD_OFFSET.y, t.z + 0.5 + WORLD_OFFSET.z, blockColor(id));
+        function completeMine(t, id) {
+            burst(
+                t.x + 0.5 + WORLD_OFFSET.x,
+                t.y + 0.5 + WORLD_OFFSET.y,
+                t.z + 0.5 + WORLD_OFFSET.z,
+                blockColor(id)
+            );
             setBlockEvent(t.x, t.y, t.z, 0);
             addToInventory(id);
             updateHUD();
-            return true;
+            resetMining();
+            disposeAimEdgeHighlight();
+        }
+
+        function mineProgressGain(block) {
+            const speed = (weaponDef && weaponDef.stats && weaponDef.stats.Speed) || 5;
+            const hardness = (block && block.hardness) || 1;
+            return speed / (hardness * 1.75);
+        }
+
+        function tryMineSwing() {
+            if (!isPickaxe()) {
+                showToolMsg('Equip pickaxe to mine (Q/E)');
+                return false;
+            }
+            triggerMineAnim();
+            const t = pickTarget();
+            if (!t || !getBlock(t.x, t.y, t.z)) {
+                resetMining();
+                return false;
+            }
+            const id = getBlock(t.x, t.y, t.z);
+            const block = blockById(id);
+            if (!block) return false;
+            if (mineTarget && (mineTarget.x !== t.x || mineTarget.y !== t.y || mineTarget.z !== t.z)) {
+                mineProgress = 0;
+            }
+            mineTarget = { x: t.x, y: t.y, z: t.z };
+            mineProgress += mineProgressGain(block);
+            if (mineProgress >= 1) {
+                completeMine(t, id);
+                return true;
+            }
+            return false;
+        }
+
+        function updateMiningHold(dt) {
+            if (!fireHeld || !isPickaxe() || drawerOpen) return;
+            mineRepeatCooldown -= dt;
+            if (mineRepeatCooldown > 0) return;
+            tryMineSwing();
+            mineRepeatCooldown = MINE_SWING_INTERVAL;
+        }
+
+        function fireCombat() {
+            const t = pickTarget();
+            const hasBlock = !!(t && getBlock(t.x, t.y, t.z));
+            triggerCombatAnim();
+            if (weaponDef && weaponDef.ranged) {
+                spawnRangedShotVfxAt(!hasBlock);
+            }
         }
 
         function tryLaserMine() {
-            return fireWeapon({ laserPulse: true });
+            if (!isLaserRifle()) return false;
+            const t = pickTarget();
+            triggerMineAnim({ laserPulse: true });
+            if (!t || !getBlock(t.x, t.y, t.z)) return false;
+            if (weaponDef && weaponDef.ranged) spawnRangedShotVfxAt(false);
+            const id = getBlock(t.x, t.y, t.z);
+            completeMine(t, id);
+            return true;
         }
 
         function updateLaserHoldFire(dt) {
@@ -2169,6 +2369,18 @@
             }
         }
 
+        const FP_TUNER_CAM = [
+            ['theta', 'Yaw', -3.14159, 3.14159, 0.01],
+            ['phi', 'Pitch', 0.1, 3.0, 0.01],
+            ['eyeH', 'Eye height', 1.2, 2.0, 0.01],
+            ['eyeX', 'Eye shift X', -0.35, 0.35, 0.01],
+            ['eyeZ', 'Eye shift Z', -0.35, 0.35, 0.01],
+            ['fov', 'FOV', 40, 90, 1],
+            ['adsFov', 'Focus FOV', 35, 75, 1],
+            ['aimSens', 'Look sens.', 0.0008, 0.006, 0.0001],
+            ['pitchMin', 'Pitch min', 0.05, 1.2, 0.01],
+            ['pitchMax', 'Pitch max', 1.5, 3.14, 0.01]
+        ];
         const FP_TUNER_GLOBAL = [
             ['scale', 'Scale', 0.3, 1.5, 0.01],
             ['px', 'Pivot X', -0.8, 0.8, 0.01],
@@ -2190,12 +2402,35 @@
             ['wrz', 'Wpn roll', -3.14, 3.14, 0.01]
         ];
 
+        function fmtFpCamVal(key, val) {
+            if (key === 'theta' || key === 'phi' || key === 'pitchMin' || key === 'pitchMax') {
+                return (val * 180 / Math.PI).toFixed(0) + '°';
+            }
+            if (key === 'aimSens') return (+val).toFixed(4);
+            if (key === 'fov' || key === 'adsFov') return (+val).toFixed(0);
+            return (+val).toFixed(2);
+        }
+
         function syncFpTunerInputs() {
             if (!fpTunerEl || !fpTune) return;
+            const fc = getFpCam();
             const wid = weaponDef ? weaponDef.id : 'blaster';
             const w = weaponTuneFor(wid);
             const title = fpTunerEl.querySelector('[data-fp-tune-weapon]');
             if (title) title.textContent = weaponDef ? weaponDef.name : wid;
+            [['theta', orbit.theta], ['phi', orbit.phi]].forEach(([key, val]) => {
+                const input = fpTunerEl.querySelector(`[data-fp-c="${key}"]`);
+                const out = fpTunerEl.querySelector(`[data-fp-v="${key}"]`);
+                if (input) input.value = val;
+                if (out) out.textContent = fmtFpCamVal(key, val);
+            });
+            FP_TUNER_CAM.forEach(([key]) => {
+                if (key === 'theta' || key === 'phi') return;
+                const input = fpTunerEl.querySelector(`[data-fp-c="${key}"]`);
+                const out = fpTunerEl.querySelector(`[data-fp-v="${key}"]`);
+                if (input) input.value = fc[key];
+                if (out) out.textContent = fmtFpCamVal(key, fc[key]);
+            });
             FP_TUNER_GLOBAL.forEach(([key]) => {
                 const input = fpTunerEl.querySelector(`[data-fp-g="${key}"]`);
                 if (input) input.value = fpTune.global[key];
@@ -2212,8 +2447,28 @@
         }
 
         function onFpTunerInput(e) {
+            const cKey = e.target.dataset.fpC;
             const gKey = e.target.dataset.fpG;
             const wKey = e.target.dataset.fpW;
+            if (cKey) {
+                const fc = getFpCam();
+                const val = parseFloat(e.target.value);
+                fc[cKey] = val;
+                if (cKey === 'theta' || cKey === 'phi') {
+                    orbit[cKey] = cKey === 'theta' ? wrapAngleRad(val) : val;
+                    if (cKey === 'theta') fc.theta = orbit.theta;
+                    player.yaw = orbit.theta + Math.PI;
+                }
+                const out = fpTunerEl.querySelector(`[data-fp-v="${cKey}"]`);
+                if (out) {
+                    out.textContent = fmtFpCamVal(
+                        cKey,
+                        cKey === 'theta' || cKey === 'phi' ? orbit[cKey] : val
+                    );
+                }
+                updateCamera();
+                return;
+            }
             if (gKey) {
                 fpTune.global[gKey] = parseFloat(e.target.value);
                 applyFpTuneToViewmodel();
@@ -2249,12 +2504,31 @@
                 </label>`;
             }
 
+            function camSliderRow(key, label, min, max, step) {
+                const id = `fp-tune-cam-${key}`;
+                return `<label class="vx-fp-row vx-fp-cam-row" for="${id}">
+                    <span class="vx-fp-lbl">${label}</span>
+                    <span class="vx-tp-val" data-fp-v="${key}">—</span>
+                    <input type="range" id="${id}" data-fp-c="${key}"
+                        min="${min}" max="${max}" step="${step}">
+                </label>`;
+            }
+
+            function camSection(title, rows) {
+                let h = `<div class="vx-fp-section"><b>${title}</b>`;
+                rows.forEach(([key, label, min, max, step]) => {
+                    h += camSliderRow(key, label, min, max, step);
+                });
+                return h + '</div>';
+            }
+
             let html = `<div class="vx-fp-head">
-                <h4>FP weapon tuner</h4>
+                <h4>FP tuner</h4>
                 <span class="vx-fp-weapon" data-fp-tune-weapon>—</span>
             </div>
-            <p class="vx-fp-hint">Global + per-weapon (Q/E). <b>F8</b> reopens after save.</p>
-            <div class="vx-fp-section"><b>Pivot &amp; mount</b>`;
+            <p class="vx-fp-hint">Camera + weapon pose (Q/E). <b>F8</b> reopens after save.</p>`;
+            html += camSection('Camera', FP_TUNER_CAM);
+            html += `<div class="vx-fp-section"><b>Pivot &amp; mount</b>`;
             FP_TUNER_GLOBAL.forEach(([key, label, min, max, step]) => {
                 html += sliderRow('g', key, label, min, max, step);
             });
@@ -2266,6 +2540,7 @@
             <label class="vx-fp-check"><input type="checkbox" data-fp-melee-rot> Override melee grip rotation</label>
             <div class="vx-fp-actions">
                 <button type="button" class="vx-btn" data-fp-save>Save &amp; close</button>
+                <button type="button" class="vx-btn" data-fp-reset-cam>Reset camera</button>
                 <button type="button" class="vx-btn" data-fp-reset-wpn>Reset weapon</button>
                 <button type="button" class="vx-btn" data-fp-reset-all>Reset all</button>
             </div>`;
@@ -2278,7 +2553,13 @@
             el.querySelector('[data-fp-save]').addEventListener('click', () => {
                 saveFpTune(true);
                 el.hidden = true;
-                if (g.showMessage) g.showMessage('FP weapon pose saved (F8 to tweak again)', 2800);
+                if (g.showMessage) g.showMessage('FP camera & weapon saved (F8 to tweak again)', 2800);
+            });
+            el.querySelector('[data-fp-reset-cam]').addEventListener('click', () => {
+                fpTune.cam = defaultFpCam();
+                applyFpCamToOrbit();
+                syncFpTunerInputs();
+                updateCamera();
             });
             el.querySelector('[data-fp-reset-wpn]').addEventListener('click', () => {
                 const id = weaponDef ? weaponDef.id : 'blaster';
@@ -2290,9 +2571,11 @@
             el.querySelector('[data-fp-reset-all]').addEventListener('click', () => {
                 fpTune = defaultFpTune();
                 fpTune.dismissed = false;
+                applyFpCamToOrbit();
                 syncFpTunerInputs();
                 applyFpTuneToViewmodel();
                 rebuildFpWeapon();
+                updateCamera();
             });
 
             fpTunerEl = el;
@@ -2540,7 +2823,7 @@
             const overlay = document.getElementById('voxel-overlay');
             if (overlay) overlay.classList.toggle('vx-tp-view', !firstPerson);
             if (camera) {
-                camera.fov = firstPerson ? TP_FP_FOV : getTpCam().fov;
+                camera.fov = firstPerson ? getFpCam().fov : getTpCam().fov;
                 camera.updateProjectionMatrix();
             }
             if (firstPerson) {
@@ -2563,8 +2846,8 @@
             const el = document.getElementById('voxel-view-hint');
             if (!el) return;
             el.innerHTML = firstPerson
-                ? '<b>mouse</b> aim · <b>Shift</b> focus · <b>click</b> mine · <b>hold click</b> laser · <b>right-click</b> place · <b>1-9</b> quickbar'
-                : '<b>click</b> capture mouse · <b>move</b> look · <b>Shift</b> focus · <b>scroll</b> zoom · <b>F8</b> camera · <b>right-click</b> place';
+                ? '<b>mouse</b> aim · <b>Shift</b> focus · <b>pickaxe + click/hold</b> mine · <b>laser + hold</b> cut · <b>right-click</b> place · <b>1-9</b> quickbar'
+                : '<b>click</b> capture mouse · <b>move</b> look · <b>Shift</b> focus · <b>pickaxe + click/hold</b> mine · <b>right-click</b> place · <b>scroll</b> zoom';
         }
 
         function updateFpViewmodel(dt, sp) {
@@ -2627,25 +2910,26 @@
         }
 
         function mineBlock() {
-            fireWeapon();
+            return tryMineSwing();
         }
-        function placeBlock(){
-          const t=pickTarget(); if(!t) return;
-          const slot=hotbar[selected];
-          if(!slot || slot.count<=0) return;
-          const {x,y,z}=t.place;
-          // never place inside the player
-          const wx=x+WORLD_OFFSET.x, wy=y+WORLD_OFFSET.y, wz=z+WORLD_OFFSET.z;
-          const p=player.pos;
-          if(wx+1>p.x-player.half.x && wx<p.x+player.half.x &&
-             wz+1>p.z-player.half.z && wz<p.z+player.half.z &&
-             wy+1>p.y && wy<p.y+player.height) return;
-          if(getBlock(x,y,z)) return;
-          if (!spendFromInventory(slot.id, 1)) return;
-          setBlockEvent(x,y,z,slot.id);
-          renderHotbar();
-          if (drawerOpen) renderDrawer();
-          updateHUD();
+        function placeBlock() {
+            const t = pickTarget();
+            if (!t) return;
+            const slot = hotbar[selected];
+            if (!slot || slot.count <= 0) {
+                showToolMsg('Select a block in your quickbar (1–9)');
+                return;
+            }
+            const { x, y, z } = t.place;
+            if (!canPlaceBlockAt(x, y, z)) {
+                if (!getBlock(x, y, z)) showToolMsg('Cannot place block here');
+                return;
+            }
+            if (!spendFromInventory(slot.id, 1)) return;
+            setBlockEvent(x, y, z, slot.id);
+            renderHotbar();
+            if (drawerOpen) renderDrawer();
+            updateHUD();
         }
         
         // ---------- inventory: backpack + 9-slot quickbar + categorized drawer ----------
@@ -3028,7 +3312,7 @@
         function _setupScene() {
             scene = g.scene;
             camera = g.camera;
-            camera.fov = firstPerson ? TP_FP_FOV : getTpCam().fov;
+            camera.fov = firstPerson ? getFpCam().fov : getTpCam().fov;
             camera.near = 0.1;
             camera.far = 500;
             camera.updateProjectionMatrix();
@@ -3125,6 +3409,7 @@
             downBtn = 0;
             fireHeld = false;
             laserCooldown = 0;
+            resetMining();
             releasePointerLock();
             syncViewCursor();
         }
@@ -3148,6 +3433,7 @@
             });
             shotVfx.length = 0;
             disposeAimEdgeHighlight();
+            disposePlaceGhost();
             if (fpPivot && fpPivot.parent) fpPivot.parent.remove(fpPivot);
             if (g._voxelLights) {
                 g._voxelLights.forEach((l) => g.scene.remove(l));
@@ -3230,17 +3516,27 @@
             }
             updateFpViewmodel(dt, sp);
             updateLaserHoldFire(dt);
+            updateMiningHold(dt);
             updateWeaponFx();
             if(matAnim){
                 matAnim.map.offset.x=(((elapsed*5)|0)%4)*0.25;
                 const p=0.9+0.1*Math.sin(elapsed*4); matAnim.color.setRGB(p,p,p);
             }
             if(decoMat&&decoMat.userData.shader) decoMat.userData.shader.uniforms.uTime.value=elapsed;
-            const t=pickTarget();
+            const t = pickTarget();
             updateAimEdgeHighlight(t);
-            const targetNameEl=document.getElementById('voxel-target-name');
-            if (targetNameEl) targetNameEl.textContent = t&&getBlock(t.x,t.y,t.z)?
-                blockById(getBlock(t.x,t.y,t.z)).name : '';
+            updatePlaceGhost(t);
+            const targetNameEl = document.getElementById('voxel-target-name');
+            if (targetNameEl) {
+                if (t && getBlock(t.x, t.y, t.z) && isMiningTool()) {
+                    const b = blockById(getBlock(t.x, t.y, t.z));
+                    const crack = mineTarget && mineTarget.x === t.x && mineTarget.y === t.y && mineTarget.z === t.z
+                        ? ` · ${Math.round(mineProgress * 100)}%` : '';
+                    targetNameEl.textContent = b ? b.name + crack : '';
+                } else {
+                    targetNameEl.textContent = '';
+                }
+            }
             stepParts(dt);
             stepShotVfx(dt);
             updateHUD();
@@ -3283,18 +3579,18 @@
             dt = dt || 1 / 60;
             if (!camera) return;
             if (firstPerson) {
-                orbit.phi = Math.max(0.15, Math.min(2.95, orbit.phi));
-                const fpFov = THREE.MathUtils.lerp(TP_FP_FOV, TP_FP_ADS_FOV, focusAimBlend);
+                const fc = getFpCam();
+                orbit.phi = Math.max(fc.pitchMin, Math.min(fc.pitchMax, orbit.phi));
+                const fpFov = THREE.MathUtils.lerp(fc.fov, fc.adsFov, focusAimBlend);
                 if (Math.abs(camera.fov - fpFov) > 0.05) {
                     camera.fov = fpFov;
                     camera.updateProjectionMatrix();
                 }
-                const eye = player.pos.clone().add(new THREE.Vector3(0, 1.62, 0));
-                camera.position.copy(eye);
+                camera.position.copy(getFpEyeWorld(_fpEyePos));
                 camera.lookAt(
-                    eye.x - Math.sin(orbit.phi) * Math.sin(orbit.theta),
-                    eye.y - Math.cos(orbit.phi),
-                    eye.z - Math.sin(orbit.phi) * Math.cos(orbit.theta));
+                    _fpEyePos.x - Math.sin(orbit.phi) * Math.sin(orbit.theta),
+                    _fpEyePos.y - Math.cos(orbit.phi),
+                    _fpEyePos.z - Math.sin(orbit.phi) * Math.cos(orbit.theta));
             } else {
                 const tc = getTpCam();
                 orbit.phi = Math.max(tc.pitchMin, Math.min(tc.pitchMax, orbit.phi));
@@ -3404,11 +3700,18 @@
                 downBtn = e.button;
                 wasLockedOnDown = isViewPointerLocked();
                 if (e.button === 2) e.preventDefault();
-                requestViewPointerLock();
+                // Only left-click should capture the mouse — right-click for place
+                // must not toggle pointer lock or the browser drops it on release.
+                if (e.button === 0) requestViewPointerLock();
                 if (e.button === 0) {
                     fireHeld = true;
                     laserCooldown = 0;
+                    mineRepeatCooldown = 0;
                     if (isLaserRifle()) tryLaserMine();
+                    else if (isPickaxe()) {
+                        tryMineSwing();
+                        mineRepeatCooldown = MINE_SWING_INTERVAL;
+                    }
                 }
             }
 
@@ -3416,12 +3719,17 @@
                 if (!dragging) return;
                 const btn = downBtn;
                 dragging = false;
-                if (btn === 0) fireHeld = false;
+                if (btn === 0) {
+                    fireHeld = false;
+                    resetMining();
+                }
                 if (drawerOpen) return;
                 if (moved >= 8) return;
-                if (!firstPerson && !wasLockedOnDown && isViewPointerLocked()) return;
-                if (btn === 2) placeBlock();
-                else if (btn === 0 && !isLaserRifle()) mineBlock();
+                if (btn === 0 && !firstPerson && !wasLockedOnDown && isViewPointerLocked()) return;
+                if (btn === 2) {
+                    placeBlock();
+                    if (firstPerson || wasLockedOnDown) restoreViewPointerLock();
+                } else if (btn === 0 && !isLaserRifle() && !isPickaxe()) fireCombat();
             }
 
             function onCanvasPointerMove(e) {
@@ -3486,6 +3794,7 @@
             }
             fpTune = loadFpTune();
             tpTune = loadTpTune();
+            applyFpCamToOrbit();
             applyTpTuneToOrbit();
             ensureFpViewmodel();
             setFirstPerson(firstPerson);

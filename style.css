@@ -2257,7 +2257,8 @@ body.mode-asteroid #lava-vignette {
     left: 12px;
     right: auto;
 }
-.vx-tp-tuner .vx-fp-row {
+.vx-tp-tuner .vx-fp-row,
+.vx-fp-cam-row {
     grid-template-columns: 78px 42px 1fr;
 }
 .vx-tp-val {
