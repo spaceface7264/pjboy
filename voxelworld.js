@@ -1181,9 +1181,8 @@
                     w.userData.flash.material.opacity = 0.35 + f * 0.65;
                 }
                 if (w.userData.beam) {
-                    // Weapon mesh beam is FP-only; TP uses short-lived shot VFX traces.
-                    w.userData.beam.visible = firstPerson && flashOn && f > 0.06;
-                    w.userData.beam.material.opacity = 0.25 + f * 0.75;
+                    // Fixed-length mesh beam can't track crosshair hits; shotVfx draws the trace.
+                    w.userData.beam.visible = false;
                 }
             }
         }
@@ -1227,9 +1226,8 @@
             av.group.rotation.y = player.yaw;
             const VC = getVC();
             if (VC && av.anim && av.j) {
-                const aimSolve = resolveAim();
                 const aim = computeAimOffsets();
-                const aimDir = aimSolve.dir;
+                const aimDir = syncAimRay();
                 const ads = focusAimBlend > 0.04;
                 const atk = attackT >= 0 ? attackT : (av.anim.attackT >= 0 ? av.anim.attackT : -1);
                 VC.update(av, mapVcState(player.state), dt, {
@@ -1713,6 +1711,8 @@
 
         const _shotDir = new THREE.Vector3();
         const _shotScratch = new THREE.Vector3();
+        const _camPos = new THREE.Vector3();
+        const _aimFar = new THREE.Vector3();
 
         function syncAimRay() {
             ray.setFromCamera({ x: 0, y: 0 }, camera);
@@ -1730,10 +1730,9 @@
             hasSurfaceHit: false
         };
 
-        // Single aim solve: screen-center ray, muzzle origin, end on the same line as shots.
+        // Single aim solve: crosshair raycast picks the target; trace runs muzzle → that point.
         function resolveAim() {
             syncAimRay();
-            _aimState.dir.copy(_shotDir);
             if (av && av.group && !firstPerson) av.group.updateMatrixWorld(true);
             if (!firstPerson && tpWeapon) tpWeapon.updateMatrixWorld(true);
             if (fpPivot && firstPerson) fpPivot.updateMatrixWorld(true);
@@ -1742,19 +1741,22 @@
             ray.setFromCamera({ x: 0, y: 0 }, camera);
             const hit = ray.intersectObjects(collectAimMeshes(), true)[0];
             const reach = currentAimReach();
+            camera.getWorldPosition(_camPos);
             const inRange = hit && hit.point.distanceTo(player.pos) <= reach;
             if (inRange) {
                 _aimState.hasSurfaceHit = true;
                 _aimState.normal.copy(hit.face.normal);
-                const along = _shotScratch.copy(hit.point).sub(_aimState.origin).dot(_aimState.dir);
-                _aimState.len = Math.max(0.2, along);
+                _aimState.hit.copy(hit.point);
+                _aimState.end.copy(hit.point);
             } else {
                 _aimState.hasSurfaceHit = false;
                 _aimState.normal.set(0, 1, 0);
-                _aimState.len = reach;
+                _aimFar.copy(_camPos).addScaledVector(_shotDir, reach);
+                _aimState.hit.copy(_aimFar);
+                _aimState.end.copy(_aimFar);
             }
-            _aimState.end.copy(_aimState.origin).addScaledVector(_aimState.dir, _aimState.len);
-            _aimState.hit.copy(_aimState.end);
+            _aimState.len = Math.max(0.2, _aimState.origin.distanceTo(_aimState.end));
+            _aimState.dir.copy(_aimState.end).sub(_aimState.origin).normalize();
             return _aimState;
         }
 
@@ -1763,15 +1765,14 @@
         }
 
         function computeAimShot(origin, hit) {
-            const dir = syncAimRay();
-            const along = _shotScratch.copy(hit).sub(origin).dot(dir);
-            const len = Math.max(0.2, along);
-            return { dir, len, end: origin.clone().addScaledVector(dir, len) };
+            const len = Math.max(0.2, origin.distanceTo(hit));
+            const dir = _shotScratch.copy(hit).sub(origin).normalize();
+            return { dir, len, end: hit.clone() };
         }
 
         function pickTarget(){
           ray.setFromCamera({x:0,y:0}, camera);
-          const hit=ray.intersectObjects(collectAimMeshes())[0];
+          const hit=ray.intersectObjects(collectAimMeshes(), true)[0];
           if(!hit) return null;
           if(hit.point.distanceTo(player.pos)>currentAimReach()) return null;
           const p = hit.point.clone().sub(WORLD_OFFSET);
@@ -2975,8 +2976,66 @@
             placeGhost.visible = true;
         }
 
+        let tpFireTrace = null;
+        const _tpTraceQuat = new THREE.Quaternion();
+        const _tpTraceZ = new THREE.Vector3(0, 0, 1);
+
+        function disposeTpFireTrace() {
+            if (!tpFireTrace) return;
+            if (tpFireTrace.grp) scene.remove(tpFireTrace.grp);
+            tpFireTrace.segs.forEach((seg) => {
+                if (seg.geometry) seg.geometry.dispose();
+                if (seg.material) seg.material.dispose();
+            });
+            tpFireTrace = null;
+        }
+
+        function ensureTpFireTrace(profile) {
+            const key = profile.kind + ':' + profile.color;
+            if (tpFireTrace && tpFireTrace.key === key) return tpFireTrace;
+            disposeTpFireTrace();
+            const grp = new THREE.Group();
+            const outer = addBeamSegment(grp, 1, profile.width, profile.color, 0.82, 0);
+            const inner = addBeamSegment(grp, 1, profile.width * 0.32, profile.core, 0.98, 0);
+            tpFireTrace = { key, grp, segs: [outer, inner], profile };
+            scene.add(grp);
+            return tpFireTrace;
+        }
+
+        function layoutWorldBeam(origin, dir, len, grp, segs, opacityMul) {
+            grp.position.copy(origin).addScaledVector(dir, len * 0.5);
+            _tpTraceQuat.setFromUnitVectors(_tpTraceZ, dir);
+            grp.quaternion.copy(_tpTraceQuat);
+            const k = opacityMul != null ? opacityMul : 1;
+            segs[0].scale.set(1, 1, len);
+            segs[1].scale.set(1, 1, len * 1.02);
+            segs[0].material.opacity = (segs[0].userData.baseOp || 0.82) * k;
+            segs[1].material.opacity = (segs[1].userData.baseOp || 0.98) * k;
+        }
+
         function updateTpAimVisuals() {
-            // Iso aim = screen crosshair only; traces spawn on fire via shotVfx.
+            if (firstPerson || voxelPanelOpen() || drawerOpen || !weaponDef || !weaponDef.ranged) {
+                if (tpFireTrace && tpFireTrace.grp) tpFireTrace.grp.visible = false;
+                return;
+            }
+            const profile = SHOT_PROFILES[weaponDef.id] || SHOT_PROFILES.blaster;
+            if (profile.kind !== 'beam') {
+                if (tpFireTrace && tpFireTrace.grp) tpFireTrace.grp.visible = false;
+                return;
+            }
+            const mining = fireHeld && isMineLaser();
+            if (!mining) {
+                if (tpFireTrace && tpFireTrace.grp) tpFireTrace.grp.visible = false;
+                return;
+            }
+            const a = resolveAim();
+            if (a.len < 0.05) {
+                if (tpFireTrace && tpFireTrace.grp) tpFireTrace.grp.visible = false;
+                return;
+            }
+            const trace = ensureTpFireTrace(profile);
+            layoutWorldBeam(a.origin, a.dir, a.len, trace.grp, trace.segs, 1);
+            trace.grp.visible = true;
         }
         // break particles colored from the block's own texture
         const blockColorCache={};
@@ -3097,15 +3156,11 @@
                 return;
             }
 
-            const mid = origin.clone().addScaledVector(dir, a.len * 0.5);
             const grp = new THREE.Group();
-            grp.position.copy(mid);
-            const quat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), dir);
-            grp.quaternion.copy(quat);
-
-            const outer = addBeamSegment(grp, a.len, profile.width, profile.color, 0.82, 0);
-            const inner = addBeamSegment(grp, a.len * 1.02, profile.width * 0.32, profile.core, 0.98, 0);
+            const outer = addBeamSegment(grp, 1, profile.width, profile.color, 0.82, 0);
+            const inner = addBeamSegment(grp, 1, profile.width * 0.32, profile.core, 0.98, 0);
             const segs = [outer, inner];
+            layoutWorldBeam(origin, dir, a.len, grp, segs, 1);
 
             if (profile.jagged) {
                 for (let i = 0; i < 4; i++) {
@@ -3304,7 +3359,7 @@
                 resetMining();
                 return false;
             }
-            if (weaponDef && weaponDef.ranged) spawnRangedShotVfxAt(false);
+            if (weaponDef && weaponDef.ranged && firstPerson) spawnRangedShotVfxAt(false);
             const id = getBlock(t.x, t.y, t.z);
             const block = blockById(id);
             if (!block) return false;
@@ -4884,6 +4939,7 @@
                 if (s.m) scene.remove(s.m);
             });
             shotVfx.length = 0;
+            disposeTpFireTrace();
             disposeAimEdgeHighlight();
             disposeMineBlockFx();
             disposePlaceGhost();
