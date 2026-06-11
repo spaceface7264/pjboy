@@ -3855,11 +3855,29 @@
             Terrain: '🪨', Life: '🌿', Resources: '⛏️',
             Crystals: '💎', Crafted: '🔧', Hazards: '☢️'
         };
-        const WEAPON_ICONS = {
-            pickaxe: '⛏️', wrench: '🔧', sword: '⚔️',
-            blaster: '🔫', laser: '✨', plasma: '💫', railgun: '⚡'
+        const DRAWER_TABS = [
+            { id: 'Weapons', icon: '⚔️', label: 'Weapons' },
+            ...INV_CATEGORIES.map((cat) => ({
+                id: cat,
+                icon: CAT_ICONS[cat] || '▪',
+                label: cat
+            }))
+        ];
+        const INV_TINT = {
+            weapon_melee:  { bg: 'rgba(42, 74, 140, 0.72)',  border: 'rgba(100, 160, 255, 0.55)', fill: '#1a3560' },
+            weapon_ranged: { bg: 'rgba(140, 42, 58, 0.72)',  border: 'rgba(255, 100, 120, 0.55)', fill: '#601a28' },
+            weapon_tool:   { bg: 'rgba(120, 82, 36, 0.72)',  border: 'rgba(210, 160, 80, 0.55)',  fill: '#4a3418' },
+            Terrain:   { bg: 'rgba(107, 74, 47, 0.72)',  border: 'rgba(180, 130, 80, 0.5)',  fill: '#3d2a18' },
+            Life:      { bg: 'rgba(42, 110, 58, 0.72)',  border: 'rgba(100, 210, 120, 0.5)', fill: '#1a4024' },
+            Resources: { bg: 'rgba(130, 82, 32, 0.72)',  border: 'rgba(220, 160, 70, 0.5)',  fill: '#4a3010' },
+            Crystals:  { bg: 'rgba(88, 52, 140, 0.72)',  border: 'rgba(180, 120, 255, 0.5)', fill: '#2e1a50' },
+            Crafted:   { bg: 'rgba(36, 100, 118, 0.72)', border: 'rgba(90, 200, 230, 0.5)',  fill: '#143840' },
+            Hazards:   { bg: 'rgba(110, 120, 32, 0.72)', border: 'rgba(210, 230, 80, 0.5)',  fill: '#3a4010' },
+            empty:     { bg: 'rgba(18, 24, 40, 0.88)',  border: 'rgba(58, 168, 196, 0.28)', fill: '#121820' }
         };
         const WEAPONS_SAVE_KEY = 'pjboy.voxelWeapons.owned.v1';
+        const HOTBAR_SAVE_KEY = 'pjboy.voxelHotbar.v1';
+        const DRAWER_TAB_SAVE_KEY = 'pjboy.voxelInvTab.v1';
         const ownedWeapons = new Set();
         const hotbar = Array(HOTBAR_SLOTS).fill(null);
         const backpack = {};   // block id -> total count
@@ -3867,6 +3885,7 @@
         let drawerOpen = false;
         let controlsDrawerOpen = false;
         let drawerFilter = 'owned';   // 'owned' | 'all'
+        let drawerTab = 'Weapons';
         const hotbarEl = document.getElementById('voxel-hotbar');
         const drawerEl = document.getElementById('voxel-drawer');
         const drawerPanelEl = document.getElementById('voxel-drawer-panel');
@@ -3913,46 +3932,212 @@
             const s = def.stats;
             return `DMG ${s.Damage} · SPD ${s.Speed} · RNG ${s.Range}`;
         }
-        function appendWeaponSection(body, ownedOnly) {
-            const defs = weaponList();
-            const visible = ownedOnly
-                ? defs.map((d, i) => ({ def: d, i })).filter((x) => ownedWeapons.has(x.i))
-                : defs.map((d, i) => ({ def: d, i }));
-            const sec = document.createElement('div');
-            sec.className = 'vx-section';
-            sec.innerHTML = `<h4>⚔️ Weapons <span class="vx-count">${ownedWeapons.size}/${defs.length}</span></h4>`;
+
+        function invTintStyle(tint) {
+            return `--vx-tint-bg:${tint.bg};--vx-tint-border:${tint.border};`;
+        }
+
+        function weaponTint(def) {
+            if (def.id === 'pickaxe' || def.id === 'wrench') return INV_TINT.weapon_tool;
+            return def.ranged ? INV_TINT.weapon_ranged : INV_TINT.weapon_melee;
+        }
+
+        function blockTint(cat) {
+            return INV_TINT[cat] || INV_TINT.empty;
+        }
+
+        function createThumbWrap(tint, imageUrl, alt) {
+            const wrap = document.createElement('div');
+            wrap.className = 'vx-thumb-wrap';
+            wrap.style.cssText = invTintStyle(tint);
+            const thumb = document.createElement('div');
+            thumb.className = 'vx-thumb';
+            if (imageUrl) thumb.style.backgroundImage = `url(${imageUrl})`;
+            if (alt) thumb.title = alt;
+            wrap.appendChild(thumb);
+            return wrap;
+        }
+
+        const WEAPON_THUMB_CACHE = {};
+        function paintWeaponThumb(def) {
+            const c = document.createElement('canvas');
+            c.width = c.height = TILE;
+            const x = c.getContext('2d');
+            const tint = weaponTint(def);
+            x.fillStyle = tint.fill;
+            x.fillRect(0, 0, TILE, TILE);
+            x.fillStyle = 'rgba(0,0,0,.22)';
+            x.fillRect(0, 0, TILE, 1);
+            x.fillRect(0, 0, 1, TILE);
+            const px = (col, row, w, h, color) => {
+                x.fillStyle = color;
+                x.fillRect(col, row, w, h);
+            };
+            if (def.id === 'pickaxe') {
+                px(14, 6, 4, 18, '#6b4a2a');
+                px(8, 4, 16, 4, '#9aa8b8');
+                px(6, 8, 6, 3, '#b8c4d0');
+                px(20, 8, 6, 3, '#b8c4d0');
+            } else if (def.id === 'wrench') {
+                px(10, 8, 6, 14, '#c8d0dc');
+                px(16, 8, 10, 4, '#c8d0dc');
+                px(22, 12, 4, 8, '#c8d0dc');
+            } else if (def.id === 'sword') {
+                px(14, 4, 4, 18, '#8ec8ff');
+                px(12, 20, 8, 3, '#d4a85a');
+                px(15, 23, 2, 4, '#6b4a2a');
+            } else if (def.id === 'blaster') {
+                px(8, 12, 16, 6, '#c05050');
+                px(22, 11, 8, 8, '#e07070');
+                px(6, 14, 4, 2, '#404858');
+            } else if (def.id === 'laser') {
+                px(6, 12, 20, 5, '#d04058');
+                px(24, 10, 10, 9, '#ff6080');
+                px(4, 13, 6, 3, '#60c0ff');
+            } else if (def.id === 'plasma') {
+                px(12, 10, 12, 10, '#d04848');
+                px(20, 12, 6, 6, '#ff9060');
+                px(10, 14, 4, 4, '#404858');
+            } else if (def.id === 'railgun') {
+                px(4, 13, 22, 5, '#b83848');
+                px(24, 11, 8, 9, '#e85868');
+                px(6, 11, 4, 9, '#506878');
+            } else {
+                px(10, 10, 12, 12, '#9eb8c4');
+            }
+            return c.toDataURL();
+        }
+
+        function weaponThumb(def) {
+            if (!WEAPON_THUMB_CACHE[def.id]) WEAPON_THUMB_CACHE[def.id] = paintWeaponThumb(def);
+            return WEAPON_THUMB_CACHE[def.id];
+        }
+
+        function createWeaponInvItem(def, index, ownedOnly) {
+            const owned = ownedWeapons.has(index);
+            const equipped = weaponIndex === index;
+            const tint = weaponTint(def);
+            const item = document.createElement('div');
+            item.className = 'vx-item vx-weapon'
+                + (equipped ? ' vx-equipped' : '')
+                + (!owned && ownedOnly ? ' vx-empty' : '');
+            item.style.cssText = invTintStyle(tint);
+            item.appendChild(createThumbWrap(tint, weaponThumb(def), def.name));
+            const name = document.createElement('div');
+            name.className = 'vx-name';
+            name.title = def.name;
+            name.textContent = def.name;
+            item.appendChild(name);
+            if (owned || !ownedOnly) {
+                item.addEventListener('click', () => {
+                    ownedWeapons.add(index);
+                    saveOwnedWeapons();
+                    setWeaponIndex(index);
+                });
+            }
+            return item;
+        }
+
+        function createBlockInvItem(b, cnt) {
+            const tint = blockTint(b.cat);
+            const item = document.createElement('div');
+            item.className = 'vx-item' + (cnt <= 0 ? ' vx-empty' : '');
+            item.style.cssText = invTintStyle(tint);
+            item.draggable = cnt > 0;
+            item.dataset.blockId = String(b.id);
+            item.appendChild(createThumbWrap(tint, thumb(b), b.name));
+            const name = document.createElement('div');
+            name.className = 'vx-name';
+            name.title = b.name;
+            name.textContent = b.name;
+            item.appendChild(name);
+            const amt = document.createElement('div');
+            amt.className = 'vx-amt';
+            amt.textContent = cnt > 0 ? String(cnt) : '0';
+            item.appendChild(amt);
+            if (cnt > 0) {
+                item.addEventListener('dragstart', (e) => {
+                    e.dataTransfer.setData('text/voxel-block', String(b.id));
+                    e.dataTransfer.effectAllowed = 'copy';
+                });
+                item.addEventListener('click', () => assignHotbarSlot(selected, b.id));
+                item.addEventListener('contextmenu', (e) => {
+                    e.preventDefault();
+                    assignHotbarSlot(selected, b.id, 1);
+                });
+            }
+            return item;
+        }
+
+        function saveHotbarLayout() {
+            try { localStorage.setItem(HOTBAR_SAVE_KEY, JSON.stringify(hotbar)); } catch (_) {}
+        }
+
+        function loadHotbarLayout() {
+            try {
+                const raw = localStorage.getItem(HOTBAR_SAVE_KEY);
+                if (!raw) return;
+                const data = JSON.parse(raw);
+                if (!Array.isArray(data) || data.length !== HOTBAR_SLOTS) return;
+                for (let i = 0; i < HOTBAR_SLOTS; i++) {
+                    const s = data[i];
+                    hotbar[i] = s && s.id != null ? { id: s.id | 0, count: s.count | 0 } : null;
+                }
+                syncHotbarFromBackpack();
+            } catch (_) {}
+        }
+
+        function loadDrawerTab() {
+            try {
+                const tab = localStorage.getItem(DRAWER_TAB_SAVE_KEY);
+                if (tab && DRAWER_TABS.some((t) => t.id === tab)) drawerTab = tab;
+            } catch (_) {}
+        }
+
+        function saveDrawerTab() {
+            try { localStorage.setItem(DRAWER_TAB_SAVE_KEY, drawerTab); } catch (_) {}
+        }
+
+        function swapHotbarSlots(a, b) {
+            if (a === b || a < 0 || b < 0 || a >= HOTBAR_SLOTS || b >= HOTBAR_SLOTS) return;
+            const tmp = hotbar[a];
+            hotbar[a] = hotbar[b];
+            hotbar[b] = tmp;
+            saveHotbarLayout();
+            renderHotbar();
+            if (drawerOpen) renderDrawer();
+        }
+
+        function renderDrawerTabBody(body, ownedOnly) {
+            body.innerHTML = '';
             const grid = document.createElement('div');
             grid.className = 'vx-grid';
-            if (!visible.length) {
-                const empty = document.createElement('div');
-                empty.style.cssText = 'grid-column:1/-1;font-size:10px;color:#7e98a6;padding:6px 2px;';
-                empty.textContent = 'No weapons unlocked yet.';
-                grid.appendChild(empty);
+            if (drawerTab === 'Weapons') {
+                const defs = weaponList();
+                const visible = ownedOnly
+                    ? defs.map((d, i) => ({ def: d, i })).filter((x) => ownedWeapons.has(x.i))
+                    : defs.map((d, i) => ({ def: d, i }));
+                if (!visible.length) {
+                    const empty = document.createElement('div');
+                    empty.className = 'vx-inv-empty';
+                    empty.textContent = 'No weapons unlocked yet.';
+                    grid.appendChild(empty);
+                } else {
+                    visible.forEach(({ def, i }) => grid.appendChild(createWeaponInvItem(def, i, ownedOnly)));
+                }
             } else {
-                for (const { def, i } of visible) {
-                    const owned = ownedWeapons.has(i);
-                    const equipped = weaponIndex === i;
-                    const item = document.createElement('div');
-                    item.className = 'vx-item vx-weapon'
-                        + (equipped ? ' vx-equipped' : '')
-                        + (!owned && ownedOnly ? ' vx-empty' : '');
-                    item.innerHTML = `
-                        <div class="vx-thumb vx-weapon-icon">${WEAPON_ICONS[def.id] || '🔹'}</div>
-                        <div class="vx-name" title="${def.name}">${def.name}</div>
-                        <div class="vx-cnt">${equipped ? 'Equipped' : (def.ranged ? 'Ranged' : 'Melee')}</div>
-                        <div class="vx-wpn-stat">${weaponStatLine(def)}</div>`;
-                    if (owned || !ownedOnly) {
-                        item.addEventListener('click', () => {
-                            ownedWeapons.add(i);
-                            saveOwnedWeapons();
-                            setWeaponIndex(i);
-                        });
-                    }
-                    grid.appendChild(item);
+                const blocks = BlockRegistry.filter((b) => b.cat === drawerTab);
+                const visible = ownedOnly ? blocks.filter((b) => getBackpackCount(b.id) > 0) : blocks;
+                if (!visible.length) {
+                    const empty = document.createElement('div');
+                    empty.className = 'vx-inv-empty';
+                    empty.textContent = ownedOnly ? 'Nothing here yet.' : 'No blocks in this category.';
+                    grid.appendChild(empty);
+                } else {
+                    visible.forEach((b) => grid.appendChild(createBlockInvItem(b, getBackpackCount(b.id))));
                 }
             }
-            sec.appendChild(grid);
-            body.appendChild(sec);
+            body.appendChild(grid);
         }
         function getBackpackCount(id) {
             return backpack[id] || 0;
@@ -3986,6 +4171,7 @@
             const empty = hotbar.findIndex((s) => !s);
             if (empty >= 0) {
                 hotbar[empty] = { id, count: Math.min(n, getBackpackCount(id)) };
+                saveHotbarLayout();
             }
         }
         function addToInventory(id, n = 1) {
@@ -4012,24 +4198,41 @@
             renderHotbar();
             if (drawerOpen) renderDrawer();
         }
+
+        function deselectQuickbar() {
+            selected = -1;
+            renderHotbar();
+            if (drawerOpen) renderDrawer();
+        }
+
         function clearHotbarSlot(i) {
             hotbar[i] = null;
+            saveHotbarLayout();
             renderHotbar();
             if (drawerOpen) renderDrawer();
         }
         function assignHotbarSlot(i, id, amount) {
             const have = getBackpackCount(id);
             if (have <= 0) return;
+            let slot = i;
+            if (slot < 0 || slot >= HOTBAR_SLOTS) {
+                if (selected >= 0) slot = selected;
+                else {
+                    const empty = hotbar.findIndex((s) => !s);
+                    slot = empty >= 0 ? empty : 0;
+                }
+            }
             const cnt = amount == null ? have : Math.min(amount, have);
-            hotbar[i] = { id, count: cnt };
-            selectSlot(i);
+            hotbar[slot] = { id, count: cnt };
+            saveHotbarLayout();
+            selectSlot(slot);
         }
         function makeSlotEl(i, opts) {
             const { strip = false, onClick, onContext } = opts || {};
             const d = document.createElement('div');
             const cls = ['slot'];
-            if (i === selected) cls.push('active');
-            if (strip && drawerOpen && i === selected) cls.push('target');
+            if (selected >= 0 && i === selected) cls.push('active');
+            if (strip && drawerOpen && selected >= 0 && i === selected) cls.push('target');
             d.className = cls.join(' ');
             d.dataset.slot = String(i);
             const k = document.createElement('div');
@@ -4037,22 +4240,42 @@
             k.textContent = i + 1;
             d.appendChild(k);
             const s = hotbar[i];
+            const tint = s ? blockTint(blockById(s.id)?.cat) : INV_TINT.empty;
+            d.style.cssText = invTintStyle(tint);
+            const inner = document.createElement('div');
+            inner.className = 'vx-slot-inner';
             if (s) {
                 const b = blockById(s.id);
                 if (b) {
-                    d.style.backgroundImage = `url(${thumb(b)})`;
+                    inner.appendChild(createThumbWrap(tint, thumb(b), b.name));
                     d.title = b.name;
+                    d.draggable = true;
                 }
+                d.appendChild(inner);
                 const cn = document.createElement('div');
                 cn.className = 'cnt';
                 cn.textContent = s.count;
                 d.appendChild(cn);
+                d.addEventListener('dragstart', (e) => {
+                    e.dataTransfer.setData('text/voxel-slot', String(i));
+                    e.dataTransfer.setData('text/voxel-block', String(s.id));
+                    e.dataTransfer.effectAllowed = 'copyMove';
+                    d.classList.add('dragging');
+                });
+                d.addEventListener('dragend', () => d.classList.remove('dragging'));
+            } else {
+                d.appendChild(inner);
             }
             d.addEventListener('dragover', (e) => { e.preventDefault(); d.classList.add('drop-hover'); });
             d.addEventListener('dragleave', () => d.classList.remove('drop-hover'));
             d.addEventListener('drop', (e) => {
                 e.preventDefault();
                 d.classList.remove('drop-hover');
+                const fromSlot = e.dataTransfer.getData('text/voxel-slot');
+                if (fromSlot !== '') {
+                    swapHotbarSlots(+fromSlot, i);
+                    return;
+                }
                 const bid = +e.dataTransfer.getData('text/voxel-block');
                 if (bid) assignHotbarSlot(i, bid);
             });
@@ -4110,13 +4333,7 @@
             const ownedOnly = drawerFilter === 'owned';
             drawerPanelEl.innerHTML = `
                 <div class="vx-header">
-                    <h3 class="vx-title"><span>🎒</span> Asteroid Inventory</h3>
-                    <div class="vx-stats">
-                        <span class="vx-chip"><b>Items</b> ${backpackTotal()}</span>
-                        <span class="vx-chip"><b>Types</b> ${backpackTypes()}</span>
-                        <span class="vx-chip"><b>Slot</b> ${selected + 1}</span>
-                        <span class="vx-chip"><b>Weapon</b> ${weaponDef ? weaponDef.name : '—'}</span>
-                    </div>
+                    <h3 class="vx-title"><span>🎒</span> Inventory</h3>
                     <div class="vx-actions">
                         <button type="button" class="vx-btn ${ownedOnly ? 'vx-btn-on' : ''}" data-vx-filter="owned">Owned</button>
                         <button type="button" class="vx-btn ${ownedOnly ? '' : 'vx-btn-on'}" data-vx-filter="all">All</button>
@@ -4125,12 +4342,9 @@
                     </div>
                 </div>
                 <div class="vx-strip-wrap">
-                    <div class="vx-strip-label">
-                        <span>Quickbar — assign to slot <b>${selected + 1}</b></span>
-                        <span>click item · drag to slot · right-click slot to clear</span>
-                    </div>
                     <div class="vx-strip" id="voxel-drawer-strip"></div>
                 </div>
+                <div class="vx-inv-nav" id="voxel-drawer-nav"></div>
                 <div class="vx-body" id="voxel-drawer-body"></div>
                 <div class="vx-help">
                     <kbd>1</kbd>–<kbd>9</kbd> pick slot · <kbd>Q</kbd>/<kbd>E</kbd> cycle weapon · <kbd>Tab</kbd>/<kbd>M</kbd> inventory · <kbd>H</kbd> controls · <kbd>Esc</kbd> close
@@ -4145,51 +4359,22 @@
                 }));
             }
 
+            const nav = drawerPanelEl.querySelector('#voxel-drawer-nav');
+            DRAWER_TABS.forEach((tab) => {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'vx-tab' + (drawerTab === tab.id ? ' vx-tab-on' : '');
+                btn.innerHTML = `<span class="vx-tab-icon">${tab.icon}</span><span class="vx-tab-label">${tab.label}</span>`;
+                btn.addEventListener('click', () => {
+                    drawerTab = tab.id;
+                    saveDrawerTab();
+                    renderDrawer();
+                });
+                nav.appendChild(btn);
+            });
+
             const body = drawerPanelEl.querySelector('#voxel-drawer-body');
-            appendWeaponSection(body, ownedOnly);
-            for (const cat of INV_CATEGORIES) {
-                const blocks = BlockRegistry.filter((b) => b.cat === cat);
-                const visible = ownedOnly ? blocks.filter((b) => getBackpackCount(b.id) > 0) : blocks;
-                const sec = document.createElement('div');
-                sec.className = 'vx-section';
-                const ownedInCat = blocks.filter((b) => getBackpackCount(b.id) > 0).length;
-                sec.innerHTML = `<h4>${CAT_ICONS[cat] || '▪'} ${cat} <span class="vx-count">${ownedInCat}/${blocks.length}</span></h4>`;
-                const grid = document.createElement('div');
-                grid.className = 'vx-grid';
-                if (!visible.length) {
-                    const empty = document.createElement('div');
-                    empty.className = 'vx-empty';
-                    empty.style.cssText = 'grid-column:1/-1;font-size:10px;color:#7e98a6;padding:6px 2px;';
-                    empty.textContent = ownedOnly ? 'Nothing mined in this category yet.' : 'No blocks in this category.';
-                    grid.appendChild(empty);
-                } else {
-                    for (const b of visible) {
-                        const cnt = getBackpackCount(b.id);
-                        const item = document.createElement('div');
-                        item.className = 'vx-item' + (cnt <= 0 ? ' vx-empty' : '');
-                        item.draggable = cnt > 0;
-                        item.dataset.blockId = String(b.id);
-                        item.innerHTML = `
-                            <div class="vx-thumb" style="background-image:url(${thumb(b)})"></div>
-                            <div class="vx-name" title="${b.name}">${b.name}</div>
-                            <div class="vx-cnt">${cnt > 0 ? cnt : '—'}</div>`;
-                        if (cnt > 0) {
-                            item.addEventListener('dragstart', (e) => {
-                                e.dataTransfer.setData('text/voxel-block', String(b.id));
-                                e.dataTransfer.effectAllowed = 'copy';
-                            });
-                            item.addEventListener('click', () => assignHotbarSlot(selected, b.id));
-                            item.addEventListener('contextmenu', (e) => {
-                                e.preventDefault();
-                                assignHotbarSlot(selected, b.id, 1);
-                            });
-                        }
-                        grid.appendChild(item);
-                    }
-                }
-                sec.appendChild(grid);
-                body.appendChild(sec);
-            }
+            renderDrawerTabBody(body, ownedOnly);
 
             drawerPanelEl.querySelector('[data-vx-close]').addEventListener('click', () => toggleDrawer(false));
             drawerPanelEl.querySelector('[data-vx-clear-bar]').addEventListener('click', () => {
@@ -4585,6 +4770,8 @@
             _active = true;
             if (g.keys) Object.assign(keys, g.keys);
             loadOwnedWeapons();
+            loadDrawerTab();
+            loadHotbarLayout();
             weaponIndex = loadCharCfg().weapon;
             ownedWeapons.add(weaponIndex);
             updateWeaponLabel();
@@ -4630,6 +4817,10 @@
                 if (e.code === 'Tab' || e.code === 'KeyM') {
                     e.preventDefault();
                     toggleDrawer();
+                    return;
+                }
+                if (e.code === 'Digit0' || e.code === 'Numpad0') {
+                    deselectQuickbar();
                     return;
                 }
                 if (e.code.startsWith('Digit')) {
@@ -4679,6 +4870,7 @@
                 on(voxelHud, 'wheel', (e) => {
                     if (scanExpanded && e.target.closest('#voxel-scan')) return;
                     if (e.target.closest('#voxel-controls-drawer')) return;
+                    if (e.target.closest('#voxel-drawer .vx-body')) return;
                     e.preventDefault();
                 }, { passive: false });
             }

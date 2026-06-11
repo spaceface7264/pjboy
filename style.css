@@ -2504,15 +2504,34 @@ body.mode-asteroid #lava-vignette {
     height: 46px;
     flex: 0 0 auto;
     border-radius: 9px;
-    border: 1px solid rgba(58, 168, 196, 0.35);
-    background-color: rgba(20, 27, 46, 0.9);
-    background-size: 72%;
-    background-position: center;
-    background-repeat: no-repeat;
-    image-rendering: pixelated;
+    border: 1px solid var(--vx-tint-border, rgba(58, 168, 196, 0.35));
+    background: var(--vx-tint-bg, rgba(20, 27, 46, 0.9));
     position: relative;
     cursor: pointer;
-    transition: all 0.12s;
+    transition: border-color 0.12s, box-shadow 0.12s, transform 0.12s;
+    overflow: hidden;
+}
+#voxel-hotbar .slot .vx-slot-inner {
+    position: absolute;
+    inset: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+}
+#voxel-hotbar .slot .vx-thumb-wrap {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    border-radius: 5px;
+}
+#voxel-hotbar .slot .vx-thumb-wrap .vx-thumb {
+    width: 88%;
+    height: 88%;
+}
+#voxel-hotbar .slot.dragging {
+    opacity: 0.55;
+    transform: scale(0.94);
 }
 #voxel-hotbar .slot.active {
     border-color: #6fe3ff;
@@ -2580,9 +2599,9 @@ body.mode-asteroid #lava-vignette {
     opacity: 1;
 }
 .vx-header {
-    display: grid;
-    grid-template-columns: auto 1fr auto;
+    display: flex;
     align-items: center;
+    justify-content: space-between;
     gap: 12px;
     padding-bottom: 10px;
     border-bottom: 1px dashed rgba(111, 227, 255, 0.25);
@@ -2653,14 +2672,28 @@ body.mode-asteroid #lava-vignette {
     width: 44px;
     height: 44px;
     border-radius: 8px;
-    border: 1px solid rgba(58, 168, 196, 0.35);
-    background-color: rgba(20, 27, 46, 0.9);
-    background-size: 72%;
-    background-position: center;
-    background-repeat: no-repeat;
-    image-rendering: pixelated;
+    border: 1px solid var(--vx-tint-border, rgba(58, 168, 196, 0.35));
+    background: var(--vx-tint-bg, rgba(20, 27, 46, 0.9));
     position: relative;
     cursor: pointer;
+    overflow: hidden;
+}
+.vx-strip .slot .vx-slot-inner {
+    position: absolute;
+    inset: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.vx-strip .slot .vx-thumb-wrap {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    border-radius: 4px;
+}
+.vx-strip .slot .vx-thumb-wrap .vx-thumb {
+    width: 88%;
+    height: 88%;
 }
 .vx-strip .slot.target {
     border-color: #ffb347;
@@ -2675,10 +2708,62 @@ body.mode-asteroid #lava-vignette {
     border-color: #6fe3ff;
     box-shadow: 0 0 10px rgba(111, 227, 255, 0.35);
 }
+.vx-inv-nav {
+    display: flex;
+    gap: 5px;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+    padding-bottom: 8px;
+    border-bottom: 1px dashed rgba(111, 227, 255, 0.18);
+}
+.vx-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 10px;
+    border-radius: 8px;
+    border: 1px solid rgba(111, 227, 255, 0.22);
+    background: rgba(0, 0, 0, 0.28);
+    color: #8ab4c4;
+    font-family: inherit;
+    font-size: 10px;
+    cursor: pointer;
+    transition: border-color 0.12s, background 0.12s, color 0.12s;
+}
+.vx-tab:hover {
+    border-color: rgba(111, 227, 255, 0.45);
+    color: #c5e8f4;
+}
+.vx-tab-on {
+    border-color: #6fe3ff;
+    background: rgba(111, 227, 255, 0.16);
+    color: #6fe3ff;
+}
+.vx-tab-icon { font-size: 12px; line-height: 1; }
+.vx-tab-label { letter-spacing: 0.04em; text-transform: uppercase; }
 .vx-body {
-    overflow: hidden;
-    max-height: min(52vh, 440px);
+    overflow-x: hidden;
+    overflow-y: auto;
+    max-height: min(46vh, 380px);
     padding-right: 4px;
+    overscroll-behavior: contain;
+}
+.vx-inv-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px dashed rgba(111, 227, 255, 0.15);
+}
+.vx-legend-chip {
+    font-size: 9px;
+    padding: 2px 7px;
+    border-radius: 999px;
+    border: 1px solid var(--vx-tint-border);
+    background: var(--vx-tint-bg);
+    color: #9eb8c4;
+    letter-spacing: 0.03em;
 }
 .vx-section { margin-bottom: 12px; }
 .vx-section h4 {
@@ -2699,57 +2784,85 @@ body.mode-asteroid #lava-vignette {
 }
 .vx-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
-    gap: 6px;
+    grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+    gap: 8px;
+}
+.vx-inv-empty {
+    grid-column: 1 / -1;
+    font-size: 10px;
+    color: #7e98a6;
+    padding: 8px 4px;
 }
 .vx-item {
-    border: 1px solid rgba(58, 168, 196, 0.3);
-    border-radius: 8px;
-    background: rgba(16, 22, 40, 0.9);
-    padding: 6px 4px 5px;
+    border: 1px solid var(--vx-tint-border, rgba(58, 168, 196, 0.3));
+    border-radius: 10px;
+    background: linear-gradient(180deg, var(--vx-tint-bg, rgba(16, 22, 40, 0.9)), rgba(8, 12, 22, 0.92));
+    padding: 7px 5px 6px;
     cursor: grab;
     text-align: center;
-    transition: border-color 0.12s, transform 0.12s;
+    transition: border-color 0.12s, transform 0.12s, box-shadow 0.12s;
 }
-.vx-item:hover { border-color: #6fe3ff; transform: translateY(-1px); }
+.vx-item:hover {
+    border-color: #6fe3ff;
+    transform: translateY(-2px);
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35);
+}
 .vx-item.vx-empty {
-    opacity: 0.38;
+    opacity: 0.42;
     cursor: default;
     border-style: dashed;
 }
-.vx-item.vx-empty:hover { transform: none; border-color: rgba(58, 168, 196, 0.3); }
-.vx-item .vx-thumb {
-    width: 40px;
-    height: 40px;
-    margin: 0 auto 4px;
+.vx-item.vx-empty:hover {
+    transform: none;
+    box-shadow: none;
+    border-color: var(--vx-tint-border, rgba(58, 168, 196, 0.3));
+}
+.vx-thumb-wrap {
+    width: 52px;
+    height: 52px;
+    margin: 0 auto 6px;
+    border-radius: 8px;
+    background: var(--vx-tint-bg);
+    border: 1px solid var(--vx-tint-border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+.vx-thumb-wrap .vx-thumb {
+    width: 78%;
+    height: 78%;
     background-size: contain;
     background-position: center;
     background-repeat: no-repeat;
     image-rendering: pixelated;
+    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.45));
 }
 .vx-item .vx-name {
     font-size: 9px;
-    color: #9eb8c4;
-    line-height: 1.2;
+    color: #d0e4ec;
+    line-height: 1.3;
     overflow: hidden;
     text-overflow: ellipsis;
-    white-space: nowrap;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
 }
-.vx-item .vx-cnt {
+.vx-item .vx-amt {
+    margin-top: 3px;
     font-size: 10px;
+    font-weight: bold;
     color: #6fe3ff;
-    margin-top: 2px;
+    line-height: 1;
 }
-.vx-item.vx-weapon .vx-weapon-icon {
-    font-size: 22px;
-    line-height: 40px;
-    text-align: center;
-    background: rgba(111, 227, 255, 0.08);
-    border-radius: 6px;
+.vx-item.vx-empty .vx-amt {
+    color: #5a7a88;
+    font-weight: normal;
 }
 .vx-item.vx-equipped {
     border-color: #ffb347;
-    box-shadow: 0 0 10px rgba(255, 179, 71, 0.35);
+    box-shadow: 0 0 12px rgba(255, 179, 71, 0.38);
 }
 .vx-item .vx-wpn-stat {
     font-size: 8px;
