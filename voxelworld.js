@@ -1170,6 +1170,10 @@
             return isPickaxe() || isMineLaser();
         }
 
+        function canScanBlocks() {
+            return isMiningTool() || weaponIndex < 0;
+        }
+
         function mineLaserInterval() {
             return (weaponDef && weaponDef.id === 'minecutter') ? MINECUTTER_FIRE_INTERVAL : LASER_FIRE_INTERVAL;
         }
@@ -2279,7 +2283,7 @@
         const _scanWorld = new THREE.Vector3();
 
         function isScanCompactActive(t) {
-            return !voxelPanelOpen() && isMiningTool() && focusAimBlend > 0.08
+            return !voxelPanelOpen() && canScanBlocks() && focusAimBlend > 0.08
                 && t && getBlock(t.x, t.y, t.z);
         }
 
@@ -5118,7 +5122,7 @@
             updateFormulaViewer(dt);
             const targetNameEl = document.getElementById('voxel-target-name');
             if (targetNameEl) {
-                const scanOpen = scanExpanded || (isMiningTool() && focusAimBlend > 0.35
+                const scanOpen = scanExpanded || (canScanBlocks() && focusAimBlend > 0.35
                     && t && getBlock(t.x, t.y, t.z));
                 if (scanOpen) {
                     targetNameEl.textContent = '';
