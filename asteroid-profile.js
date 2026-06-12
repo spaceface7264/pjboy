@@ -26,6 +26,39 @@
             title: 'Foundations',
             desc: 'Place a block from your quickbar (right-click).',
             goal: { type: 'place', count: 1 }
+        },
+        {
+            id: 'craft_lamp',
+            title: 'Camp light',
+            desc: 'Craft a Lamp at the refinery (Tab → Refinery) — your first base upgrade.',
+            goal: { type: 'craft', itemId: 34, count: 1 }
+        }
+    ];
+
+    const CRAFT_RECIPES = [
+        {
+            id: 'smelt_metal',
+            name: 'Smelt Metal',
+            desc: '2× Iron Ore → 1× Metal',
+            output: 7,
+            outputCount: 1,
+            inputs: [{ id: 23, count: 2 }]
+        },
+        {
+            id: 'smelt_glass',
+            name: 'Smelt Glass',
+            desc: '2× Sand → 1× Glass',
+            output: 32,
+            outputCount: 1,
+            inputs: [{ id: 4, count: 2 }]
+        },
+        {
+            id: 'wire_lamp',
+            name: 'Wire Lamp',
+            desc: '1× Metal + 1× Glass → 1× Lamp',
+            output: 34,
+            outputCount: 1,
+            inputs: [{ id: 7, count: 1 }, { id: 32, count: 1 }]
         }
     ];
 
@@ -50,7 +83,8 @@
             },
             journal: {
                 scanned: {},
-                places: 0
+                places: 0,
+                crafted: {}
             },
             inventory: {
                 backpack: {},
@@ -83,9 +117,10 @@
         p.asteroid.seed = (p.asteroid.seed | 0) || base.asteroid.seed;
         p.asteroid.edits = Array.isArray(p.asteroid.edits) ? p.asteroid.edits : [];
         p.asteroid.claimName = String(p.asteroid.claimName || '').slice(0, 24);
-        p.journal = Object.assign({ scanned: {}, places: 0 }, p.journal || {});
+        p.journal = Object.assign({ scanned: {}, places: 0, crafted: {} }, p.journal || {});
         p.journal.scanned = p.journal.scanned && typeof p.journal.scanned === 'object' ? p.journal.scanned : {};
         p.journal.places = p.journal.places | 0;
+        p.journal.crafted = p.journal.crafted && typeof p.journal.crafted === 'object' ? p.journal.crafted : {};
         p.inventory = Object.assign({}, base.inventory, p.inventory || {});
         p.inventory.backpack = p.inventory.backpack && typeof p.inventory.backpack === 'object' ? p.inventory.backpack : {};
         p.inventory.hotbar = Array.isArray(p.inventory.hotbar) ? p.inventory.hotbar.slice(0, 9) : Array(9).fill(null);
@@ -185,6 +220,9 @@
         } else if (g.type === 'place') {
             current = profile.journal.places | 0;
             label = `Blocks placed: ${current} / ${g.count}`;
+        } else if (g.type === 'craft') {
+            current = (profile.journal.crafted && profile.journal.crafted[String(g.itemId | 0)]) | 0;
+            label = `Crafted: ${current} / ${g.count}`;
         }
         return { done: current >= g.count, current, target: g.count, label, mission: m };
     }
@@ -218,6 +256,16 @@
         return { completed };
     }
 
+    function recordCraft(profile, itemId, count) {
+        const id = String(itemId | 0);
+        const n = Math.max(1, count | 0);
+        if (!profile.journal.crafted || typeof profile.journal.crafted !== 'object') profile.journal.crafted = {};
+        profile.journal.crafted[id] = ((profile.journal.crafted[id] | 0) + n);
+        const completed = advanceMissionIfDone(profile);
+        save(profile);
+        return { completed };
+    }
+
     function setAsteroidSeed(profile, seed) {
         profile.asteroid.seed = seed | 0;
         profile.asteroid.edits = [];
@@ -243,9 +291,33 @@
         return { seedHex, edits, cataloged, name };
     }
 
+    function recipeById(id) {
+        return CRAFT_RECIPES.find((r) => r.id === id) || null;
+    }
+
+    function countOf(counts, id) {
+        if (!counts) return 0;
+        const k = id | 0;
+        return ((counts[k] != null ? counts[k] : counts[String(k)]) | 0);
+    }
+
+    // Pure check: can `recipe` be crafted given a {itemId: count} materials map?
+    function craftAvailability(recipe, counts) {
+        if (!recipe || !Array.isArray(recipe.inputs)) return { ok: false, missing: [] };
+        const missing = [];
+        for (const inp of recipe.inputs) {
+            const have = countOf(counts, inp.id);
+            if (have < inp.count) missing.push({ id: inp.id, need: inp.count, have });
+        }
+        return { ok: missing.length === 0, missing };
+    }
+
     window.AsteroidProfile = {
         PROFILE_KEY,
         MISSIONS,
+        CRAFT_RECIPES,
+        recipeById,
+        craftAvailability,
         defaultProfile,
         load,
         save,
@@ -258,6 +330,7 @@
         journalUniqueCount,
         recordScan,
         recordPlace,
+        recordCraft,
         setAsteroidSeed,
         upsertBlockEdit,
         claimSummary,

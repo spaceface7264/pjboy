@@ -3219,11 +3219,11 @@
             const AP = getProfileApi();
             if (!el || !AP) return;
             const prog = AP.missionProgress(AP.load());
+            el.hidden = false;
             if (!prog.mission) {
-                el.hidden = true;
+                el.innerHTML = '<b>✓ Surveys complete</b> — all objectives done';
                 return;
             }
-            el.hidden = false;
             el.innerHTML = '<b>' + prog.mission.title + '</b> — ' + prog.label;
         }
 
@@ -4727,6 +4727,7 @@
         };
         const DRAWER_TABS = [
             { id: 'Weapons', icon: '⚔️', label: 'Weapons' },
+            { id: 'Refinery', icon: '⚙️', label: 'Refinery' },
             ...INV_CATEGORIES.map((cat) => ({
                 id: cat,
                 icon: CAT_ICONS[cat] || '▪',
@@ -5073,6 +5074,7 @@
 
         function renderDrawerTabBody(body, ownedOnly) {
             body.innerHTML = '';
+            if (drawerTab === 'Refinery') { renderRefineryBody(body); return; }
             const grid = document.createElement('div');
             grid.className = 'vx-grid';
             if (drawerTab === 'Weapons') {
@@ -5102,6 +5104,77 @@
                 }
             }
             body.appendChild(grid);
+        }
+        function refineryMatName(id) {
+            const b = blockById(id);
+            return b ? b.name : ('#' + (id | 0));
+        }
+        function craftRecipe(recipe) {
+            const AP = getProfileApi();
+            if (!AP || !recipe) return;
+            const avail = AP.craftAvailability(recipe, backpack);
+            if (!avail.ok) {
+                if (g.showMessage) g.showMessage('Not enough materials for ' + recipe.name, 2000);
+                return;
+            }
+            for (const inp of recipe.inputs) spendFromInventory(inp.id, inp.count);
+            const outCount = recipe.outputCount || 1;
+            addToInventory(recipe.output, outCount);   // also re-renders the open drawer
+            const { completed } = AP.recordCraft(AP.load(), recipe.output, outCount);
+            updateJournalHud();
+            const outName = refineryMatName(recipe.output);
+            if (g.showMessage) g.showMessage('Crafted ' + outCount + '× ' + outName, 2200);
+            if (completed && g.showMessage) g.showMessage('Survey complete: ' + completed.title, 2800);
+        }
+        function renderRefineryBody(body) {
+            const AP = getProfileApi();
+            const recipes = AP && Array.isArray(AP.CRAFT_RECIPES) ? AP.CRAFT_RECIPES : [];
+            if (!recipes.length) {
+                const empty = document.createElement('div');
+                empty.className = 'vx-inv-empty';
+                empty.textContent = 'No recipes available.';
+                body.appendChild(empty);
+                return;
+            }
+            const intro = document.createElement('div');
+            intro.className = 'vx-inv-empty';
+            intro.style.cssText = 'text-align:left;opacity:0.8;margin-bottom:8px;';
+            intro.textContent = 'Smelt and assemble materials into base upgrades.';
+            body.appendChild(intro);
+            recipes.forEach((r) => {
+                const avail = AP.craftAvailability(r, backpack);
+                const card = document.createElement('div');
+                card.style.cssText = 'display:flex;align-items:center;gap:12px;padding:10px 12px;margin-bottom:8px;border-radius:10px;background:rgba(36,100,118,0.30);border:1px solid rgba(90,200,230,0.35);';
+                const img = document.createElement('img');
+                img.src = thumbUrl(r.output);
+                img.width = img.height = 40;
+                img.style.cssText = 'image-rendering:pixelated;border-radius:6px;flex:0 0 auto;';
+                card.appendChild(img);
+                const info = document.createElement('div');
+                info.style.cssText = 'flex:1 1 auto;min-width:0;';
+                const title = document.createElement('div');
+                title.style.cssText = 'font-weight:700;color:#dff6ff;';
+                title.textContent = r.name + ((r.outputCount || 1) > 1 ? ' ×' + r.outputCount : '');
+                info.appendChild(title);
+                const cost = document.createElement('div');
+                cost.style.cssText = 'font-size:12px;margin-top:3px;';
+                cost.innerHTML = r.inputs.map((inp) => {
+                    const have = getBackpackCount(inp.id);
+                    const col = have >= inp.count ? '#9be89b' : '#ff9b9b';
+                    return '<span style="color:' + col + '">' + refineryMatName(inp.id) + ' ' + have + '/' + inp.count + '</span>';
+                }).join('<span style="opacity:0.5"> · </span>');
+                info.appendChild(cost);
+                card.appendChild(info);
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'vx-btn' + (avail.ok ? ' vx-btn-on' : '');
+                btn.textContent = 'Craft';
+                btn.disabled = !avail.ok;
+                btn.style.cssText = 'flex:0 0 auto;' + (avail.ok ? '' : 'opacity:0.45;cursor:not-allowed;');
+                if (avail.ok) btn.addEventListener('click', () => craftRecipe(r));
+                card.appendChild(btn);
+                body.appendChild(card);
+            });
         }
         function getBackpackCount(id) {
             return backpack[id] || 0;
