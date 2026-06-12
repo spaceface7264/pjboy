@@ -1027,6 +1027,91 @@ function buildCharacter(params, opts){
                    cur: {}, curCharY: 0, weaponEquipped: weaponEquipped && params.weapon >= 0 } };
 }
 
+// ---------- relaxed pose (semantic knobs → mirrored shoulder euler) ----------
+const RELAX_TUNE_KEY = 'pjboy.voxelRelaxTune.v1';
+const RELAX_POSE_DEFAULTS = {
+  armSpread: 0,      // shoulder roll — arms away from torso
+  armHang: 0,        // shoulder pitch — + hangs at sides; − folds behind back on mirrored rig
+  elbowBend: 0.08,   // forearm bend (always applied as -abs on X)
+  elbowFlare: 0,     // forearm Z flare — pushes hands away from body
+  sway: 0.02,
+  swayHz: 1.6,
+  headSway: 0.08,
+  rootBob: 0.012
+};
+const RELAX_POSE_SPECS = [
+  { key: 'armSpread', label: 'Arm spread', min: 0, max: 0.55, step: 0.01,
+    hint: 'Shoulders roll out — arms farther from torso.' },
+  { key: 'armHang', label: 'Arm hang', min: -0.35, max: 0.35, step: 0.01,
+    hint: 'Shoulder pitch. Keep near 0 for arms beside body; negative folds behind back.' },
+  { key: 'elbowBend', label: 'Elbow bend', min: 0, max: 0.45, step: 0.01,
+    hint: 'Forearm bend amount.' },
+  { key: 'elbowFlare', label: 'Elbow flare', min: -0.5, max: 0.5, step: 0.01,
+    hint: 'Forearm twist — pushes hands away from (+) or into (−) the body.' },
+  { key: 'sway', label: 'Arm sway', min: 0, max: 0.08, step: 0.005,
+    hint: 'Idle shoulder sway amplitude.' },
+  { key: 'headSway', label: 'Head sway', min: 0, max: 0.25, step: 0.01, hint: 'Head turn sway.' },
+  { key: 'rootBob', label: 'Body bob', min: 0, max: 0.04, step: 0.002, hint: 'Vertical idle bob.' }
+];
+
+let _relaxTune = null;
+
+function defaultRelaxPoseTune() {
+  return Object.assign({}, RELAX_POSE_DEFAULTS);
+}
+
+function clampRelaxTune(t) {
+  const out = defaultRelaxPoseTune();
+  RELAX_POSE_SPECS.forEach((spec) => {
+    const v = Number(t[spec.key]);
+    if (!Number.isFinite(v)) return;
+    out[spec.key] = THREE.MathUtils.clamp(v, spec.min, spec.max);
+  });
+  if (Number.isFinite(t.swayHz)) out.swayHz = THREE.MathUtils.clamp(t.swayHz, 0.5, 4);
+  return out;
+}
+
+function loadRelaxPoseTune() {
+  try {
+    const raw = localStorage.getItem(RELAX_TUNE_KEY);
+    if (!raw) return defaultRelaxPoseTune();
+    return clampRelaxTune(Object.assign(defaultRelaxPoseTune(), JSON.parse(raw)));
+  } catch (_) {
+    return defaultRelaxPoseTune();
+  }
+}
+
+function saveRelaxPoseTune(tune) {
+  _relaxTune = clampRelaxTune(tune || _relaxTune || defaultRelaxPoseTune());
+  try {
+    localStorage.setItem(RELAX_TUNE_KEY, JSON.stringify(_relaxTune));
+  } catch (_) { /* ignore */ }
+  return _relaxTune;
+}
+
+function getRelaxPoseTune() {
+  if (!_relaxTune) _relaxTune = loadRelaxPoseTune();
+  return _relaxTune;
+}
+
+function setRelaxPoseTune(patch, persist) {
+  _relaxTune = clampRelaxTune(Object.assign({}, getRelaxPoseTune(), patch || {}));
+  if (persist) saveRelaxPoseTune(_relaxTune);
+  return _relaxTune;
+}
+
+// Maps semantic arm knobs to mirrored shoulder euler channels (shLx/shLz, shRx/shRz).
+function applyRelaxedArms(o, t, tune) {
+  tune = tune || getRelaxPoseTune();
+  const s = Math.sin(t * (tune.swayHz || 1.6)) * (tune.sway || 0);
+  o.shLz = -(tune.armSpread || 0);
+  o.shRz = tune.armSpread || 0;
+  o.shLx = (tune.armHang || 0) + s;
+  o.shRx = -(tune.armHang || 0) - s;
+  o.elL = tune.elbowBend || 0;
+  o.elR = tune.elbowBend || 0;
+}
+
 const POSES = {
   idle(t,o){
     o.rootY = Math.sin(t*2)*.02;
@@ -1035,6 +1120,12 @@ const POSES = {
     o.shLx = Math.sin(t*2)*.03; o.shRx = -Math.sin(t*2)*.03;
     o.elL = .08; o.elR = .08;
     if(_poseWeaponEquipped && charIsRifle(_poseCh)) o.headRY = Math.sin(t*.6)*.08;
+  },
+  relaxed(t,o){
+    const tune = getRelaxPoseTune();
+    o.rootY = Math.sin(t * (tune.swayHz || 1.6)) * (tune.rootBob || 0);
+    o.headRY = Math.sin(t * 0.45) * (tune.headSway || 0);
+    applyRelaxedArms(o, t, tune);
   },
   walk(t,o){
     const f=t*6, s=Math.sin(f);
@@ -1428,6 +1519,14 @@ function update(char, state, dt, opts) {
   j.neck.rotation.x = cur.headRX; j.neck.rotation.y = cur.headRY;
   j.shL.rotation.x = cur.shLx; j.shL.rotation.z = cur.shLz; j.elL.rotation.x = -Math.abs(cur.elL);
   j.shR.rotation.x = cur.shRx; j.shR.rotation.z = cur.shRz; j.elR.rotation.x = -Math.abs(cur.elR);
+  if (anim.state === 'relaxed') {
+    const flare = getRelaxPoseTune().elbowFlare || 0;
+    j.elL.rotation.z = flare;
+    j.elR.rotation.z = -flare;
+  } else {
+    j.elL.rotation.z = 0;
+    j.elR.rotation.z = 0;
+  }
   j.hipL.rotation.x = cur.hipLx; j.hipL.rotation.z = cur.hipLz; j.kneeL.rotation.x = Math.abs(cur.kneeL);
   j.hipR.rotation.x = cur.hipRx; j.hipR.rotation.z = cur.hipRz; j.kneeR.rotation.x = Math.abs(cur.kneeR);
 
@@ -1450,7 +1549,7 @@ function update(char, state, dt, opts) {
   }
 
   const useSupportIK = char.twoHanded || (char.weaponDef && char.weaponDef.id === 'sword');
-  const wantIK = weaponEquipped && useSupportIK && anim.state !== 'swim' && anim.state !== 'ride'
+  const wantIK = !opts.previewRelaxed && weaponEquipped && useSupportIK && anim.state !== 'swim' && anim.state !== 'ride'
     && (attackT < 0 || charIsRanged(char));
   anim.ikW += ((wantIK ? 1 : 0) - anim.ikW) * (1 - Math.exp(-8 * dt));
   if (anim.ikW > .01) {
@@ -1494,7 +1593,9 @@ window.VoxelCharacter = {
   normalizeParams, loadSaved, saveParams, build, update, dispose, scaleToHeight,
   buildWeapon, mirrorWeaponForTpGrip, tpWeaponGripRest, addOutlines,
   SWORD_SWING_DURATION, SWORD_SWING_COUNT: SWORD_SWING_VARIANTS.length, applySwordAttackPose,
-  LASER_RIFLE_DURATION, LASER_RIFLE_COUNT: LASER_RIFLE_VARIANTS.length, applyLaserRifleRecoilPose
+  LASER_RIFLE_DURATION, LASER_RIFLE_COUNT: LASER_RIFLE_VARIANTS.length, applyLaserRifleRecoilPose,
+  RELAX_TUNE_KEY, RELAX_POSE_DEFAULTS, RELAX_POSE_SPECS,
+  loadRelaxPoseTune, saveRelaxPoseTune, getRelaxPoseTune, setRelaxPoseTune, applyRelaxedArms
 };
 
 

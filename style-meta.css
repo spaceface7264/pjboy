@@ -470,6 +470,76 @@ body.meta-settings-open #settings-modal.settings-over-meta {
     min-width: 0;
 }
 
+.meta-char-preview-col {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+    min-width: 0;
+}
+
+.meta-char-pose-tune-toggle {
+    align-self: flex-start;
+    font-family: 'Courier New', monospace;
+    font-size: 0.72rem;
+    color: rgba(255, 179, 71, 0.85);
+    background: transparent;
+    border: none;
+    padding: 0.15rem 0;
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+
+.meta-char-pose-tune {
+    text-align: left;
+    padding: 0.55rem 0.65rem;
+    background: rgba(0, 0, 0, 0.28);
+    border: 1px solid rgba(255, 179, 71, 0.2);
+    border-radius: 4px;
+    max-height: 220px;
+    overflow-y: auto;
+}
+
+.meta-char-pose-tune-hint {
+    margin: 0 0 0.55rem;
+    font-size: 0.68rem;
+    line-height: 1.35;
+    opacity: 0.72;
+}
+
+.meta-char-pose-tune-row {
+    display: grid;
+    grid-template-columns: 4.8rem 1fr 2.6rem;
+    gap: 0.35rem 0.5rem;
+    align-items: center;
+    margin-bottom: 0.4rem;
+    font-size: 0.72rem;
+}
+
+.meta-char-pose-tune-row label {
+    opacity: 0.8;
+}
+
+.meta-char-pose-tune-row input[type="range"] {
+    width: 100%;
+    accent-color: #ffb347;
+}
+
+.meta-char-pose-tune-val {
+    font-family: 'Courier New', monospace;
+    font-size: 0.68rem;
+    opacity: 0.85;
+    text-align: right;
+}
+
+.meta-char-pose-tune-actions {
+    display: flex;
+    gap: 0.45rem;
+    margin-top: 0.35rem;
+    padding-top: 0.35rem;
+    border-top: 1px solid rgba(255, 179, 71, 0.15);
+}
+
 @media (max-width: 560px) {
     .meta-char-layout {
         grid-template-columns: 1fr;

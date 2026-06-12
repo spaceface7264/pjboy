@@ -11,7 +11,7 @@
     <meta http-equiv="Expires" content="0">
     <title>3D Second-Person Game - 128-bit Style</title>
     <link rel="stylesheet" href="style.css?v=48">
-    <link rel="stylesheet" href="style-meta.css?v=11">
+    <link rel="stylesheet" href="style-meta.css?v=12">
 </head>
 <body>
     <div id="gameContainer">
@@ -298,7 +298,11 @@
                 <h2 class="meta-heading">Your explorer</h2>
                 <p class="meta-tagline">Class and look for Asteroid expeditions</p>
                 <div class="meta-char-layout">
-                    <div id="meta-char-preview" class="meta-char-preview" aria-label="Character preview"></div>
+                    <div class="meta-char-preview-col">
+                        <div id="meta-char-preview" class="meta-char-preview" aria-label="Character preview"></div>
+                        <button type="button" class="meta-char-pose-tune-toggle" id="meta-char-pose-tune-toggle" aria-expanded="false">Pose tune ▸</button>
+                        <div id="meta-char-pose-tune" class="meta-char-pose-tune" hidden></div>
+                    </div>
                     <div class="meta-char-controls">
                         <div id="meta-char-class-grid" class="meta-char-class-grid"></div>
                         <p id="meta-char-class-desc" class="meta-char-desc"></p>
@@ -525,12 +529,12 @@
     <script src="worldstream.js?v=51"></script>
     <script src="planetgen.js?v=12"></script>
     <script src="planet.js?v=173"></script>
-    <script src="voxel-character.js?v=27"></script>
+    <script src="voxel-character.js?v=35"></script>
     <script src="meta-char-preview.js?v=3"></script>
     <script src="asteroid-profile.js?v=1"></script>
     <script src="voxelworld.js?v=108"></script>
     <script src="modes.js?v=9"></script>
     <script src="game.js?v=152"></script>
-    <script src="game-modes-impl.js?v=34"></script>
+    <script src="game-modes-impl.js?v=38"></script>
 </body>
 </html>

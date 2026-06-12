@@ -70,6 +70,123 @@
         });
     }
 
+    const META_CHAR_PREVIEW_ANIM = { weaponEquipped: false, previewRelaxed: true };
+
+    function refreshMetaCharPreviewPose(game) {
+        if (!game || !game._metaCharPreviewHost || !game._metaCharPreviewHost.char) return;
+        const VC = window.VoxelCharacter;
+        if (!VC) return;
+        const ch = game._metaCharPreviewHost.char;
+        if (ch.anim) ch.anim.attackT = -1;
+        primeMetaCharPreviewPose(game._metaCharPreviewHost, ch);
+    }
+
+    function applyMetaCharRelaxTune(patch, persist) {
+        const VC = window.VoxelCharacter;
+        if (!VC) return null;
+        const tune = VC.setRelaxPoseTune(patch, !!persist);
+        if (window.__pjMetaGame) refreshMetaCharPreviewPose(window.__pjMetaGame);
+        return tune;
+    }
+
+    function buildMetaCharPoseTuneUI(game) {
+        const panel = document.getElementById('meta-char-pose-tune');
+        const toggle = document.getElementById('meta-char-pose-tune-toggle');
+        const VC = window.VoxelCharacter;
+        if (!panel || !VC || panel.dataset.built === '1') return;
+
+        panel.dataset.built = '1';
+        const hint = document.createElement('p');
+        hint.className = 'meta-char-pose-tune-hint';
+        hint.textContent = 'Semantic arm knobs — saved on this device. Negative arm hang folds arms behind the back on this rig.';
+        panel.appendChild(hint);
+
+        VC.RELAX_POSE_SPECS.forEach((spec) => {
+            const row = document.createElement('div');
+            row.className = 'meta-char-pose-tune-row';
+            const label = document.createElement('label');
+            label.htmlFor = 'meta-relax-' + spec.key;
+            label.textContent = spec.label;
+            const input = document.createElement('input');
+            input.type = 'range';
+            input.id = 'meta-relax-' + spec.key;
+            input.min = String(spec.min);
+            input.max = String(spec.max);
+            input.step = String(spec.step);
+            input.dataset.relaxKey = spec.key;
+            const val = document.createElement('span');
+            val.className = 'meta-char-pose-tune-val';
+            val.dataset.relaxVal = spec.key;
+            input.title = spec.hint || '';
+            input.addEventListener('input', () => {
+                val.textContent = Number(input.value).toFixed(3);
+                applyMetaCharRelaxTune({ [spec.key]: parseFloat(input.value) }, false);
+            });
+            input.addEventListener('change', () => {
+                game.audio && game.audio.play('uiClick');
+                applyMetaCharRelaxTune({ [spec.key]: parseFloat(input.value) }, true);
+            });
+            row.append(label, input, val);
+            panel.appendChild(row);
+        });
+
+        const actions = document.createElement('div');
+        actions.className = 'meta-char-pose-tune-actions';
+        const resetBtn = document.createElement('button');
+        resetBtn.type = 'button';
+        resetBtn.className = 'meta-btn meta-btn-ghost meta-btn-small';
+        resetBtn.textContent = 'Reset defaults';
+        resetBtn.addEventListener('click', () => {
+            game.audio && game.audio.play('uiClick');
+            const tune = VC.setRelaxPoseTune(Object.assign({}, VC.RELAX_POSE_DEFAULTS), true);
+            syncMetaCharPoseTuneInputs(tune);
+            refreshMetaCharPreviewPose(game);
+        });
+        const saveBtn = document.createElement('button');
+        saveBtn.type = 'button';
+        saveBtn.className = 'meta-btn meta-btn-ghost meta-btn-small';
+        saveBtn.textContent = 'Save';
+        saveBtn.addEventListener('click', () => {
+            game.audio && game.audio.play('uiClick');
+            VC.saveRelaxPoseTune();
+        });
+        actions.append(resetBtn, saveBtn);
+        panel.appendChild(actions);
+
+        if (toggle && !toggle.dataset.bound) {
+            toggle.dataset.bound = '1';
+            toggle.addEventListener('click', () => {
+                game.audio && game.audio.play('uiClick');
+                const open = panel.hidden;
+                panel.hidden = !open;
+                toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+                toggle.textContent = open ? 'Pose tune ▾' : 'Pose tune ▸';
+            });
+        }
+
+        syncMetaCharPoseTuneInputs(VC.getRelaxPoseTune());
+    }
+
+    function syncMetaCharPoseTuneInputs(tune) {
+        if (!tune) return;
+        document.querySelectorAll('[data-relax-key]').forEach((input) => {
+            const key = input.dataset.relaxKey;
+            if (!key || tune[key] == null) return;
+            input.value = String(tune[key]);
+            const val = document.querySelector(`[data-relax-val="${key}"]`);
+            if (val) val.textContent = Number(tune[key]).toFixed(3);
+        });
+    }
+
+    function primeMetaCharPreviewPose(host, char) {
+        const VC = window.VoxelCharacter;
+        if (!VC || !char) return;
+        if (char.anim) char.anim.attackT = -1;
+        for (let i = 0; i < 12; i++) {
+            VC.update(char, 'relaxed', 0.05, META_CHAR_PREVIEW_ANIM);
+        }
+    }
+
     function createMetaCharPreviewHost() {
         return {
             scene: null,
@@ -135,6 +252,7 @@
                 this.char.group.rotation.y = Math.PI * 0.12;
                 this.scene.add(this.char.group);
                 this.spin = 0;
+                primeMetaCharPreviewPose(this, this.char);
                 this.resize();
                 this.render(0);
             },
@@ -145,7 +263,7 @@
                 if (dt > 0 && this.char && this.char.group && VC) {
                     this.spin += dt * 0.28;
                     this.char.group.rotation.y = Math.PI * 0.12 + Math.sin(this.spin) * 0.35;
-                    VC.update(this.char, 'idle', dt, { weaponEquipped: this.char.params.weapon >= 0 });
+                    VC.update(this.char, 'relaxed', dt, META_CHAR_PREVIEW_ANIM);
                 }
                 this.renderer.render(this.scene, this.camera);
             },
@@ -173,6 +291,7 @@
 
     Object.assign(Game3D.prototype, {
         _initMetaState() {
+            window.__pjMetaGame = this;
             this.appPhase = 'boot';
             this._playerProfile = null;
             this._charDraft = null;
@@ -431,6 +550,9 @@
                 return false;
             }
             this._buildMetaCharacterUI();
+            buildMetaCharPoseTuneUI(this);
+            VC.loadRelaxPoseTune();
+            syncMetaCharPoseTuneInputs(VC.getRelaxPoseTune());
             this._metaCharUiReady = true;
             return true;
         },
