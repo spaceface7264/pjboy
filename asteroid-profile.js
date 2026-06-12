@@ -124,7 +124,8 @@
             journal: {
                 scanned: {},
                 places: 0,
-                crafted: {}
+                crafted: {},
+                creatures: {}
             },
             inventory: {
                 backpack: {},
@@ -154,10 +155,11 @@
         p.character = normalizeCharacter(p.character);
         p.characterSetupDone = !!p.characterSetupDone;
         p.system = normalizeSystem(p.system);
-        p.journal = Object.assign({ scanned: {}, places: 0, crafted: {} }, p.journal || {});
+        p.journal = Object.assign({ scanned: {}, places: 0, crafted: {}, creatures: {} }, p.journal || {});
         p.journal.scanned = p.journal.scanned && typeof p.journal.scanned === 'object' ? p.journal.scanned : {};
         p.journal.places = p.journal.places | 0;
         p.journal.crafted = p.journal.crafted && typeof p.journal.crafted === 'object' ? p.journal.crafted : {};
+        p.journal.creatures = p.journal.creatures && typeof p.journal.creatures === 'object' ? p.journal.creatures : {};
         p.inventory = Object.assign({}, base.inventory, p.inventory || {});
         p.inventory.backpack = p.inventory.backpack && typeof p.inventory.backpack === 'object' ? p.inventory.backpack : {};
         p.inventory.hotbar = Array.isArray(p.inventory.hotbar) ? p.inventory.hotbar.slice(0, 9) : Array(9).fill(null);
@@ -317,6 +319,15 @@
         return { completed };
     }
 
+    function recordCreature(profile, creatureId) {
+        if (!profile.journal.creatures || typeof profile.journal.creatures !== 'object') profile.journal.creatures = {};
+        const id = String(creatureId);
+        const isNew = !profile.journal.creatures[id];
+        profile.journal.creatures[id] = (profile.journal.creatures[id] | 0) + 1;
+        save(profile);
+        return { isNew };
+    }
+
     function recordCraft(profile, itemId, count) {
         const id = String(itemId | 0);
         const n = Math.max(1, count | 0);
@@ -460,6 +471,7 @@
         recordScan,
         recordPlace,
         recordCraft,
+        recordCreature,
         upsertBlockEdit,
         claimSummary,
         syncLegacyKeys,

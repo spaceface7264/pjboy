@@ -2881,7 +2881,9 @@
             'Crystal': 'Krystal', 'Emerald Crystal': 'Smaragdkrystal', 'Void Crystal': 'Tomrumskrystal',
             'Metal': 'Metal', 'Alloy': 'Legering', 'Glass': 'Glas', 'Circuit': 'Kredsløb',
             'Lamp': 'Lampe', 'Hull': 'Skrog', 'Energy': 'Energi',
-            'Lava': 'Lava', 'Acid': 'Syre', 'Water': 'Vand'
+            'Lava': 'Lava', 'Acid': 'Syre', 'Water': 'Vand',
+            'Meadowhopper': 'Engehopper', 'Woolback': 'Uldryg', 'Dunefin': 'Klitøgle',
+            'Frostfox': 'Frostræv', 'Sporeling': 'Sporeyngel'
         };
 
         function fillScanPanelContent(b, id, cracking, expanded) {
@@ -3569,6 +3571,22 @@
                 hideScanChrome();
                 return;
             }
+
+            // Creatures take priority when you're aiming at one while scanning.
+            const cre = (focusAimBlend > 0.08 || scanExpanded) ? pickCreature() : null;
+            if (cre) {
+                panel.hidden = false;
+                panel.style.opacity = String(scanExpanded ? 1 : (0.4 + focusAimBlend * 0.6));
+                if (_scanCreatureId !== cre.sp.id) {
+                    _scanCreatureId = cre.sp.id;
+                    _scanBlockId = -1;
+                    fillCreatureScanContent(cre.sp, scanExpanded);
+                    recordCreatureScan(cre.sp);
+                }
+                if (scanExpanded) layoutScanExpanded();
+                return;
+            }
+            _scanCreatureId = null;
 
             const compactActive = isScanCompactActive(t);
             if (compactActive) {
@@ -5041,7 +5059,7 @@
         const INV_CATEGORIES = ['Terrain', 'Life', 'Resources', 'Crystals', 'Crafted', 'Hazards'];
         const CAT_ICONS = {
             Terrain: '🪨', Life: '🌿', Resources: '⛏️',
-            Crystals: '💎', Crafted: '🔧', Hazards: '☢️'
+            Crystals: '💎', Crafted: '🔧', Hazards: '☢️', Creature: '🐾'
         };
         const DRAWER_TABS = [
             { id: 'Weapons', icon: '⚔️', label: 'Weapons' },
@@ -5956,6 +5974,7 @@
             loadActivePlanet();
             loadProfileEdits();
             resetStreaming();
+            clearCritters();
             spawnPlayerAtCenter();
             streamInit();
             flushProfileState();
@@ -6003,6 +6022,205 @@
             planets: () => (window.AsteroidProfile ? window.AsteroidProfile.PLANETS : []),
             current: () => activePlanetId
         };
+
+        /* ============================ CREATURES ============================
+           Wandering wildlife: procedural box critters that spawn on valid
+           surface around the player, wander (avoiding water & cliffs), and
+           despawn as you stream away. A few species are shy and flee. Each is
+           scannable for a bilingual name + a real science fact (educational).
+           Creatures are dynamic/ephemeral — NOT part of the deterministic
+           terrain. They are not minable; only the scanner interacts with them. */
+        const CREATURES = [
+          { id:'meadowhopper', name:'Meadowhopper', cat:'Creature', on:[1,15], shy:true,  scale:0.8,
+            body:0x9b6b43, belly:0xd8c0a0, scanOn:1,
+            desc:'A skittish long-eared grazer of open meadows. Bolts if you step too close.',
+            sci:{ formula:'herbivore', kingdom:'Animal', fact:'Big ears do two jobs: catch faint sounds, and shed heat through their blood vessels to stay cool.' } },
+          { id:'woolback', name:'Woolback', cat:'Creature', on:[1,20], shy:false, scale:1.05,
+            body:0xe6dcc0, belly:0xcabfa0, scanOn:1,
+            desc:'A calm, woolly four-legged plodder. Lets you walk right up to it.',
+            sci:{ formula:'herbivore', kingdom:'Animal', fact:'Wool is made of keratin — the same protein as your hair and fingernails — and traps air to keep heat in.' } },
+          { id:'dunefin', name:'Dunefin', cat:'Creature', on:[4], shy:false, scale:0.7,
+            body:0xc89a5a, belly:0xe2cca0, scanOn:4,
+            desc:'A flat, sun-loving desert lizard. Basks on warm sand.',
+            sci:{ formula:'reptile', kingdom:'Animal', fact:'Reptiles are cold-blooded: they bask in sunlight to warm up because their bodies make almost no heat of their own.' } },
+          { id:'frostfox', name:'Frostfox', cat:'Creature', on:[20,8], shy:true, scale:0.8,
+            body:0xeef3fa, belly:0xffffff, scanOn:20,
+            desc:'A pale, shy hunter of the snow. Vanishes when startled.',
+            sci:{ formula:'omnivore', kingdom:'Animal', fact:'White winter fur is camouflage in snow — and its hollow hairs trap air like a tiny duvet.' } },
+          { id:'sporeling', name:'Sporeling', cat:'Creature', on:[13,36,12], shy:false, scale:0.7,
+            body:0xc46ae8, belly:0xf0c2ff, glow:true, scanOn:36,
+            desc:'A gentle glowing critter of the fungal worlds. Pulses with soft light.',
+            sci:{ formula:'alien biolum.', kingdom:'Xenofauna', fact:'Glowing without heat is real: bioluminescence mixes a chemical (luciferin) with oxygen to make cold light.' } }
+        ];
+        const _creatureById = {}; CREATURES.forEach(c => _creatureById[c.id] = c);
+
+        const CRIT_CAP = 14;             // max active critters
+        const CRIT_VIEW = 30;            // spawn within this many blocks of the player
+        const CRIT_DESPAWN = 48;         // despawn beyond this
+        const CRIT_SPEED = 2.2;          // base walk speed
+        const CRIT_FLEE = 7;             // shy critters flee inside this radius
+        const critters = [];
+        const creatureGroups = [];       // groups for the scan raycast
+        let _critTimer = 0;
+
+        function _critMat(hex){ return new THREE.MeshLambertMaterial({ color: hex }); }
+        function _pbox(w,h,d,mat,x,y,z){ const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),mat); m.position.set(x,y,z); return m; }
+
+        // Build a simple procedural box creature; returns {group, legs[]} for animation.
+        function buildCreatureMesh(sp){
+          const g0 = new THREE.Group();
+          const bodyMat = _critMat(sp.body), bellyMat = _critMat(sp.belly||sp.body);
+          const body = _pbox(0.7,0.5,1.0, bodyMat, 0, 0.55, 0);
+          const belly = _pbox(0.62,0.18,0.92, bellyMat, 0, 0.4, 0);
+          const head = _pbox(0.5,0.46,0.46, bodyMat, 0, 0.7, 0.62);
+          const snout = _pbox(0.26,0.22,0.2, bellyMat, 0, 0.62, 0.86);
+          g0.add(body, belly, head, snout);
+          if(sp.id==='meadowhopper' || sp.id==='frostfox'){             // ears
+            g0.add(_pbox(0.1,0.34,0.08, bodyMat, -0.14,1.02,0.6));
+            g0.add(_pbox(0.1,0.34,0.08, bodyMat,  0.14,1.02,0.6));
+          }
+          g0.add(_pbox(0.16,0.16,0.4, bodyMat, 0,0.6,-0.62));            // tail stub
+          const legs = [];
+          const legMat = _critMat(sp.belly||sp.body);
+          [[-0.24,0.42],[0.24,0.42],[-0.24,-0.42],[0.24,-0.42]].forEach(([lx,lz])=>{
+            const leg = _pbox(0.16,0.5,0.16, legMat, lx,0.25,lz);
+            leg.userData.lz = lz;
+            g0.add(leg); legs.push(leg);
+          });
+          if(sp.glow){ body.material = new THREE.MeshBasicMaterial({color:sp.body}); }  // self-lit alien
+          g0.scale.setScalar(sp.scale||1);
+          return { group:g0, legs };
+        }
+
+        // World height to stand on at a voxel column: top non-water solid, or null.
+        function surfaceTopVox(vx,vz){
+          for(let y=H-1;y>0;y--){ const b=getBlock(vx,y,vz); if(b){ return b===WATER ? null : y; } }
+          return null;
+        }
+
+        function spawnOneCritter(){
+          const px=Math.floor(player.pos.x), pz=Math.floor(player.pos.z);
+          for(let tryN=0; tryN<6; tryN++){
+            const ang=Math.random()*Math.PI*2, r=14+Math.random()*(CRIT_VIEW-14);
+            const vx=px+Math.round(Math.cos(ang)*r), vz=pz+Math.round(Math.sin(ang)*r);
+            const top=surfaceTopVox(vx,vz);
+            if(top===null) continue;
+            const surf=getBlock(vx,top,vz);
+            const choices=CREATURES.filter(c=>c.on.indexOf(surf)>=0);
+            if(!choices.length) continue;
+            const sp=choices[(Math.random()*choices.length)|0];
+            const built=buildCreatureMesh(sp);
+            const cr={ sp, group:built.group, legs:built.legs,
+              pos:new THREE.Vector3(vx+0.5, top+1+WORLD_OFFSET.y, vz+0.5),
+              target:null, state:'idle', timer:0.5+Math.random()*2, phase:Math.random()*6, face:Math.random()*Math.PI*2 };
+            built.group.userData.critter = cr;
+            built.group.position.copy(cr.pos);
+            scene.add(built.group);
+            critters.push(cr); creatureGroups.push(built.group);
+            return;
+          }
+        }
+
+        function despawnCritter(i){
+          const cr=critters[i];
+          scene.remove(cr.group);
+          cr.group.traverse(o=>{ if(o.geometry) o.geometry.dispose(); if(o.material) o.material.dispose(); });
+          const gi=creatureGroups.indexOf(cr.group); if(gi>=0) creatureGroups.splice(gi,1);
+          critters.splice(i,1);
+        }
+
+        function clearCritters(){
+          for(let i=critters.length-1;i>=0;i--) despawnCritter(i);
+          critters.length=0; creatureGroups.length=0; _critTimer=0;
+        }
+
+        function _pickWanderTarget(cr){
+          const px=Math.floor(cr.pos.x), pz=Math.floor(cr.pos.z);
+          const curTop=surfaceTopVox(px,pz);
+          for(let tryN=0; tryN<5; tryN++){
+            const a=Math.random()*Math.PI*2, d=2+Math.random()*5;
+            const nx=px+Math.round(Math.cos(a)*d), nz=pz+Math.round(Math.sin(a)*d);
+            const t=surfaceTopVox(nx,nz);
+            if(t===null) continue;                                  // water — skip
+            if(curTop!==null && Math.abs(t-curTop)>2) continue;     // cliff — skip
+            cr.target=new THREE.Vector3(nx+0.5, 0, nz+0.5); return;
+          }
+          cr.target=null;                                           // boxed in → idle
+        }
+
+        function updateCritters(dt){
+          // maintain population
+          _critTimer-=dt;
+          if(_critTimer<=0){
+            _critTimer=0.6;
+            if(critters.length<CRIT_CAP) spawnOneCritter();
+          }
+          for(let i=critters.length-1;i>=0;i--){
+            const cr=critters[i];
+            const dxp=cr.pos.x-player.pos.x, dzp=cr.pos.z-player.pos.z;
+            const distP=Math.hypot(dxp,dzp);
+            if(distP>CRIT_DESPAWN){ despawnCritter(i); continue; }
+            let moving=false, speed=CRIT_SPEED;
+            // shy: flee the player
+            if(cr.sp.shy && distP<CRIT_FLEE){
+              const inv=1/(distP||1);
+              cr.target=new THREE.Vector3(cr.pos.x+dxp*inv*8, 0, cr.pos.z+dzp*inv*8);
+              cr.state='walk'; speed=CRIT_SPEED*1.8; cr.timer=0.6;
+            }
+            if(cr.state==='idle'){
+              cr.timer-=dt;
+              if(cr.timer<=0){ cr.state='walk'; cr.timer=1.5+Math.random()*3; _pickWanderTarget(cr); }
+            } else {
+              cr.timer-=dt;
+              if(!cr.target || cr.timer<=0){ cr.state='idle'; cr.timer=1+Math.random()*2.5; cr.target=null; }
+            }
+            if(cr.target){
+              const dx=cr.target.x-cr.pos.x, dz=cr.target.z-cr.pos.z;
+              const d=Math.hypot(dx,dz);
+              if(d<0.25){ cr.target=null; cr.state='idle'; cr.timer=1+Math.random()*2; }
+              else {
+                const step=Math.min(d, speed*dt), inv=1/d;
+                const nx=cr.pos.x+dx*inv*step, nz=cr.pos.z+dz*inv*step;
+                const top=surfaceTopVox(Math.floor(nx),Math.floor(nz));
+                if(top===null){ cr.target=null; }                   // hit water — stop
+                else {
+                  cr.pos.x=nx; cr.pos.z=nz; cr.pos.y=top+1+WORLD_OFFSET.y;
+                  cr.face=Math.atan2(dx,dz); moving=true;
+                }
+              }
+            }
+            // animate
+            cr.group.position.copy(cr.pos);
+            cr.group.rotation.y=cr.face;
+            if(moving){ cr.phase+=dt*speed*3; const sw=Math.sin(cr.phase)*0.5;
+              cr.legs.forEach((leg,k)=>{ leg.rotation.x=(leg.userData.lz>0? sw : -sw)*(k%2?1:-1); }); }
+            else cr.legs.forEach(leg=>{ leg.rotation.x*=0.8; });
+            if(cr.sp.glow){ const p=0.6+0.4*Math.sin(elapsed*3+cr.phase); cr.group.children[0].material.color.setRGB((0xc4/255)*p,(0x6a/255)*p,(0xe8/255)*p); }
+          }
+        }
+
+        // Scan raycast against creatures; returns the aimed critter or null.
+        function pickCreature(){
+          if(!creatureGroups.length) return null;
+          ray.setFromCamera({x:0,y:0}, camera);
+          const hits=ray.intersectObjects(creatureGroups, true);
+          for(const h of hits){
+            if(h.distance>14) break;
+            let o=h.object; while(o){ if(o.userData && o.userData.critter) return o.userData.critter; o=o.parent; }
+          }
+          return null;
+        }
+        let _scanCreatureId=null;
+        function fillCreatureScanContent(sp, expanded){
+          const pseudo={ cat:sp.cat, name:sp.name, desc:sp.desc, tags:[sp.sci.kingdom||'Animal'],
+            hardness:'—', sci:{ formula:sp.sci.formula, mineral:sp.sci.kingdom, fact:sp.sci.fact } };
+          fillScanPanelContent(pseudo, sp.scanOn||1, 0, expanded);
+        }
+        function recordCreatureScan(sp){
+          const AP=getProfileApi(); if(!AP || !AP.recordCreature) return;
+          const { isNew }=AP.recordCreature(AP.load(), sp.id);
+          if(isNew){ updateJournalHud(); if(g.showMessage) g.showMessage('Creature discovered: '+sp.name, 1800); }
+        }
 
         function tick(dt) {
             if (g.keys) Object.assign(keys, g.keys);
@@ -6104,6 +6322,7 @@
             }
             stepParts(dt);
             stepShotVfx(dt);
+            updateCritters(dt);
             updateHUD();
             updateCamera(dt);
             updateTpAimVisuals();
@@ -6393,6 +6612,7 @@
             loadActivePlanet();
             loadProfileEdits();
             resetStreaming();
+            clearCritters();
             spawnPlayerAtCenter();
             streamInit();
             renderHotbar();
@@ -6441,6 +6661,7 @@
             }
             flushProfileState();
             _active = false;
+            clearCritters();
             hideFpTuner();
             hideTpTuner();
             hideAimTuner();
