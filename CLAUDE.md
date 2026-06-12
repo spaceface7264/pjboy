@@ -6,6 +6,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 PJBoy is a **static client-side** 3D game site built with Three.js — maze modes, open world, voxel sandbox ("Asteroid"), spherical planet ("Tiny Planet"), arena, campaign, creator, and multiplayer. No build step, no bundler, no package.json, no npm dependencies, no automated tests. Everything runs directly in the browser from plain HTML/CSS/JS files served over HTTP.
 
+## Audience & design north-star (drives Asteroid-mode decisions)
+
+PJBoy — especially **Asteroid mode** — is primarily a game the owner is building **for their 7-year-old child**. The intended experience is **fun, gently challenging, and educational**. Concretely:
+
+- **Bilingual Danish→English learning.** The child reads well in Danish and is learning English. The block **scanner** is the main vehicle: it shows each block's name **English-forward with the Danish word underneath** (`BLOCK_DA` map in `voxelworld.js`), while the science `sci:` facts stay in English as reading practice.
+- **Education as a first-class feature**, not flavor: real-science scanner facts, crafting as counting/math, planets teaching gravity/day-night/biomes; bias content toward **science and animals**.
+- **Keep it age-appropriate:** short/simple on-screen text, achievable goals, forgiving fail states, cozy/comprehensible worlds over one overwhelming map.
+- **Co-op is LOCAL same-device** (split/shared screen — "play with a parent"), **not** the online PeerJS path. Do not build network world-sync for this audience.
+
 ## Commands
 
 - **Run locally:** `./dev.sh` — serves the repo on `http://localhost:8000` (python3 http.server) and opens a browser. Override the port with `PORT=9000 ./dev.sh`. Any static server works (`python3 -m http.server`, `npx serve .`). Opening `index.html` via `file://` will fail because the GLTF/asset fetches are blocked by CORS.
@@ -24,10 +33,12 @@ Three.js is loaded as a **classic (non-module) global** from CDN at r128 — `wi
 4. `planetgen.js` → `window.PlanetGen` (deterministic planet catalog)
 5. `planet.js` → `window.PlanetWorld` (spherical "Tiny Planet" mode)
 6. `voxel-character.js` → `window.VoxelCharacter` (procedural voxel rig + weapons)
-7. `voxelworld.js` → `window.VoxelWorld` (Asteroid voxel sandbox)
-8. `modes.js` → `window.ModeRegistry` and `window.PJBOY_MODE_DEFS`
-9. `game.js` → defines `AudioBus` and the `Game3D` class; instantiates `new Game3D()` on `DOMContentLoaded`
-10. `game-modes-impl.js` → **patches `Game3D.prototype` after the class is defined** (see below)
+7. `meta-char-preview.js` → `window.MetaCharPreview` (live character-editor preview in the meta flow)
+8. `asteroid-profile.js` → `window.AsteroidProfile` (unified per-player save: name, character, claim, journal, inventory, missions, crafting recipes)
+9. `voxelworld.js` → `window.VoxelWorld` (Asteroid voxel sandbox)
+10. `modes.js` → `window.ModeRegistry` and `window.PJBOY_MODE_DEFS`
+11. `game.js` → defines `AudioBus` and the `Game3D` class; instantiates `new Game3D()` on `DOMContentLoaded`
+12. `game-modes-impl.js` → **patches `Game3D.prototype` after the class is defined** (see below)
 
 **Cache-busting:** script and stylesheet tags carry `?v=N` query params (e.g. `game.js?v=151`). Bump the relevant `?v=` in `index.html` when you change a JS or CSS file, otherwise browsers (and GitHub Pages) serve a stale cached copy.
 
@@ -54,11 +65,15 @@ Three.js is loaded as a **classic (non-module) global** from CDN at r128 — `wi
 
 Self-contained voxel sandbox on a procedural asteroid: mine, build, jetpack, weapons, FP/TP camera (`F8`). Ported from an earlier `game-slice.html` prototype.
 
-- **`voxelworld.js`** — `VoxelWorld` class wrapping a `createRuntime(game)` closure (~3.5k lines). Takes over `game.scene` / `game.camera` on `enter()`, restores on `exit()`. Own voxel grid, meshing, physics, HUD (`#voxel-overlay`), hotbar, block drawer, combat VFX, and camera (OTS third-person + first-person viewmodel).
-- **`voxel-character.js`** — `window.VoxelCharacter`: procedural box-mesh character rig, weapon meshes, IK/animation. Used for the visible TP avatar and weapon posing; FP uses a separate viewmodel weapon on `fpPivot`.
+- **`voxelworld.js`** — `VoxelWorld` class wrapping a `createRuntime(game)` closure (~6k lines). Takes over `game.scene` / `game.camera` on `enter()`, restores on `exit()`. Own voxel grid, meshing, physics, HUD (`#voxel-overlay`), hotbar, block drawer, combat VFX, and camera (OTS third-person + first-person viewmodel).
+  - **World grid:** fixed flat voxel volume **`W=96, H=32, D=96`** (chunked at `CH=16`). Deterministic from `SEED`; the asteroid silhouette comes from a radial falloff scaled by `ASTEROID_RXZ` (`= W/2-2`), and fixed-count scatter (ore veins, hives, trees) is scaled by footprint area via `oreScale` so density holds at any `W/D`. The mesher is **already chunked** (`scene3.chunks`, `buildChunkMesh`, `rebuildChunkAt`, `rebuildWorld`) — the only hard limit on world size is the fixed bounds, not the rendering. Block edits are a flat `{x,y,z,id}` list that funnels through `setBlockEvent` / `persistBlockEdit`.
+  - **Scanner (educational):** `fillScanPanelContent` shows the block's English name with the Danish word beneath it (`BLOCK_DA` map) plus `sci:` formula/mineral/fact. See the audience section above.
+  - **Refinery crafting:** a `Refinery` tab in the Tab drawer (`renderRefineryBody` / `craftRecipe`) crafts `AsteroidProfile.CRAFT_RECIPES` (smelt Metal/Glass, wire Lamp) from backpack materials; crafting calls `AsteroidProfile.recordCraft` so the matching mission advances. Missions live in `asteroid-profile.js` (`MISSIONS`, goal types `scan`/`scan_unique`/`place`/`craft`); the on-screen objective HUD (`updateJournalHud`) stays pinned and shows "Surveys complete" when the chain is done.
+- **`asteroid-profile.js`** — `window.AsteroidProfile`: the unified per-player save under **`pjboy.profile.v1`** (name, character cfg, claim seed+edits, journal/missions, inventory). One JSON document, cloud-shaped. Pure helpers (`load`/`save`, `missionProgress`, `recordScan`/`recordPlace`/`recordCraft`, `craftAvailability`, `upsertBlockEdit`, `claimSummary`); also `syncLegacyKeys` bridges the older `pjboy.voxel*` keys.
+- **`voxel-character.js`** — `window.VoxelCharacter`: procedural box-mesh character rig, weapon meshes, IK/animation. Used for the visible TP avatar and weapon posing; FP uses a separate viewmodel weapon on `fpPivot`. `meta-char-preview.js` (`window.MetaCharPreview`) renders the live preview in the meta character-editor flow.
 - **UI:** `#voxel-overlay` in `index.html`; `body.mode-asteroid` in `style.css` hides the legacy maze HUD (`#ui`, compass, weapon HUD, etc.). `_hideLegacyPlayUI()` in `game-modes-impl.js` applies this when Asteroid is active.
 - **Aim / combat (important):** one `resolveAim()` solve drives screen-center ray, muzzle origin, character IK, and shots. **Shift = focus aim** in both FP and TP (slows movement, tightens camera/FOV). Default move speed is run. In TP: crosshair only when idle; brief `shotVfx` beam/bolt traces on fire. Weapon mesh beams and `showWeaponBeam` are **FP-only** — disabling them in TP avoids double traces with shot VFX.
-- **Persistence:** `localStorage` under `pjboy.voxelCharacter.v1`, `pjboy.voxelChar.v1`, `pjboy.voxelWeapons.owned.v1`, `pjboy.voxelFpTune.v1`, `pjboy.voxelTpTune.v1`.
+- **Persistence:** primary save is `pjboy.profile.v1` (above). Legacy/per-system keys still in use: `pjboy.voxelCharacter.v1`, `pjboy.voxelChar.v1`, `pjboy.voxelWeapons.owned.v1`, `pjboy.voxelFpTune.v1`, `pjboy.voxelTpTune.v1`, `pjboy.voxelInvTab.v1`, `pjboy.voxelHotbar.v1`.
 
 ### Tiny Planet mode (`planet.js` + `planetgen.js`)
 
