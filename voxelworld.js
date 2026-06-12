@@ -376,6 +376,12 @@
             x.fillStyle='rgba(180,220,240,.28)'; x.fillRect(0,0,32,32);
             x.strokeStyle='rgba(255,255,255,.4)'; x.lineWidth=1;
             x.beginPath(); x.moveTo(4,28); x.lineTo(20,6); x.moveTo(10,30); x.lineTo(26,10); x.stroke(); },
+          water(x,R){ x.clearRect(0,0,32,32);
+            x.fillStyle='rgba(38,118,196,.52)'; x.fillRect(0,0,32,32);
+            x.fillStyle='rgba(92,172,228,.32)';
+            for(let i=0;i<3;i++){ const wy=(R()*30)|0; x.fillRect(0,wy,32,2); }        // ripples
+            x.fillStyle='rgba(225,245,255,.22)';
+            for(let i=0;i<5;i++) x.fillRect((R()*30)|0,(R()*30)|0,2,1); },             // sparkle
           lamp(x,R){ grain(x,0x4a4438,.15,R,2);
             x.fillStyle='#ffe8b0'; x.fillRect(6,6,20,20);
             x.fillStyle='#fff8e0'; x.fillRect(10,10,12,12);
@@ -454,7 +460,7 @@
             }
           },
         };
-        const NO_BORDER = new Set(['tall_grass','flower_red','flower_yellow',
+        const NO_BORDER = new Set(['tall_grass','flower_red','flower_yellow','water',
           'deco_frond','deco_spore','deco_quill','deco_quill_glow','deco_plume','deco_shroom']);
         function paintTile(name, frame){
           const c=document.createElement('canvas'); c.width=c.height=TILE;
@@ -602,6 +608,9 @@
           { id:39, cat:'Hazards', name:'Acid',   tiles:{all:'acid'},   hardness:9, tags:['hazard','glows'], animated:true, glowColor:0x2a6a10,
             desc:'Bubbling solvent pools on cave floors. Eats boots, tools, and patience.',
             sci:{formula:'H₂SO₄', mineral:'Sulfuric acid', fact:'The clouds of Venus are droplets of sulfuric acid. Real planets can be this hostile.'} },
+          { id:40, cat:'Terrain', name:'Water',  tiles:{all:'water'},  hardness:1, tags:['natural','liquid'], transparent:true,
+            desc:'Calm shallow water. Fills the seas and lakes of the world.',
+            sci:{formula:'H₂O', mineral:'Water', fact:'The only thing on a planet that is solid, liquid and gas at everyday temperatures — and life needs it.'} },
         ];
         const blockById = id => BlockRegistry.find(b=>b.id===id);
         
@@ -645,194 +654,352 @@
         }
         
         // ---------- world data ----------
-        const W=96, H=32, D=96, CH=16;
-        // Horizontal asteroid radius in blocks (leaves a ~2-block margin inside W/D).
-        // Generation scales off this so the rock fills the footprint at any W/D.
-        const ASTEROID_RXZ = W/2 - 2;
-        const WORLD_OFFSET = new THREE.Vector3(-W/2, -6, -D/2);   // center asteroid near origin
-        let blocks = new Uint8Array(W*H*D);
-        const bidx = (x,y,z) => (y*D+z)*W+x;
-        function getBlock(x,y,z){
-          if(x<0||y<0||z<0||x>=W||y>=H||z>=D) return 0;
-          return blocks[bidx(x,y,z)];
+        // A large flat-but-vast world: gravity is down (-Y). The world reads as a
+        // "planet" through scale + atmosphere (big sky, sun, horizon haze) rather
+        // than visible curvature. Heavy fog hides the world edge.
+        const H=96, CH=16;
+        const SEA_LEVEL = 30;                   // water fills empty cells at/below this
+        const WATER = 40;                       // water block id (see BlockRegistry)
+        // Streaming, wrapping world: voxel coords are GLOBAL and unbounded in x/z; the
+        // terrain is periodic with period WORLD_PERIOD, so walking that far returns you
+        // to identical land ("arrive where you started") with no seam. Only the columns
+        // within VIEW_R chunks of the player stay loaded/meshed.
+        const WORLD_PERIOD = 3072;              // blocks before terrain repeats (must be a multiple of CH)
+        const VIEW_R = 20;                      // column-chunks meshed around the player (~fog distance)
+        const KEEP_R = VIEW_R + 2;              // column-chunks kept buffered (margin for border meshing)
+        const UNLOAD_R = VIEW_R + 4;            // beyond this, columns are disposed
+        // Sea level sits at world y=0; a voxel (x,y,z) renders at (x, y-SEA_LEVEL, z).
+        const WORLD_OFFSET = new THREE.Vector3(0, -SEA_LEVEL, 0);
+        // Back-compat: some code references W/D as "the world span"; with an unbounded
+        // world they mean the wrap period.
+        const W = WORLD_PERIOD, D = WORLD_PERIOD;
+
+        const _mod = (a,b) => ((a%b)+b)%b;
+        const _fdiv = (a,b) => Math.floor(a/b);
+        const pmod = (a) => _mod(a, WORLD_PERIOD);          // canonical x/z in [0, WORLD_PERIOD)
+
+        // ---- streaming column-chunk store: "cx,cz" -> Uint8Array(CH*H*CH) ----
+        const worldCols = new Map();
+        const colMaxY = new Map();              // "cx,cz" -> highest filled voxel (skip empty sky chunks)
+        const colKey = (cx,cz) => cx + ',' + cz;
+        const cIdx = (lx,y,lz) => (y*CH + lz)*CH + lx;
+        function ensureCol(cx,cz){
+          const k = colKey(cx,cz);
+          let c = worldCols.get(k);
+          if(!c){ const r = genColumn(cx,cz); c = r.buf; worldCols.set(k, c); colMaxY.set(k, r.maxY); }
+          return c;
         }
+        function getBlock(x,y,z){
+          if(y<0||y>=H) return 0;
+          const cx=_fdiv(x,CH), cz=_fdiv(z,CH);
+          const c = worldCols.get(colKey(cx,cz));
+          if(c) return c[cIdx(x-cx*CH, y, z-cz*CH)];
+          return genBlockSingle(x,y,z);          // fallback for not-yet-loaded columns
+        }
+
+        // ---- player edits: stored by CANONICAL position so they repeat each period ----
+        const editStore = new Map();             // "ex,y,ez" -> id   (ex,ez in [0,PERIOD))
+        const editsByChunk = new Map();          // canonical "ccx,ccz" -> [{x,y,z,id}]
+        function recordEdit(x,y,z,id){
+          const ex=pmod(x), ez=pmod(z);
+          editStore.set(ex+','+y+','+ez, id);
+          const ck = _fdiv(ex,CH)+','+_fdiv(ez,CH);
+          let arr = editsByChunk.get(ck);
+          if(!arr){ arr=[]; editsByChunk.set(ck, arr); }
+          const i = arr.findIndex(e => e.x===ex && e.y===y && e.z===ez);
+          const row = {x:ex,y,z:ez,id};
+          if(i>=0) arr[i]=row; else arr.push(row);
+        }
+
         // THE multiplayer primitive: every world change funnels through here.
-        // later: broadcast {x,y,z,id} to peers and call this on receive.
         function persistBlockEdit(x, y, z, id) {
             if (_suppressProfileBlockSave) return;
             const AP = getProfileApi();
             if (!AP) return;
             const p = AP.load();
-            AP.upsertBlockEdit(p, x, y, z, id);
+            AP.upsertBlockEdit(p, pmod(x), y, pmod(z), id);   // canonical coords
             AP.save(p);
         }
 
         function setBlockEvent(x,y,z,id){
-          if(x<0||y<0||z<0||x>=W||y>=H||z>=D) return;
-          blocks[bidx(x,y,z)] = id;
+          if(y<0||y>=H) return;
+          const cx=_fdiv(x,CH), cz=_fdiv(z,CH);
+          const c = ensureCol(cx,cz);
+          c[cIdx(x-cx*CH, y, z-cz*CH)] = id;
+          recordEdit(x,y,z,id);
+          if(id){ const k=colKey(cx,cz); if(y > (colMaxY.get(k)||0)) colMaxY.set(k, y); }
           rebuildChunkAt(x,y,z);
           // borders share faces with the neighbor chunk
-          if(x%CH===0) rebuildChunkAt(x-1,y,z); if(x%CH===CH-1) rebuildChunkAt(x+1,y,z);
+          const lx=_mod(x,CH), lz=_mod(z,CH);
+          if(lx===0) rebuildChunkAt(x-1,y,z); if(lx===CH-1) rebuildChunkAt(x+1,y,z);
           if(y%CH===0) rebuildChunkAt(x,y-1,z); if(y%CH===CH-1) rebuildChunkAt(x,y+1,z);
-          if(z%CH===0) rebuildChunkAt(x,y,z-1); if(z%CH===CH-1) rebuildChunkAt(x,y,z+1);
+          if(lz===0) rebuildChunkAt(x,y,z-1); if(lz===CH-1) rebuildChunkAt(x,y,z+1);
           persistBlockEdit(x, y, z, id);
         }
 
-        function loadProfileSeed() {
+        // Resolve the player's current planet → drives SEED, biome theme, atmosphere.
+        function loadActivePlanet() {
             const AP = getProfileApi();
-            if (AP) {
-                const seed = AP.load().asteroid.seed;
-                if (typeof seed === 'number' && isFinite(seed)) {
-                    SEED = seed | 0;
-                    return;
-                }
+            const def = (AP && AP.currentPlanetDef) ? AP.currentPlanetDef(AP.load()) : null;
+            if (def) {
+                activePlanetId = def.id;
+                SEED = def.seed | 0;
+                activeBiome = BIOME_THEMES[def.biome] || BIOME_THEMES.verdant;
+            } else {
+                // No profile API (e.g. standalone) — keep a stable random asteroid.
+                activePlanetId = null;
+                SEED = (Math.random() * 1e9) | 0;
+                activeBiome = BIOME_THEMES.verdant;
             }
-            SEED = (Math.random() * 1e9) | 0;
-            if (AP) {
-                const p = AP.load();
-                p.asteroid.seed = SEED;
-                AP.save(p);
-            }
+            applyPlanetAtmosphere();
         }
 
-        function applyProfileEdits() {
+        // Load saved edits into the canonical edit store; loaded columns pick them up
+        // when they generate. Called before the world streams in.
+        function loadProfileEdits() {
+            editStore.clear();
+            editsByChunk.clear();
             const AP = getProfileApi();
             if (!AP) return;
-            const edits = AP.load().asteroid.edits || [];
-            if (!edits.length) return;
-            _suppressProfileBlockSave = true;
+            const p = AP.load();
+            const st = AP.planetState ? AP.planetState(p) : null;
+            const edits = (st && st.edits) || [];
             for (let i = 0; i < edits.length; i++) {
                 const e = edits[i];
-                if (e.x < 0 || e.y < 0 || e.z < 0 || e.x >= W || e.y >= H || e.z >= D) continue;
-                blocks[bidx(e.x, e.y, e.z)] = e.id | 0;
+                if (e.y < 0 || e.y >= H) continue;
+                recordEdit(e.x | 0, e.y | 0, e.z | 0, e.id | 0);
             }
-            _suppressProfileBlockSave = false;
-            rebuildWorld();
+        }
+        // Overlay any saved edits for the canonical chunk this column maps to.
+        function applyEditsToCol(buf, cx, cz){
+            const ex0 = pmod(cx*CH), ez0 = pmod(cz*CH);          // CH-aligned (PERIOD % CH === 0)
+            const arr = editsByChunk.get(_fdiv(ex0,CH)+','+_fdiv(ez0,CH));
+            if(!arr) return;
+            for(const e of arr){
+                const lx = e.x - ex0, lz = e.z - ez0;
+                if(lx>=0 && lx<CH && lz>=0 && lz<CH && e.y>=0 && e.y<H) buf[cIdx(lx, e.y, lz)] = e.id;
+            }
         }
         
-        // ---------- deterministic worldgen: same seed = same asteroid ----------
-        function generateWorld(){
-          blocks.fill(0);
-          // asteroid shell: radial falloff top + bottom with noise
-          for(let x=0;x<W;x++) for(let z=0;z<D;z++){
-            const dx=(x-W/2)/ASTEROID_RXZ, dz=(z-D/2)/ASTEROID_RXZ, rad=Math.sqrt(dx*dx+dz*dz);
-            if(rad>1) continue;
-            const topY = 17 + fbm2(x*.09,z*.09)*6*(1-rad*.5) - rad*4;
-            const botY = 15 - (1-rad)*(8+fbm2(x*.11+50,z*.11+50)*5);
-            for(let y=Math.max(0,botY|0); y<=Math.min(H-1,topY|0); y++){
-              if(fbm3(x*.1,y*.1,z*.1)>.68) continue;            // caves
-              blocks[bidx(x,y,z)] = 3;                          // stone base
+        // ---------- multiplanetary: active planet + biome themes ----------
+        // The active planet comes from AsteroidProfile (its catalog supplies the
+        // seed + a biome key). A theme only re-skins the *surface* block and the
+        // atmosphere tint — the deep geology/ores stay shared so every world reads
+        // as the same kind of asteroid. `remap(top, ctx)` returns the surface id;
+        // ctx = { bn, icy, rad, h } (h = stable per-column hash). `verdant` has no
+        // remap, so the home world generates byte-identically to before.
+        let activePlanetId = null;
+        let activeBiome = null;
+        // Each theme carries a daytime sky palette (sky=zenith, horizon=haze/fog,
+        // sun=key light) plus the surface remap. `verdant` is the lush home default.
+        const BIOME_THEMES = {
+          verdant:  { sky:0x4a90e0, horizon:0xbfe0f5, sun:0xfff4e0, ground:0x6a7a4a },
+          frost:    { sky:0x7fb4ee, horizon:0xe2eefb, sun:0xeef4ff, ground:0x9fb4c8,
+            remap(top, ctx){
+              if(ctx.icy > 0.62) return 8;          // ice cores
+              return 20;                            // snow blankets everything else
+            }
+          },
+          fungal:   { sky:0x7a5cc0, horizon:0xd6c4ee, sun:0xf3e2ff, ground:0x5a4a68,
+            remap(top, ctx){
+              if(top===1 || (top>=12 && top<=15)) return ctx.h < 0.5 ? 36 : 13;  // fungal / spore
+              if(top===8 || top===20) return 36;    // no ice on a warm living world
+              return top;
+            }
+          },
+          desert:   { sky:0x8fb8ee, horizon:0xf0e2c4, sun:0xfff0d2, ground:0x8a7656,
+            remap(top, ctx){
+              if(top===8 || top===20) return 16;    // dry world: no ice/snow
+              if(top===1 || (top>=12 && top<=15) || top===36) return ctx.h < 0.18 ? 19 : 16; // gravel/regolith
+              return top;
+            }
+          },
+          volcanic: { sky:0x6a4858, horizon:0xdcae9c, sun:0xffd6bc, ground:0x5a3632,
+            remap(top, ctx){
+              if(top===8 || top===20) return 18;    // no ice
+              if(top===1 || (top>=12 && top<=15) || top===36) return ctx.h < 0.3 ? 18 : 16; // red rock / regolith
+              return top;
             }
           }
-          // surface pass: grass / sand / ice caps, dirt beneath
-          for(let x=0;x<W;x++) for(let z=0;z<D;z++){
-            for(let y=H-1;y>0;y--){
-              if(!getBlock(x,y,z)) continue;
-              if(!getBlock(x,y+1,z)){
-                const dx=(x-W/2)/ASTEROID_RXZ, dz=(z-D/2)/ASTEROID_RXZ, rad=Math.sqrt(dx*dx+dz*dz);
-                // biome patches: one noise channel picks which grass family grows here
-                const bn = fbm2(x*.045+777, z*.045+777);
-                let top = bn<.34? 1 : bn<.42? 12 : bn<.48? 13 : bn<.53? 14 : bn<.58? 15
-                        : bn<.64? 36 : bn<.7? 16 : 18;          // fungal / regolith / red rock
-                if(top===16 && ihash(x,0,z)<.18) top = 19;      // gravel scatter on regolith
-                if(rad>.74) top = 4;                            // sandy rim
-                const icy = fbm2(x*.13+99,z*.13+99);
-                if(icy>.7) top = 8; else if(icy>.64) top = 20;  // ice cores, snow fringes
-                blocks[bidx(x,y,z)] = top;
-                for(let d=1;d<=2;d++) if(getBlock(x,y-d,z)===3) blocks[bidx(x,y-d,z)]=2;
-              }
-              break;                                            // only topmost run
+        };
+        const FOG_NEAR = 48, FOG_FAR = 300;     // < VIEW_R*CH so the streamed edge stays hidden
+
+        function _hex(n){ return '#' + (n & 0xffffff).toString(16).padStart(6, '0'); }
+        function _mixHex(a, b, t){
+          const ar=(a>>16)&255, ag=(a>>8)&255, ab=a&255, br=(b>>16)&255, bg=(b>>8)&255, bb=b&255;
+          const r=Math.round(ar+(br-ar)*t), g2=Math.round(ag+(bg-ag)*t), b2=Math.round(ab+(bb-ab)*t);
+          return (r<<16)|(g2<<8)|b2;
+        }
+
+        // Paint a daytime sky gradient (zenith -> horizon haze) with a soft sun glow.
+        function buildSkyBackground(sky, horizon, sun){
+          if(!g.scene) return;
+          const c=document.createElement('canvas'); c.width=64; c.height=512;
+          const x=c.getContext('2d');
+          const grd=x.createLinearGradient(0,0,0,512);
+          grd.addColorStop(0, _hex(sky));
+          grd.addColorStop(0.62, _hex(_mixHex(sky, horizon, 0.55)));
+          grd.addColorStop(1, _hex(horizon));
+          x.fillStyle=grd; x.fillRect(0,0,64,512);
+          const sg=x.createRadialGradient(44,150,4,44,150,120);   // soft sun, upper area
+          sg.addColorStop(0, 'rgba(255,250,238,0.9)');
+          sg.addColorStop(0.35, 'rgba(255,246,224,0.4)');
+          sg.addColorStop(1, 'rgba(255,246,224,0)');
+          x.fillStyle=sg; x.fillRect(0,0,64,512);
+          if(_voxelBg) _voxelBg.dispose();
+          _voxelBg = new THREE.CanvasTexture(c);
+          g.scene.background = _voxelBg;
+        }
+
+        // Apply the active planet's sky, horizon fog and daytime lighting.
+        function applyPlanetAtmosphere(){
+          const th = activeBiome || BIOME_THEMES.verdant;
+          const sky = th.sky!=null? th.sky : 0x4a90e0;
+          const horizon = th.horizon!=null? th.horizon : 0xbfe0f5;
+          const sun = th.sun!=null? th.sun : 0xfff4e0;
+          if(!g.scene) return;
+          if(g.scene.fog && g.scene.fog.color){
+            g.scene.fog.color.setHex(horizon);
+            g.scene.fog.near = FOG_NEAR; g.scene.fog.far = FOG_FAR;
+          }
+          buildSkyBackground(sky, horizon, sun);
+          if(g._voxelLights){
+            const [hemi, key, rim] = g._voxelLights;
+            if(hemi){ hemi.color.setHex(sky); if(hemi.groundColor) hemi.groundColor.setHex(th.ground||0x6a7a4a); hemi.intensity=0.9; }
+            if(key){ key.color.setHex(sun); key.intensity=1.05; }
+            if(rim){ rim.color.setHex(horizon); rim.intensity=0.22; }
+          }
+        }
+
+        // ---------- deterministic worldgen: same seed = same world ----------
+        // A large flat heightmap world: continents + hills + ridged mountains, with
+        // biomes by temperature/moisture, oceans/lakes filled to SEA_LEVEL, ore veins
+        // underground and trees on grass. Per-planet biome themes still re-skin it.
+        // ---------- procedural, periodic worldgen (streamed per column-chunk) ----------
+        // Periodic value noise: lattice indices wrap every `per` cells so the field
+        // tiles seamlessly over WORLD_PERIOD blocks. `chan` picks an independent field.
+        function _wrapL(i, per){ return ((i % per) + per) % per; }
+        function pvnoise2(fx, fz, per, chan){
+          const xi=Math.floor(fx), zi=Math.floor(fz);
+          const tx=smooth(fx-xi), tz=smooth(fz-zi);
+          const c=(dx,dz)=> ihash(_wrapL(xi+dx,per), chan, _wrapL(zi+dz,per));
+          return lerp(lerp(c(0,0),c(1,0),tx), lerp(c(0,1),c(1,1),tx), tz);
+        }
+        // Periodic fbm; cells0 = lattice cells across the whole period at octave 0
+        // (feature size ≈ WORLD_PERIOD / cells0 blocks). Stays periodic across octaves.
+        function pfbm2(x, z, chan, cells0, octaves){
+          octaves = octaves || 3;
+          let sum=0, amp=1, norm=0, f=cells0/WORLD_PERIOD, per=cells0;
+          for(let o=0;o<octaves;o++){
+            sum += pvnoise2(x*f, z*f, per, chan + o*131) * amp;
+            norm += amp; amp*=0.5; f*=2; per*=2;
+          }
+          return sum/norm;
+        }
+        function pvnoise3(fx, fy, fz, per, chan){
+          const xi=Math.floor(fx), yi=Math.floor(fy), zi=Math.floor(fz);
+          const tx=smooth(fx-xi), ty=smooth(fy-yi), tz=smooth(fz-zi);
+          const c=(dx,dy,dz)=> ihash(_wrapL(xi+dx,per), chan+(yi+dy)*1313, _wrapL(zi+dz,per));
+          return lerp(
+            lerp(lerp(c(0,0,0),c(1,0,0),tx), lerp(c(0,1,0),c(1,1,0),tx), ty),
+            lerp(lerp(c(0,0,1),c(1,0,1),tx), lerp(c(0,1,1),c(1,1,1),tx), ty), tz);
+        }
+
+        // Deterministic, periodic surface profile (height + surface block) for a column.
+        function columnProfile(x, z){
+          const SEA=SEA_LEVEL;
+          const cont = pfbm2(x,z, 1000, 16, 3);                  // broad continents (~192-block)
+          const hill = pfbm2(x,z, 3000, 64, 2);                  // rolling hills (~48-block)
+          const ridge= 1-Math.abs(2*pfbm2(x,z, 5000, 32, 2)-1);  // mountain ridges (~96-block)
+          const hh = (SEA-9) + cont*38 + hill*9 + ridge*ridge*ridge*30;
+          const height = Math.max(1, Math.min(H-4, Math.round(hh)));
+          const temp  = pfbm2(x,z, 7000, 12, 2);                 // warmth (~256-block regions)
+          const moist = pfbm2(x,z, 9000, 12, 2);                 // wetness
+          let top = 1;
+          if(temp<0.40) top = 20;
+          else if(moist<0.34 && temp>0.60) top = 4;
+          else if(moist>0.64) top = (temp>0.5)?12:13;
+          if(height>=SEA+22 && temp<0.5) top = 20;
+          else if(height>=SEA+28) top = 16;
+          if(height<=SEA+1) top = 4;
+          if(top===1 && ihash(pmod(x),7,pmod(z))<0.04) top = 2;
+          const icy=(temp<0.40?0.85:0) + (pfbm2(x,z,11000,48,2)-0.5)*0.4;
+          if(activeBiome && activeBiome.remap) top = activeBiome.remap(top, {bn:moist, icy, rad:0, h:ihash(pmod(x),0,pmod(z))});
+          if(height<SEA && (top===1||top===20||top===12||top===13)) top = 4;   // underwater bed → sand
+          return { height, top };
+        }
+
+        // Ore / deep-rock variant for a sub-surface voxel; 0 → plain stone.
+        function oreAt(x, y, z){
+          if(y<4) return 17;                                     // basalt floor
+          const n = pvnoise3(x*0.16, y*0.16, z*0.16, 96, 210);
+          if(n>0.86){
+            if(y<=8) return 28; if(y<=14) return 25; if(y<=18) return 24;
+            if(y<=SEA_LEVEL-4) return 23; if(y<=SEA_LEVEL) return 22; return 27;
+          }
+          if(n>0.80 && y>=6 && y<=SEA_LEVEL-2) return 9;          // aether band
+          if(y<5 && pvnoise3(x*0.15,y*0.15,z*0.15,96,300)>0.72) return 38;  // lava pocket
+          return 0;
+        }
+
+        // A grass column above water, sparsely chosen by a periodic hash.
+        function isTreeRoot(x, z){
+          if(ihash(pmod(x), 999, pmod(z)) > 0.012) return false;
+          const p = columnProfile(x,z);
+          return p.height > SEA_LEVEL && (p.top===1 || p.top===12 || p.top===13);
+        }
+
+        // Single-voxel generation (fallback for getBlock outside loaded columns).
+        function genBlockSingle(x,y,z){
+          const e = editStore.get(pmod(x)+','+y+','+pmod(z));
+          if(e!==undefined) return e;
+          const p = columnProfile(x,z);
+          if(y > p.height) return (p.height < SEA_LEVEL && y <= SEA_LEVEL) ? WATER : 0;
+          if(y === p.height) return p.top;
+          if(y >= p.height-4) return 2;
+          return oreAt(x,y,z) || 3;
+        }
+
+        // Generate one column-chunk buffer: terrain + ores + water + trees + edits.
+        function genColumn(cx, cz){
+          const buf = new Uint8Array(CH*H*CH);
+          const x0=cx*CH, z0=cz*CH;
+          let maxY = 0;
+          for(let lx=0;lx<CH;lx++) for(let lz=0;lz<CH;lz++){
+            const x=x0+lx, z=z0+lz;
+            const p = columnProfile(x,z);
+            for(let y=0;y<=p.height;y++){
+              let id;
+              if(y===p.height) id=p.top;
+              else if(y>=p.height-4) id=2;
+              else id = oreAt(x,y,z) || 3;
+              buf[cIdx(lx,y,lz)] = id;
+            }
+            if(p.height < SEA_LEVEL){ for(let y=p.height+1; y<=SEA_LEVEL; y++) buf[cIdx(lx,y,lz)] = WATER; }
+            const colTop = Math.max(p.height, p.height<SEA_LEVEL?SEA_LEVEL:0);
+            if(colTop>maxY) maxY=colTop;
+          }
+          // trees: consider roots in a 2-block margin so canopies overhang borders
+          for(let rx=x0-2; rx<x0+CH+2; rx++) for(let rz=z0-2; rz<z0+CH+2; rz++){
+            if(!isTreeRoot(rx,rz)) continue;
+            const ph = columnProfile(rx,rz).height;
+            const th = 3 + ((ihash(pmod(rx),1234,pmod(rz))*4)|0)%3;
+            if(ph+th+2>maxY) maxY = Math.min(H-1, ph+th+2);
+            const setAt = (bx,by,bz,id,overwrite)=>{
+              if(by<0||by>=H) return;
+              const llx=bx-x0, llz=bz-z0;
+              if(llx<0||llx>=CH||llz<0||llz>=CH) return;
+              if(overwrite || !buf[cIdx(llx,by,llz)]) buf[cIdx(llx,by,llz)] = id;
+            };
+            for(let i=1;i<=th;i++) setAt(rx, ph+i, rz, 5, true);          // trunk
+            const cyTop = ph+th;
+            for(let lx2=-2;lx2<=2;lx2++) for(let ly2=0;ly2<=2;ly2++) for(let lz2=-2;lz2<=2;lz2++){
+              if(lx2*lx2+lz2*lz2+ly2*ly2>5) continue;
+              setAt(rx+lx2, cyTop+ly2, rz+lz2, 6, false);                // canopy
             }
           }
-          // deep geology: basalt foundation under the stone
-          for(let x=0;x<W;x++) for(let z=0;z<D;z++){
-            const bd = 7 + fbm2(x*.1+321,z*.1+321)*3;
-            for(let y=0;y<bd;y++) if(getBlock(x,y,z)===3) blocks[bidx(x,y,z)]=17;
-          }
-          // ore veins by depth: shallow conductors, deep heavy metals
-          const R = rng(SEED^0xbeef);
-          function veins(n, id, yMin, yMax, len, host){
-            for(let v=0;v<n;v++){
-              let x=(R()*W)|0, y=yMin+((R()*(yMax-yMin))|0), z=(R()*D)|0;
-              for(let s=0;s<len+((R()*len)|0);s++){
-                const cur=getBlock(x,y,z);
-                if(cur===3 || (host && cur===17)) blocks[bidx(x,y,z)]=id;
-                x+=(R()*3|0)-1; y+=(R()*3|0)-1; z+=(R()*3|0)-1;
-                if(x<0||y<0||z<0||x>=W||y>=H||z>=D) break;
-              }
-            }
-          }
-          // Fixed-count scatter scales with footprint area so ore/feature density
-          // stays constant as W/D grow (base counts tuned at 48x48).
-          const oreScale = (W*D)/(48*48);
-          const vn = (n) => Math.max(1, Math.round(n*oreScale));
-          veins(vn(20), 27, 14, 26, 7);        // carbon seams: shallow and long
-          veins(vn(18), 22, 12, 24, 5);        // copper
-          veins(vn(16), 23,  8, 20, 5);        // iron
-          veins(vn(10), 24,  4, 14, 4);        // gold
-          veins(vn(8),  25,  3, 12, 4, true);  // titanium: down in the basalt
-          veins(vn(5),  28,  2,  9, 3, true);  // uranium: deep and rare
-          veins(vn(14), 9,   6, 18, 4);        // aether ore
-          // cobalt blooms on cave walls
-          for(let x=1;x<W-1;x++) for(let y=2;y<14;y++) for(let z=1;z<D-1;z++){
-            if(getBlock(x,y,z)!==3 && getBlock(x,y,z)!==17) continue;
-            const nearAir = !getBlock(x+1,y,z)||!getBlock(x-1,y,z)||!getBlock(x,y,z+1)||!getBlock(x,y,z-1);
-            if(nearAir && getBlock(x,y+1,z) && ihash(x*3,y*5,z*7)<.05) blocks[bidx(x,y,z)]=26;
-          }
-          // molten core: lava pockets sheathed in obsidian, energy above them
-          for(let x=0;x<W;x++) for(let y=0;y<13;y++) for(let z=0;z<D;z++){
-            const cur=getBlock(x,y,z);
-            if(cur!==3 && cur!==17) continue;
-            const f = fbm3(x*.14+30,y*.14+30,z*.14+30);
-            if(y<6 && f>.64) blocks[bidx(x,y,z)]=38;
-            else if(f>.66) blocks[bidx(x,y,z)]=11;
-          }
-          for(let x=1;x<W-1;x++) for(let y=1;y<13;y++) for(let z=1;z<D-1;z++){
-            const cur=getBlock(x,y,z);
-            if(cur!==3 && cur!==17) continue;
-            for(const [dx,dy,dz] of [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]]){
-              if(getBlock(x+dx,y+dy,z+dz)===38){ blocks[bidx(x,y,z)]=21; break; }   // obsidian shell
-            }
-          }
-          // acid pools in mid-depth cave floors
-          for(let x=0;x<W;x++) for(let y=8;y<13;y++) for(let z=0;z<D;z++){
-            if(getBlock(x,y,z)===3 && !getBlock(x,y+1,z) && getBlock(x,y-1,z)
-               && fbm3(x*.2+60,y*.2,z*.2+60)>.6) blocks[bidx(x,y,z)]=39;
-          }
-          // hive colonies: small organic blobs underground
-          for(let h=0;h<vn(3);h++){
-            const hx=6+((R()*(W-12))|0), hy=8+((R()*8)|0), hz=6+((R()*(D-12))|0);
-            for(let dx=-2;dx<=2;dx++) for(let dy=-1;dy<=2;dy++) for(let dz=-2;dz<=2;dz++){
-              if(Math.abs(dx)+Math.abs(dy)+Math.abs(dz)>3) continue;
-              const p=getBlock(hx+dx,hy+dy,hz+dz);
-              if(p===3||p===17||p===2) blocks[bidx(hx+dx,hy+dy,hz+dz)]=37;
-            }
-          }
-          // hanging crystals on the underside: violet, emerald, rare void
-          for(let x=0;x<W;x++) for(let z=0;z<D;z++) for(let y=1;y<16;y++){
-            if(getBlock(x,y,z) && !getBlock(x,y-1,z)){
-              const r=ihash(x,y,z);
-              if(r<.06) blocks[bidx(x,y-1,z)] = r<.03? 10 : (r<.052? 29 : 30);
-            }
-          }
-          // a few trees on grass
-          for(let t=0;t<vn(7);t++){
-            const x=8+((R()*(W-16))|0), z=8+((R()*(D-16))|0);
-            for(let y=H-2;y>4;y--){
-              if(getBlock(x,y,z)===1){
-                const h=3+((R()*2)|0);
-                for(let i=1;i<=h;i++) blocks[bidx(x,y+i,z)]=5;
-                for(let lx=-2;lx<=2;lx++) for(let lz=-2;lz<=2;lz++) for(let ly=0;ly<=1;ly++){
-                  if(Math.abs(lx)+Math.abs(lz)+ly>3) continue;
-                  const p=bidx(x+lx,y+h+ly,z+lz);
-                  if(!blocks[p]) blocks[p]=6;
-                }
-                blocks[bidx(x,y+h+2,z)]=6;
-                break;
-              }
-              if(getBlock(x,y,z)) break;
-            }
-          }
+          applyEditsToCol(buf, cx, cz);
+          return { buf, maxY: Math.min(H-1, maxY) };
         }
         
         // ---------- chunk meshing: merged geometry, face culling, vertex AO ----------
@@ -885,6 +1052,7 @@
             const base=B.pos.length/3;
             B.pos.push(cx-dx,y,cz-dz,  cx+dx,y,cz+dz,  cx-dx,y+h,cz-dz,  cx+dx,y+h,cz+dz);
             B.uv.push(t.u0,t.v0, t.u1,t.v0, t.u0,t.v1, t.u1,t.v1);
+            B.nor.push(0,1,0, 0,1,0, 0,1,0, 0,1,0);     // top-lit tufts (no computeVertexNormals)
             B.sway.push(0,0,swayScale,swayScale);       // tops sway, roots stay planted
             for(let i=0;i<4;i++) B.col.push(br,br,br);
             B.idx.push(base,base+1,base+2, base+2,base+1,base+3);
@@ -913,14 +1081,14 @@
           const old = scene3.chunks.get(key);
           if(old){ ['static','anim','glass','deco'].forEach(k=>{ if(old[k]){ scene.remove(old[k]); old[k].geometry.dispose(); } }); }
         
-          const buf = { pos:[], uv:[], col:[], idx:[] };
-          const abuf = { pos:[], uv:[], col:[], idx:[] };
-          const gbuf = { pos:[], uv:[], col:[], idx:[] };
-          const dbuf = { pos:[], uv:[], col:[], idx:[], sway:[] };
+          const buf = { pos:[], uv:[], col:[], idx:[], nor:[] };
+          const abuf = { pos:[], uv:[], col:[], idx:[], nor:[] };
+          const gbuf = { pos:[], uv:[], col:[], idx:[], nor:[] };
+          const dbuf = { pos:[], uv:[], col:[], idx:[], sway:[], nor:[] };
         
           for(let lx=0;lx<CH;lx++) for(let ly=0;ly<CH;ly++) for(let lz=0;lz<CH;lz++){
             const x=cx*CH+lx, y=cy*CH+ly, z=cz*CH+lz;
-            if(x>=W||y>=H||z>=D) continue;
+            if(y<0||y>=H) continue;                 // x/z unbounded (streaming world)
             const id = getBlock(x,y,z);
             if(!id) continue;
             const block = blockById(id);
@@ -947,6 +1115,7 @@
                 }
                 else { u = lerp(tile.u0,tile.u1,corner.uv[0]); v = lerp(tile.v0,tile.v1,corner.uv[1]); }
                 B.uv.push(u,v);
+                B.nor.push(dx,dy,dz);                            // flat face normal (no computeVertexNormals)
                 const br = face.bright * vertexAO(x,y,z,face.dir,corner);
                 B.col.push(br,br,br);
               }
@@ -961,9 +1130,9 @@
             g.setAttribute('position', new THREE.Float32BufferAttribute(b.pos,3));
             g.setAttribute('uv', new THREE.Float32BufferAttribute(b.uv,2));
             g.setAttribute('color', new THREE.Float32BufferAttribute(b.col,3));
+            g.setAttribute('normal', new THREE.Float32BufferAttribute(b.nor,3));
             if(b.sway) g.setAttribute('sway', new THREE.Float32BufferAttribute(b.sway,1));
             g.setIndex(b.idx);
-            g.computeVertexNormals();
             const m = new THREE.Mesh(g, mat);
             m.position.copy(WORLD_OFFSET);
             scene.add(m);
@@ -976,12 +1145,93 @@
           scene3.chunks.set(key, out);
         }
         function rebuildChunkAt(x,y,z){
-          if(x<0||y<0||z<0||x>=W||y>=H||z>=D) return;
-          buildChunkMesh((x/CH)|0,(y/CH)|0,(z/CH)|0);
+          if(y<0||y>=H) return;
+          buildChunkMesh(Math.floor(x/CH), Math.floor(y/CH), Math.floor(z/CH));
         }
+        // Re-mesh every currently-resident column (e.g. after the biome theme changes).
         function rebuildWorld(){
-          for(let cx=0;cx<W/CH;cx++) for(let cy=0;cy<H/CH;cy++) for(let cz=0;cz<D/CH;cz++)
-            buildChunkMesh(cx,cy,cz);
+          for(const k of [...meshedCols]){
+            const c = k.split(','); meshColumn(+c[0], +c[1]);
+          }
+          updateHUD();
+        }
+
+        // ---------- chunk streaming: keep a disc of columns around the player ----------
+        const VCH = H/CH;                       // vertical sub-chunks per column
+        const meshedCols = new Set();           // "cx,cz" columns currently meshed
+        let buildQueue = [];                    // pending column meshes, nearest first
+        let _streamCx = null, _streamCz = null;
+
+        function meshColumn(cx,cz){
+          // ensure this column + its 8 neighbours are buffered so border faces/AO read
+          // real data (not the tree-less single-voxel fallback)
+          for(let dx=-1;dx<=1;dx++) for(let dz=-1;dz<=1;dz++) ensureCol(cx+dx, cz+dz);
+          // only mesh up to the filled height — skip the empty sky sub-chunks above
+          const topCy = Math.min(VCH-1, Math.floor((colMaxY.get(colKey(cx,cz)) || (H-1))/CH));
+          for(let cy=0; cy<=topCy; cy++) buildChunkMesh(cx,cy,cz);
+          meshedCols.add(colKey(cx,cz));
+        }
+        function unloadColumn(cx,cz){
+          for(let cy=0; cy<VCH; cy++){
+            const key = `${cx},${cy},${cz}`;
+            const o = scene3.chunks.get(key);
+            if(o){ ['static','anim','glass','deco'].forEach(k=>{ if(o[k]){ scene.remove(o[k]); o[k].geometry.dispose(); } }); scene3.chunks.delete(key); }
+          }
+          meshedCols.delete(colKey(cx,cz));
+        }
+        // Recompute the desired disc of loaded chunks around the player's column.
+        function streamAround(wx, wz){
+          const ccx = Math.floor(wx/CH), ccz = Math.floor(wz/CH);
+          if(ccx===_streamCx && ccz===_streamCz) return;
+          _streamCx = ccx; _streamCz = ccz;
+          // (buffers are generated lazily by meshColumn, which ensures its neighbours)
+          // rebuild the mesh queue (nearest first) for un-meshed columns within VIEW_R
+          buildQueue = [];
+          const view2 = VIEW_R*VIEW_R;
+          for(let dx=-VIEW_R;dx<=VIEW_R;dx++) for(let dz=-VIEW_R;dz<=VIEW_R;dz++){
+            const d2 = dx*dx+dz*dz; if(d2>view2) continue;
+            const cx=ccx+dx, cz=ccz+dz;
+            if(!meshedCols.has(colKey(cx,cz))) buildQueue.push({cx,cz,d2});
+          }
+          buildQueue.sort((a,b)=>a.d2-b.d2);
+          // unload meshes + buffers that drifted out of range
+          const un2 = UNLOAD_R*UNLOAD_R, drop2 = (UNLOAD_R+2)*(UNLOAD_R+2);
+          for(const k of [...meshedCols]){
+            const c=k.split(','), cx=+c[0], cz=+c[1];
+            const ddx=cx-ccx, ddz=cz-ccz;
+            if(ddx*ddx+ddz*ddz>un2) unloadColumn(cx,cz);
+          }
+          for(const k of [...worldCols.keys()]){
+            const c=k.split(','), cx=+c[0], cz=+c[1];
+            const ddx=cx-ccx, ddz=cz-ccz;
+            if(ddx*ddx+ddz*ddz>drop2){ worldCols.delete(k); colMaxY.delete(k); }
+          }
+        }
+        // Mesh queued columns under a per-frame TIME budget (ms) so streaming spreads
+        // across frames instead of hitching. Always advances at least one column.
+        function processBuildQueue(maxMs){
+          if(!buildQueue.length) return;
+          const now = (typeof performance!=='undefined' && performance.now) ? ()=>performance.now() : ()=>Date.now();
+          const t0 = now();
+          do {
+            const job = buildQueue.shift();
+            if(job && !meshedCols.has(colKey(job.cx,job.cz))) meshColumn(job.cx,job.cz);
+          } while(buildQueue.length && now()-t0 < maxMs);
+        }
+        // Dispose all chunks + buffers (used when entering / changing planet).
+        function resetStreaming(){
+          for(const k of [...meshedCols]){ const c=k.split(','); unloadColumn(+c[0], +c[1]); }
+          meshedCols.clear();
+          worldCols.clear();
+          colMaxY.clear();
+          buildQueue = [];
+          _streamCx = _streamCz = null;
+        }
+        // Build the spawn area up front; the rest streams in over the next frames.
+        function streamInit(){
+          streamAround(player.pos.x, player.pos.z);
+          const N = Math.min(buildQueue.length, 200);   // nearest disc synchronously
+          for(let i=0;i<N;i++){ const j=buildQueue.shift(); if(j && !meshedCols.has(colKey(j.cx,j.cz))) meshColumn(j.cx,j.cz); }
           updateHUD();
         }
         // ---------- materials + boot ----------
@@ -1746,7 +1996,7 @@
           player.vel[axis]=0;
           if(axis==='y' && amt<0) player.grounded=true;
         }
-        
+
         // ---------- input (listeners attached in enter()) ----------
         const keys = {};
         let firstPerson = true;
@@ -2601,7 +2851,7 @@
             'Crystal': 'Krystal', 'Emerald Crystal': 'Smaragdkrystal', 'Void Crystal': 'Tomrumskrystal',
             'Metal': 'Metal', 'Alloy': 'Legering', 'Glass': 'Glas', 'Circuit': 'Kredsløb',
             'Lamp': 'Lampe', 'Hull': 'Skrog', 'Energy': 'Energi',
-            'Lava': 'Lava', 'Acid': 'Syre'
+            'Lava': 'Lava', 'Acid': 'Syre', 'Water': 'Vand'
         };
 
         function fillScanPanelContent(b, id, cracking, expanded) {
@@ -3247,13 +3497,22 @@
             const el = document.getElementById('voxel-journal-hud');
             const AP = getProfileApi();
             if (!el || !AP) return;
-            const prog = AP.missionProgress(AP.load());
+            const p = AP.load();
+            const prog = AP.missionProgress(p);
             el.hidden = false;
+            let planetLine = '';
+            if (AP.currentPlanetDef) {
+                const def = AP.currentPlanetDef(p);
+                const charted = (p.system && p.system.unlocked) ? p.system.unlocked.length : 1;
+                const total = AP.PLANETS ? AP.PLANETS.length : 1;
+                planetLine = '<div class="vx-planet-line">🪐 <b>' + def.name + '</b> · ' + def.nameDa
+                    + ' <span class="vx-planet-count">(' + charted + '/' + total + ' charted · Shift+R to travel)</span></div>';
+            }
             if (!prog.mission) {
-                el.innerHTML = '<b>✓ Surveys complete</b> — all objectives done';
+                el.innerHTML = planetLine + '<b>✓ Surveys complete</b> — all objectives done';
                 return;
             }
-            el.innerHTML = '<b>' + prog.mission.title + '</b> — ' + prog.label;
+            el.innerHTML = planetLine + '<b>' + prog.mission.title + '</b> — ' + prog.label;
         }
 
         function recordJournalScan(blockId) {
@@ -4817,7 +5076,6 @@
             p.inventory.hotbar = hotbar.map((s) => (s ? { id: s.id, count: s.count } : null));
             p.inventory.ownedWeapons = [...ownedWeapons];
             p.character = normalizeCharCfg(loadCharCfg());
-            p.asteroid.seed = SEED;
             AP.save(p);
         }
 
@@ -5507,41 +5765,22 @@
             camera = g.camera;
             camera.fov = firstPerson ? getFpCam().fov : getTpCam().fov;
             camera.near = 0.1;
-            camera.far = 500;
+            camera.far = 700;
             camera.updateProjectionMatrix();
-            (function nebulaBackground(){
-              const c=document.createElement('canvas'); c.width=c.height=1024;
-              const x=c.getContext('2d');
-              const base=x.createLinearGradient(0,0,1024,1024);
-              base.addColorStop(0,'#101238'); base.addColorStop(.5,'#1d1452'); base.addColorStop(1,'#0c0e2c');
-              x.fillStyle=base; x.fillRect(0,0,1024,1024);
-              const blobs=[[300,340,430,'#5a3df0'],[720,290,370,'#b04ae0'],[520,700,420,'#e052c8'],
-                             [860,760,310,'#2c6cf0'],[180,820,290,'#7a2cd8'],[640,520,260,'#ff7ad6']];
-              for(const[bx,by,r,col] of blobs){
-                const g2=x.createRadialGradient(bx,by,10,bx,by,r);
-                g2.addColorStop(0,col+'a8'); g2.addColorStop(.6,col+'38'); g2.addColorStop(1,col+'00');
-                x.fillStyle=g2; x.fillRect(0,0,1024,1024);
-              }
-              for(let i=0;i<420;i++){
-                const s=Math.random();
-                x.fillStyle='rgba(255,255,255,'+(0.25+s*0.7)+')';
-                x.fillRect(Math.random()*1024, Math.random()*1024, s>0.94?3:1.6, s>0.94?3:1.6);
-              }
-              _voxelBg = new THREE.CanvasTexture(c);
-              g.scene.background = _voxelBg;
-            })();
-            // Soft distance fade — keeps the white blowout on bright tops in check.
-            g.scene.fog = new THREE.Fog(0x1a1440, 28, 130);
+            // Daytime planet sky + horizon haze (replaces the old nebula space bg).
+            // Fog far hides the world edge so terrain reads as "to the horizon".
+            g.scene.fog = new THREE.Fog(0xbfe0f5, FOG_NEAR, FOG_FAR);
             if (!g._voxelLights) {
                 g._voxelLights = [];
-                const hemi = new THREE.HemisphereLight(0xc4d8ff, 0x3a2468, 0.85);
-                const keyL = new THREE.DirectionalLight(0xfff2dd, 0.75);
-                keyL.position.set(30, 60, 40);
-                const rim = new THREE.DirectionalLight(0xe06ae8, 0.35);
+                const hemi = new THREE.HemisphereLight(0x4a90e0, 0x6a7a4a, 0.9);
+                const keyL = new THREE.DirectionalLight(0xfff4e0, 1.05);
+                keyL.position.set(60, 120, 40);   // sun high overhead
+                const rim = new THREE.DirectionalLight(0xbfe0f5, 0.22);
                 rim.position.set(-40, 30, -30);
                 g.scene.add(hemi, keyL, rim);
                 g._voxelLights.push(hemi, keyL, rim);
             }
+            applyPlanetAtmosphere();   // paints sky bg + tints fog/lights for the active planet
             _hideLegacyEnvironment();
             if (g._hideLegacyPlayUI) g._hideLegacyPlayUI();
             const hud = document.getElementById('voxel-overlay');
@@ -5551,6 +5790,7 @@
 
         function _restoreScene() {
             if (!_saved) return;
+            if (g.camera && g.camera.up) g.camera.up.set(0, 1, 0);   // undo radial camera up
             if (_voxelBg && _voxelBg !== _saved.bg) {
                 _voxelBg.dispose();
             }
@@ -5646,22 +5886,101 @@
             _listeners = [];
         }
 
-        function spawnPlayerAtCenter() {
+        // Topmost solid, non-water surface height in a column (-1 if only water/air).
+        // Topmost solid, non-water surface height in a column (via the generator).
+        function landTop(cx, cz) {
             for (let y = H - 2; y > 0; y--) {
-                if (getBlock(W >> 1, y, D >> 1)) {
-                    player.pos.set(W / 2 + 0.5 + WORLD_OFFSET.x, y + 1 + WORLD_OFFSET.y + 0.01, D / 2 + 0.5 + WORLD_OFFSET.z);
-                    player.vel.set(0, 0, 0);
-                    return;
+                const b = genBlockSingle(cx, y, cz);
+                if (b && b !== WATER) return y;
+            }
+            return -1;
+        }
+
+        // Spawn standing on dry land: spiral outward from the origin for the first
+        // column whose surface is land at/above the water line.
+        function spawnPlayerAtCenter() {
+            const place = (cx, cz, y) => {
+                player.pos.set(cx + 0.5 + WORLD_OFFSET.x, y + 1 + WORLD_OFFSET.y + 0.01, cz + 0.5 + WORLD_OFFSET.z);
+                player.vel.set(0, 0, 0);
+            };
+            for (let r = 0; r < 600; r += 2) {
+                for (let a = 0; a < (r ? 8 : 1); a++) {
+                    const ang = (a / 8) * Math.PI * 2;
+                    const cx = Math.round(Math.cos(ang) * r);
+                    const cz = Math.round(Math.sin(ang) * r);
+                    const y = landTop(cx, cz);
+                    if (y >= SEA_LEVEL) { place(cx, cz, y); return; }
                 }
             }
-            player.pos.set(0, 24, 0);
-            player.vel.set(0, 0, 0);
+            place(0, 0, Math.max(SEA_LEVEL, landTop(0, 0)));
         }
+
+        // ---------- multiplanetary travel ----------
+        // Switch the player to another *unlocked* planet: persist the choice, then
+        // regenerate the world from that planet's seed/biome and respawn. Returns
+        // false if the planet isn't unlocked (or there is no profile API).
+        function travelToPlanet(id) {
+            const AP = getProfileApi();
+            if (!AP || !AP.setCurrentPlanet) return false;
+            if (!AP.setCurrentPlanet(AP.load(), id)) return false;
+            loadActivePlanet();
+            loadProfileEdits();
+            resetStreaming();
+            spawnPlayerAtCenter();
+            streamInit();
+            flushProfileState();
+            const def = AP.planetDef ? AP.planetDef(id) : null;
+            if (def && g.showMessage) g.showMessage('Arrived at ' + def.name + ' · ' + def.nameDa, 2600);
+            if (typeof updateJournalHud === 'function') updateJournalHud();
+            return true;
+        }
+
+        // Cycle to the next unlocked planet in catalog order (Shift+R / dev hook).
+        function travelToNextPlanet() {
+            const AP = getProfileApi();
+            if (!AP || !AP.nextUnlockedPlanet) return;
+            const next = AP.nextUnlockedPlanet(AP.load());
+            if (!next) return;
+            if (next.id === activePlanetId) {
+                if (g.showMessage) g.showMessage('No other planets granted yet — complete a survey to chart one.', 2600);
+                return;
+            }
+            travelToPlanet(next.id);
+        }
+
+        // Dev/manual hook: jump straight to a planet by id from the console.
+        // Grants the planet first (bypasses the mission gate) so any world is
+        // reachable for testing. e.g. window.PJBOY_ASTEROID.travel('frost_tinde')
+        window.PJBOY_ASTEROID = {
+            travel: (id) => {
+                const AP = getProfileApi();
+                if (AP && AP.grantPlanet) {
+                    const p = AP.load();
+                    if (AP.grantPlanet(p, id)) AP.save(p);
+                }
+                return travelToPlanet(id);
+            },
+            next: travelToNextPlanet,
+            unlockAll: () => {
+                const AP = getProfileApi();
+                if (!AP || !AP.PLANETS) return;
+                const p = AP.load();
+                AP.PLANETS.forEach((pl) => AP.grantPlanet(p, pl.id));
+                AP.save(p);
+                if (typeof updateJournalHud === 'function') updateJournalHud();
+                if (g.showMessage) g.showMessage('All planets charted (dev).', 2000);
+            },
+            planets: () => (window.AsteroidProfile ? window.AsteroidProfile.PLANETS : []),
+            current: () => activePlanetId
+        };
 
         function tick(dt) {
             if (g.keys) Object.assign(keys, g.keys);
             _hideLegacyEnvironment();
             if (g._hideLegacyPlayUI) g._hideLegacyPlayUI();
+            // stream chunks around the player (load ahead, unload behind)
+            streamAround(player.pos.x, player.pos.z);
+            processBuildQueue(3.5);            // ms/frame — spreads meshing to avoid hitches
             elapsed += dt;
             // --- movement intent in camera space ---
             let ix=0,iz=0;
@@ -5824,8 +6143,6 @@
                 if (adsYaw) getTpAimVectors(_tpCamFwd, _tpCamRight, adsYaw);
                 else { _tpCamFwd.copy(_tpFwd); _tpCamRight.copy(_tpRight); }
                 _tpFocus.copy(player.pos).add(new THREE.Vector3(0, tc.focusH, 0));
-                // Over-the-right-shoulder: camera sits behind + right so the hero
-                // frames on the right third and the crosshair opens to the left.
                 _tpDesired.copy(_tpFocus)
                     .addScaledVector(_tpCamFwd, -camDist)
                     .addScaledVector(_tpCamRight, camShoulder)
@@ -5924,14 +6241,8 @@
                     else showAimTuner();
                 }
                 if (e.code === 'KeyR' && (e.shiftKey || e.metaKey)) {
-                    SEED = (Math.random() * 1e9) | 0;
-                    const AP = getProfileApi();
-                    if (AP) AP.setAsteroidSeed(AP.load(), SEED);
-                    generateWorld();
-                    rebuildWorld();
-                    spawnPlayerAtCenter();
-                    flushProfileState();
-                    if (g.showMessage) g.showMessage('New claim seed: 0x' + (SEED >>> 0).toString(16), 2200);
+                    e.preventDefault();
+                    travelToNextPlanet();
                 }
             });
             on(window, 'keyup', e => { keys[e.code] = false; });
@@ -6049,10 +6360,11 @@
                 texturesReady = true;
             }
             rebuildMaterials();
-            loadProfileSeed();
-            generateWorld();
-            applyProfileEdits();
-            rebuildWorld();
+            loadActivePlanet();
+            loadProfileEdits();
+            resetStreaming();
+            spawnPlayerAtCenter();
+            streamInit();
             renderHotbar();
             updateJournalHud();
             if (!av) {

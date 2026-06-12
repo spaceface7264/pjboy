@@ -5,8 +5,8 @@
 (function () {
     'use strict';
 
-    const PROFILE_KEY = 'pjboy.profile.v1';
-    const PROFILE_VERSION = 1;
+    const PROFILE_KEY = 'pjboy.profile.v2';
+    const PROFILE_VERSION = 2;
 
     const MISSIONS = [
         {
@@ -62,6 +62,48 @@
         }
     ];
 
+    // ---- Multiplanetary system: a curated catalog of granted worlds ----
+    // Each planet is a deterministic seed + a biome theme. Names are bilingual
+    // (English-forward, Danish underneath) per the Danish->English learning goal.
+    // `grant.missionsDone` = how many surveys must be completed before the planet's
+    // coordinates are granted; the home world is always unlocked (0).
+    const PLANETS = [
+        {
+            id: 'verdant_home', name: 'Verdant', nameDa: 'Den Grønne',
+            seed: 0x5eed01, biome: 'verdant', grant: { missionsDone: 0 },
+            blurb: 'Your home claim — green growth, gentle caves, mild gravity.'
+        },
+        {
+            id: 'frost_tinde', name: 'Frostpeak', nameDa: 'Frosttinde',
+            seed: 0x1ce902, biome: 'frost', grant: { missionsDone: 1 },
+            blurb: 'A frozen world: ice and snow blanket the surface — water turned solid by the cold.'
+        },
+        {
+            id: 'spore_myco', name: 'Mycelia', nameDa: 'Svampeland',
+            seed: 0x5f0f03, biome: 'fungal', grant: { missionsDone: 2 },
+            blurb: 'A living fungal world. Spores and fungal mats grow where green plants cannot.'
+        },
+        {
+            id: 'dust_regis', name: 'Dustfall', nameDa: 'Støvfald',
+            seed: 0xd05704, biome: 'desert', grant: { missionsDone: 3 },
+            blurb: 'A dry regolith world — bare rock and dust, much like the surface of the Moon.'
+        },
+        {
+            id: 'ember_glod', name: 'Ember', nameDa: 'Glødehed',
+            seed: 0xe11e05, biome: 'volcanic', grant: { missionsDone: 4 },
+            blurb: 'A volcanic world. Red rock and basalt lie over hot ground above the molten core.'
+        }
+    ];
+    const HOME_PLANET_ID = PLANETS[0].id;
+
+    function planetDef(id) {
+        return PLANETS.find((pl) => pl.id === id) || PLANETS[0];
+    }
+
+    function defaultPlanetState() {
+        return { edits: [], claimName: '', visited: false };
+    }
+
     function defaultCharacter() {
         const VC = typeof VoxelCharacter !== 'undefined' ? VoxelCharacter : null;
         if (VC) return Object.assign({}, VC.DEFAULT_PARAMS, { deco: 1, hair: 2 });
@@ -69,17 +111,15 @@
     }
 
     function defaultProfile() {
-        const seed = (Math.random() * 1e9) | 0;
         return {
             version: PROFILE_VERSION,
             displayName: '',
             characterSetupDone: false,
             character: defaultCharacter(),
-            asteroid: {
-                seed,
-                edits: [],
-                named: false,
-                claimName: ''
+            system: {
+                current: HOME_PLANET_ID,
+                unlocked: [HOME_PLANET_ID],
+                planets: { [HOME_PLANET_ID]: Object.assign(defaultPlanetState(), { visited: true }) }
             },
             journal: {
                 scanned: {},
@@ -113,10 +153,7 @@
         p.displayName = String(p.displayName || '').slice(0, 16);
         p.character = normalizeCharacter(p.character);
         p.characterSetupDone = !!p.characterSetupDone;
-        p.asteroid = Object.assign({}, base.asteroid, p.asteroid || {});
-        p.asteroid.seed = (p.asteroid.seed | 0) || base.asteroid.seed;
-        p.asteroid.edits = Array.isArray(p.asteroid.edits) ? p.asteroid.edits : [];
-        p.asteroid.claimName = String(p.asteroid.claimName || '').slice(0, 24);
+        p.system = normalizeSystem(p.system);
         p.journal = Object.assign({ scanned: {}, places: 0, crafted: {} }, p.journal || {});
         p.journal.scanned = p.journal.scanned && typeof p.journal.scanned === 'object' ? p.journal.scanned : {};
         p.journal.places = p.journal.places | 0;
@@ -131,6 +168,29 @@
         p.missions.completed = Array.isArray(p.missions.completed) ? p.missions.completed : [];
         p.lastPlayed = p.lastPlayed | 0;
         return p;
+    }
+
+    function normalizeSystem(raw) {
+        const sys = (raw && typeof raw === 'object') ? raw : {};
+        const out = { current: HOME_PLANET_ID, unlocked: [], planets: {} };
+        const want = Array.isArray(sys.unlocked) ? sys.unlocked : [];
+        const valid = want.filter((id) => PLANETS.some((pl) => pl.id === id));
+        out.unlocked = Array.from(new Set([HOME_PLANET_ID].concat(valid)));
+        const planets = (sys.planets && typeof sys.planets === 'object') ? sys.planets : {};
+        out.unlocked.forEach((id) => {
+            const ps = (planets[id] && typeof planets[id] === 'object') ? planets[id] : {};
+            const edits = Array.isArray(ps.edits) ? ps.edits.filter(
+                (e) => e && typeof e === 'object'
+            ).map((e) => ({ x: e.x | 0, y: e.y | 0, z: e.z | 0, id: e.id | 0 })) : [];
+            out.planets[id] = {
+                edits,
+                claimName: String(ps.claimName || '').slice(0, 24),
+                visited: !!ps.visited
+            };
+        });
+        out.current = out.unlocked.indexOf(sys.current) >= 0 ? sys.current : HOME_PLANET_ID;
+        out.planets[out.current].visited = true;
+        return out;
     }
 
     function migrateLegacy(profile) {
@@ -173,6 +233,7 @@
 
     function save(profile) {
         const p = normalizeProfile(profile);
+        evaluateGrants(p);
         p.lastPlayed = Date.now();
         try {
             localStorage.setItem(PROFILE_KEY, JSON.stringify(p));
@@ -266,15 +327,70 @@
         return { completed };
     }
 
-    function setAsteroidSeed(profile, seed) {
-        profile.asteroid.seed = seed | 0;
-        profile.asteroid.edits = [];
+    // ---- Planet system accessors ----
+    function currentPlanetId(profile) {
+        return profile.system.current;
+    }
+
+    function currentPlanetDef(profile) {
+        return planetDef(profile.system.current);
+    }
+
+    // Mutable saved state for one planet (edits/claimName/visited); created on demand.
+    function planetState(profile, id) {
+        id = id || profile.system.current;
+        if (!profile.system.planets[id]) profile.system.planets[id] = defaultPlanetState();
+        return profile.system.planets[id];
+    }
+
+    function unlockedPlanets(profile) {
+        return PLANETS.filter((pl) => profile.system.unlocked.indexOf(pl.id) >= 0);
+    }
+
+    function isUnlocked(profile, id) {
+        return profile.system.unlocked.indexOf(id) >= 0;
+    }
+
+    function grantPlanet(profile, id) {
+        if (!PLANETS.some((pl) => pl.id === id)) return false;
+        if (profile.system.unlocked.indexOf(id) >= 0) return false;
+        profile.system.unlocked.push(id);
+        if (!profile.system.planets[id]) profile.system.planets[id] = defaultPlanetState();
+        return true;
+    }
+
+    // Unlock any catalog planets whose grant condition the player now meets.
+    // Returns the list of newly-granted planet defs.
+    function evaluateGrants(profile) {
+        if (!profile || !profile.system) return [];
+        const done = (profile.missions && Array.isArray(profile.missions.completed))
+            ? profile.missions.completed.length : 0;
+        const newly = [];
+        for (const pl of PLANETS) {
+            const need = (pl.grant && pl.grant.missionsDone) | 0;
+            if (done >= need && grantPlanet(profile, pl.id)) newly.push(pl);
+        }
+        return newly;
+    }
+
+    function setCurrentPlanet(profile, id) {
+        if (profile.system.unlocked.indexOf(id) < 0) return false;
+        profile.system.current = id;
+        planetState(profile, id).visited = true;
         save(profile);
-        return profile;
+        return true;
+    }
+
+    // Next unlocked planet in catalog order (wraps) — drives "travel" cycling.
+    function nextUnlockedPlanet(profile) {
+        const order = unlockedPlanets(profile);
+        if (!order.length) return PLANETS[0];
+        const i = order.findIndex((pl) => pl.id === profile.system.current);
+        return order[(i + 1) % order.length];
     }
 
     function upsertBlockEdit(profile, x, y, z, id) {
-        const edits = profile.asteroid.edits;
+        const edits = planetState(profile).edits;
         const key = `${x | 0},${y | 0},${z | 0}`;
         const idx = edits.findIndex((e) => `${e.x},${e.y},${e.z}` === key);
         const row = { x: x | 0, y: y | 0, z: z | 0, id: id | 0 };
@@ -284,11 +400,22 @@
     }
 
     function claimSummary(profile) {
-        const seedHex = (profile.asteroid.seed >>> 0).toString(16);
-        const edits = profile.asteroid.edits.length;
-        const cataloged = journalUniqueCount(profile);
-        const name = profile.asteroid.claimName || ('Claim ' + seedHex.slice(0, 6));
-        return { seedHex, edits, cataloged, name };
+        const def = currentPlanetDef(profile);
+        const st = planetState(profile);
+        const seedHex = (def.seed >>> 0).toString(16);
+        const name = st.claimName || def.name;
+        return {
+            seedHex,
+            edits: st.edits.length,
+            cataloged: journalUniqueCount(profile),
+            name,
+            planetId: def.id,
+            planetName: def.name,
+            planetNameDa: def.nameDa,
+            biome: def.biome,
+            unlockedCount: profile.system.unlocked.length,
+            totalPlanets: PLANETS.length
+        };
     }
 
     function recipeById(id) {
@@ -316,6 +443,8 @@
         PROFILE_KEY,
         MISSIONS,
         CRAFT_RECIPES,
+        PLANETS,
+        HOME_PLANET_ID,
         recipeById,
         craftAvailability,
         defaultProfile,
@@ -331,9 +460,18 @@
         recordScan,
         recordPlace,
         recordCraft,
-        setAsteroidSeed,
         upsertBlockEdit,
         claimSummary,
-        syncLegacyKeys
+        syncLegacyKeys,
+        planetDef,
+        currentPlanetId,
+        currentPlanetDef,
+        planetState,
+        unlockedPlanets,
+        isUnlocked,
+        grantPlanet,
+        evaluateGrants,
+        setCurrentPlanet,
+        nextUnlockedPlanet
     };
 })();

@@ -1880,6 +1880,14 @@ body.mode-asteroid #lava-vignette {
     border-color: rgba(255, 210, 120, 0.45);
     color: #ffe8b8;
 }
+.vx-planet-line {
+    margin-bottom: 0.3rem;
+    padding-bottom: 0.3rem;
+    border-bottom: 1px solid rgba(90, 200, 230, 0.22);
+    color: #cde6f2;
+}
+.vx-planet-line b { color: #8af0c0; }
+.vx-planet-count { color: #7fa6b6; font-size: 10px; }
 
 /* ===== Asteroid controls drawer (right) ===== */
 #voxel-controls-drawer.vx-controls-drawer {
