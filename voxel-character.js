@@ -62,6 +62,24 @@ const SAVE_KEY = 'pjboy.voxelChar.v1';
 
 // ---------- canvas textures ----------
 function hx(h){ return '#'+h.toString(16).padStart(6,'0'); }
+// eye sockets (the white area) — iris/pupil/highlight ride inside these, offset by gaze
+const EYE_L = { x:24, y:52, w:26, h:22 };
+const EYE_R = { x:78, y:52, w:26, h:22 };
+// redraw both eyes with the pupils offset toward (gx,gy) ∈ [-1,1]; clipped to the sockets
+function drawEyes(x, gx, gy){
+  const dx = Math.round(THREE.MathUtils.clamp(gx, -1, 1) * 5);
+  const dy = Math.round(THREE.MathUtils.clamp(gy, -1, 1) * 4);
+  [EYE_L, EYE_R].forEach(e => {
+    x.save();
+    x.beginPath(); x.rect(e.x, e.y, e.w, e.h); x.clip();
+    x.fillStyle='#ffffff'; x.fillRect(e.x, e.y, e.w, e.h);                    // white
+    const ix = e.x + 8 + dx, iy = e.y + 3 + dy;
+    x.fillStyle='#2a2d36'; x.fillRect(ix, iy, 14, 18);                        // iris
+    x.fillStyle='#101218'; x.fillRect(ix + 3, iy + 4, 8, 10);                // pupil
+    x.fillStyle='#ffffff'; x.fillRect(ix + 1, iy + 1, 4, 4);                 // highlight
+    x.restore();
+  });
+}
 function faceTexture(skinHex, hairHex){
   const c=document.createElement('canvas'); c.width=c.height=128;
   const x=c.getContext('2d');
@@ -70,18 +88,36 @@ function faceTexture(skinHex, hairHex){
   const lum=((hairHex>>16)&255)*.3+((hairHex>>8)&255)*.6+(hairHex&255)*.1;
   x.fillStyle = lum>190? '#3a3a40' : hx(hairHex);
   x.fillRect(22,38,28,7); x.fillRect(78,38,28,7);
-  // big chibi eyes
-  x.fillStyle='#ffffff'; x.fillRect(24,52,26,22); x.fillRect(78,52,26,22);
-  x.fillStyle='#2a2d36'; x.fillRect(32,55,14,18); x.fillRect(86,55,14,18); // iris
-  x.fillStyle='#101218'; x.fillRect(35,59,8,10);  x.fillRect(89,59,8,10);  // pupil
-  x.fillStyle='#ffffff'; x.fillRect(33,56,4,4);   x.fillRect(87,56,4,4);   // highlight
+  // big chibi eyes (pupils start centered)
+  drawEyes(x, 0, 0);
   // nose + mouth
   x.fillStyle='rgba(0,0,0,.14)'; x.fillRect(61,80,6,5);
   x.fillStyle='rgba(0,0,0,.35)'; x.fillRect(56,98,16,5);
   // cheek shading
   x.fillStyle='rgba(220,90,80,.13)'; x.fillRect(16,80,16,9); x.fillRect(96,80,16,9);
   const t=new THREE.CanvasTexture(c); t.magFilter=THREE.NearestFilter; t.minFilter=THREE.NearestFilter;
+  t.userData = { ctx: x, gx: 0, gy: 0 };
   return t;
+}
+// move the painted pupils toward (gx,gy); skips the redraw when gaze is unchanged
+function setGaze(char, gx, gy){
+  const tex = char && char.faceTex;
+  if (!tex || !tex.userData || !tex.userData.ctx) return;
+  const ud = tex.userData;
+  const ngx = Math.round(THREE.MathUtils.clamp(gx, -1, 1) * 100) / 100;
+  const ngy = Math.round(THREE.MathUtils.clamp(gy, -1, 1) * 100) / 100;
+  if (ngx === ud.gx && ngy === ud.gy) return;
+  ud.gx = ngx; ud.gy = ngy;
+  drawEyes(ud.ctx, ngx, ngy);
+  tex.needsUpdate = true;
+}
+// additive head turn + eye gaze, applied after update() so it overlays the idle pose
+function lookAt(char, headYaw, headPitch, eyeGx, eyeGy){
+  if (char && char.j && char.j.neck) {
+    char.j.neck.rotation.y += headYaw || 0;
+    char.j.neck.rotation.x += headPitch || 0;
+  }
+  setGaze(char, eyeGx || 0, eyeGy || 0);
 }
 function chestTexture(gearHex, accentHex){
   const c=document.createElement('canvas'); c.width=c.height=128;
@@ -1018,7 +1054,7 @@ function buildCharacter(params, opts){
   group.add(bike);
 
   if (withOutlines) addOutlines(group);
-  return { params: Object.assign({}, params), group, j, weapon, weaponDef: wDef,
+  return { params: Object.assign({}, params), group, j, weapon, weaponDef: wDef, faceTex,
            primaryHand: PRIMARY_HAND, weaponGrip, supportGrip: PRIMARY_HAND === 'right' ? AL.grip : AR.grip,
            socket, twoHanded,
            muzzleFlash, beam,
@@ -1591,6 +1627,7 @@ window.VoxelCharacter = {
   CLASSES, WEAPONS, BODY_TYPES, HEAD_DECOS, HAIR_COLORS, GEAR_COLORS, SKIN_TONES,
   DEFAULT_PARAMS, SAVE_KEY, weaponIdx,
   normalizeParams, loadSaved, saveParams, build, update, dispose, scaleToHeight,
+  setGaze, lookAt,
   buildWeapon, mirrorWeaponForTpGrip, tpWeaponGripRest, addOutlines,
   SWORD_SWING_DURATION, SWORD_SWING_COUNT: SWORD_SWING_VARIANTS.length, applySwordAttackPose,
   LASER_RIFLE_DURATION, LASER_RIFLE_COUNT: LASER_RIFLE_VARIANTS.length, applyLaserRifleRecoilPose,

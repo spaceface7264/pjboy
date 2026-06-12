@@ -194,12 +194,20 @@
             renderer: null,
             container: null,
             char: null,
-            spin: 0,
+            autoSpin: true,
+            yaw: Math.PI * 0.12,
+            _lastW: 0,
+            _lastH: 0,
+            _ptr: { nx: 0, ny: 0, inside: false },
+            _dragging: false,
+            _lastX: 0,
+            _handlers: null,
 
             mount(container) {
                 if (!window.THREE || !container) return false;
                 this.container = container;
                 container.innerHTML = '';
+                this._bindInput(container);
                 const w = Math.max(240, container.clientWidth || 300);
                 const h = Math.max(300, container.clientHeight || 340);
                 this.scene = new THREE.Scene();
@@ -232,9 +240,61 @@
                 if (!this.container || !this.renderer || !this.camera) return;
                 const w = Math.max(240, this.container.clientWidth || 300);
                 const h = Math.max(300, this.container.clientHeight || 340);
+                this._lastW = w;
+                this._lastH = h;
                 this.renderer.setSize(w, h, false);
                 this.camera.aspect = w / Math.max(h, 1);
                 this.camera.updateProjectionMatrix();
+            },
+
+            toggleSpin() {
+                this.autoSpin = !this.autoSpin;
+                return this.autoSpin;
+            },
+
+            // Drag to rotate the character a full 360°; track the cursor for head/eye follow.
+            _bindInput(el) {
+                el.style.touchAction = 'none';
+                el.style.cursor = 'grab';
+                const ptr = this._ptr;
+                const onMove = (e) => {
+                    const r = el.getBoundingClientRect();
+                    ptr.nx = ((e.clientX - r.left) / Math.max(1, r.width)) * 2 - 1;
+                    ptr.ny = ((e.clientY - r.top) / Math.max(1, r.height)) * 2 - 1;
+                    ptr.inside = true;
+                    if (this._dragging) {
+                        this.yaw += (e.clientX - this._lastX) * 0.011;
+                        this._lastX = e.clientX;
+                    }
+                };
+                const onDown = (e) => {
+                    this._dragging = true;
+                    this._lastX = e.clientX;
+                    el.style.cursor = 'grabbing';
+                    if (el.setPointerCapture && e.pointerId != null) {
+                        try { el.setPointerCapture(e.pointerId); } catch (_) {}
+                    }
+                };
+                const onUp = () => { this._dragging = false; el.style.cursor = 'grab'; };
+                const onEnter = () => { ptr.inside = true; };
+                const onLeave = () => { ptr.inside = false; this._dragging = false; el.style.cursor = 'grab'; };
+                this._handlers = { el, onMove, onDown, onUp, onEnter, onLeave };
+                el.addEventListener('pointermove', onMove);
+                el.addEventListener('pointerdown', onDown);
+                el.addEventListener('pointerup', onUp);
+                el.addEventListener('pointerenter', onEnter);
+                el.addEventListener('pointerleave', onLeave);
+            },
+
+            _unbindInput() {
+                const h = this._handlers;
+                if (!h) return;
+                h.el.removeEventListener('pointermove', h.onMove);
+                h.el.removeEventListener('pointerdown', h.onDown);
+                h.el.removeEventListener('pointerup', h.onUp);
+                h.el.removeEventListener('pointerenter', h.onEnter);
+                h.el.removeEventListener('pointerleave', h.onLeave);
+                this._handlers = null;
             },
 
             update(params) {
@@ -249,9 +309,8 @@
                 this.char = VC.build(normalized, { weaponEquipped: normalized.weapon >= 0 });
                 if (!this.char || !this.char.group) return;
                 VC.scaleToHeight(this.char.group, 1.75);
-                this.char.group.rotation.y = Math.PI * 0.12;
+                this.char.group.rotation.y = this.yaw;
                 this.scene.add(this.char.group);
-                this.spin = 0;
                 primeMetaCharPreviewPose(this, this.char);
                 this.resize();
                 this.render(0);
@@ -259,16 +318,43 @@
 
             render(dt) {
                 if (!this.renderer || !this.scene || !this.camera) return;
+                // Track the (CSS-driven) stage size so the large preview follows window/layout changes.
+                if (this.container) {
+                    const w = Math.max(240, this.container.clientWidth || 300);
+                    const h = Math.max(300, this.container.clientHeight || 340);
+                    if (w !== this._lastW || h !== this._lastH) this.resize();
+                }
                 const VC = window.VoxelCharacter;
                 if (dt > 0 && this.char && this.char.group && VC) {
-                    this.spin += dt * 0.28;
-                    this.char.group.rotation.y = Math.PI * 0.12 + Math.sin(this.spin) * 0.35;
+                    const ptr = this._ptr;
+                    // Auto-turntable rests while you're interacting, so head/eye follow reads clearly.
+                    if (this.autoSpin && !this._dragging && !ptr.inside) this.yaw += dt * 0.45;
+                    this.char.group.rotation.y = this.yaw;
                     VC.update(this.char, 'relaxed', dt, META_CHAR_PREVIEW_ANIM);
+                    this._applyLook(VC, ptr);
                 }
                 this.renderer.render(this.scene, this.camera);
             },
 
+            // Head turns toward the cursor (limited), eyes take the residual — when the body is
+            // dragged away the gaze pins to the corner, then "gives up". Neutral when not hovering.
+            _applyLook(VC, ptr) {
+                if (!VC.lookAt) return;
+                if (!ptr.inside) { VC.lookAt(this.char, 0, 0, 0, 0); return; }
+                const nx = Math.max(-1, Math.min(1, ptr.nx));
+                const ny = Math.max(-1, Math.min(1, ptr.ny));
+                // Desired head yaw in the character's local frame (world target − body yaw), wrapped.
+                let d = nx * 0.85 - this.yaw;
+                d = Math.atan2(Math.sin(d), Math.cos(d));
+                const headYaw = Math.max(-0.9, Math.min(0.9, d)) * 0.8;
+                const headPitch = Math.max(-0.4, Math.min(0.4, ny * 0.5));
+                const eyeGx = Math.max(-1, Math.min(1, d / 0.6));
+                const eyeGy = Math.max(-1, Math.min(1, ny * 0.85));
+                VC.lookAt(this.char, headYaw, headPitch, eyeGx, eyeGy);
+            },
+
             dispose() {
+                this._unbindInput();
                 const VC = window.VoxelCharacter;
                 if (this.char && VC) {
                     if (this.char.group && this.char.group.parent) this.char.group.parent.remove(this.char.group);
@@ -363,6 +449,16 @@
             document.getElementById('meta-character-save-btn')?.addEventListener('click', () => {
                 this.audio && this.audio.play('uiClick');
                 this._saveMetaCharacter();
+            });
+            document.getElementById('meta-character-new-btn')?.addEventListener('click', () => {
+                this.audio && this.audio.play('uiClick');
+                this._newMetaCharacter();
+            });
+            document.getElementById('meta-char-spin-btn')?.addEventListener('click', (e) => {
+                this.audio && this.audio.play('uiClick');
+                const host = this._metaCharPreviewHost;
+                const on = host ? host.toggleSpin() : false;
+                e.currentTarget.setAttribute('aria-pressed', on ? 'true' : 'false');
             });
             document.getElementById('meta-character-back-btn')?.addEventListener('click', () => {
                 this.audio && this.audio.play('uiClick');
@@ -570,7 +666,33 @@
                 cfg = VC ? VC.normalizeParams(base) : base;
             }
             this._charDraft = Object.assign({}, cfg);
+            const spinBtn = document.getElementById('meta-char-spin-btn');
+            if (spinBtn) spinBtn.setAttribute('aria-pressed', 'true');
             this.setAppPhase('character');
+            this._syncMetaCharacterUI();
+        },
+
+        // Roll a fresh explorer from scratch — a new randomized character to build on.
+        _newMetaCharacter() {
+            const VC = typeof VoxelCharacter !== 'undefined' ? VoxelCharacter : null;
+            if (!VC) return;
+            if (!this._metaCharUiReady) this._ensureMetaCharacterUI();
+            const pick = (arr) => Math.floor(Math.random() * arr.length);
+            const classIdx = pick(VC.CLASSES);
+            const cls = VC.CLASSES[classIdx];
+            const draft = VC.normalizeParams({
+                classIdx,
+                body: pick(VC.BODY_TYPES),
+                deco: pick(VC.HEAD_DECOS),
+                hair: pick(VC.HAIR_COLORS),
+                gear: pick(VC.GEAR_COLORS),
+                skin: pick(VC.SKIN_TONES),
+                weapon: 0
+            });
+            const wIdx = cls ? VC.weaponIdx(cls.weapon) : -1;
+            if (wIdx >= 0) draft.weapon = wIdx;
+            this._charDraft = draft;
+            if (this.appPhase !== 'character') this.setAppPhase('character');
             this._syncMetaCharacterUI();
         },
 

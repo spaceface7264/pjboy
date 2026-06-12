@@ -442,22 +442,115 @@ body.meta-settings-open #settings-modal.settings-over-meta {
     max-width: 640px;
 }
 
-.meta-char-layout {
+/* Character creator — full-screen: controls rail left, large preview right */
+.meta-char-screen {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    max-width: none;
+    height: 100%;
+    padding: 0;
     display: grid;
-    grid-template-columns: minmax(220px, 0.95fr) minmax(0, 1.15fr);
-    gap: 1rem 1.25rem;
-    margin-bottom: 1rem;
-    align-items: start;
+    grid-template-columns: minmax(300px, 360px) 1fr;
+    text-align: left;
+    overflow: hidden;
+}
+
+.meta-char-panel {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    padding: 1.4rem 1.25rem 1.1rem;
+    background: linear-gradient(180deg, rgba(14, 11, 6, 0.92), rgba(8, 6, 3, 0.96));
+    border-right: 1px solid rgba(255, 179, 71, 0.28);
+    box-shadow: inset -18px 0 40px rgba(0, 0, 0, 0.35);
+}
+
+.meta-char-panel-head {
+    flex: 0 0 auto;
+    margin-bottom: 0.75rem;
+}
+
+.meta-char-panel-head .meta-heading {
+    margin-bottom: 0.35rem;
+}
+
+.meta-char-panel-head .meta-tagline {
+    margin-bottom: 0;
+    font-size: 0.85rem;
+}
+
+.meta-char-panel-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding-right: 0.5rem;
+    margin-right: -0.4rem;
+}
+
+.meta-char-panel-scroll::-webkit-scrollbar {
+    width: 8px;
+}
+
+.meta-char-panel-scroll::-webkit-scrollbar-thumb {
+    background: rgba(255, 179, 71, 0.28);
+    border-radius: 4px;
+}
+
+.meta-char-actions {
+    flex: 0 0 auto;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    padding-top: 0.85rem;
+    margin-top: 0.5rem;
+    border-top: 1px solid rgba(255, 179, 71, 0.18);
+}
+
+.meta-char-actions .meta-btn {
+    margin: 0;
+    width: auto;
+    max-width: none;
+    flex: 1 1 8rem;
+}
+
+.meta-char-actions .meta-btn-primary {
+    flex-basis: 100%;
+}
+
+/* Right stage — character takes most of the screen */
+.meta-char-stage {
+    position: relative;
+    min-width: 0;
+    overflow: hidden;
+    background:
+        radial-gradient(ellipse at 50% 30%, rgba(72, 98, 168, 0.42), rgba(8, 12, 28, 0)),
+        radial-gradient(ellipse at 50% 100%, rgba(255, 179, 71, 0.12), rgba(6, 8, 18, 0)),
+        linear-gradient(180deg, #0b1024, #05060f);
+}
+
+.meta-char-stage::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    bottom: 10%;
+    width: 30%;
+    height: 5%;
+    transform: translateX(-50%);
+    background: radial-gradient(ellipse, rgba(0, 0, 0, 0.55), rgba(0, 0, 0, 0));
+    pointer-events: none;
 }
 
 .meta-char-preview {
-    min-height: 320px;
-    border-radius: 10px;
-    border: 2px solid rgba(255, 179, 71, 0.22);
-    background: radial-gradient(ellipse at 50% 35%, rgba(72, 98, 168, 0.35), rgba(8, 12, 28, 0.92));
-    box-shadow: inset 0 0 40px rgba(0, 0, 0, 0.45), 0 8px 24px rgba(0, 0, 0, 0.35);
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
     overflow: hidden;
-    position: relative;
 }
 
 .meta-char-preview canvas {
@@ -466,14 +559,32 @@ body.meta-settings-open #settings-modal.settings-over-meta {
     height: 100% !important;
 }
 
-.meta-char-controls {
-    min-width: 0;
+.meta-char-spin-btn {
+    position: absolute;
+    right: 1rem;
+    bottom: 1rem;
+    z-index: 2;
+    font-family: 'Courier New', monospace;
+    font-size: 0.75rem;
+    letter-spacing: 0.04em;
+    color: #ffb347;
+    background: rgba(10, 8, 4, 0.6);
+    border: 1px solid rgba(255, 179, 71, 0.35);
+    border-radius: 999px;
+    padding: 0.4rem 0.85rem;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, opacity 0.15s;
 }
 
-.meta-char-preview-col {
-    display: flex;
-    flex-direction: column;
-    gap: 0.45rem;
+.meta-char-spin-btn:hover {
+    background: rgba(255, 179, 71, 0.18);
+}
+
+.meta-char-spin-btn[aria-pressed="false"] {
+    opacity: 0.55;
+}
+
+.meta-char-controls {
     min-width: 0;
 }
 
@@ -540,13 +651,23 @@ body.meta-settings-open #settings-modal.settings-over-meta {
     border-top: 1px solid rgba(255, 179, 71, 0.15);
 }
 
-@media (max-width: 560px) {
-    .meta-char-layout {
+@media (max-width: 720px) {
+    .meta-char-screen {
         grid-template-columns: 1fr;
+        grid-template-rows: minmax(0, 1fr) auto;
     }
 
-    .meta-char-preview {
-        min-height: 260px;
+    .meta-char-stage {
+        grid-row: 1;
+        min-height: 0;
+    }
+
+    .meta-char-panel {
+        grid-row: 2;
+        max-height: 48vh;
+        border-right: none;
+        border-top: 1px solid rgba(255, 179, 71, 0.28);
+        box-shadow: inset 0 18px 30px rgba(0, 0, 0, 0.35);
     }
 }
 

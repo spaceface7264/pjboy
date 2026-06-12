@@ -11,7 +11,7 @@
     <meta http-equiv="Expires" content="0">
     <title>3D Second-Person Game - 128-bit Style</title>
     <link rel="stylesheet" href="style.css?v=48">
-    <link rel="stylesheet" href="style-meta.css?v=12">
+    <link rel="stylesheet" href="style-meta.css?v=13">
 </head>
 <body>
     <div id="gameContainer">
@@ -294,23 +294,29 @@
                 <input id="meta-profile-input" class="mp-input" type="text" maxlength="16" placeholder="Player" autocomplete="off" spellcheck="false" />
                 <button type="button" class="meta-btn meta-btn-primary" id="meta-profile-save-btn">Continue</button>
             </div>
-            <div id="meta-character" class="meta-panel meta-panel-wide" hidden>
-                <h2 class="meta-heading">Your explorer</h2>
-                <p class="meta-tagline">Class and look for Asteroid expeditions</p>
-                <div class="meta-char-layout">
-                    <div class="meta-char-preview-col">
-                        <div id="meta-char-preview" class="meta-char-preview" aria-label="Character preview"></div>
-                        <button type="button" class="meta-char-pose-tune-toggle" id="meta-char-pose-tune-toggle" aria-expanded="false">Pose tune ▸</button>
-                        <div id="meta-char-pose-tune" class="meta-char-pose-tune" hidden></div>
+            <div id="meta-character" class="meta-panel meta-char-screen" hidden>
+                <div class="meta-char-panel">
+                    <div class="meta-char-panel-head">
+                        <h2 class="meta-heading">Your explorer</h2>
+                        <p class="meta-tagline">Class and look for Asteroid expeditions</p>
                     </div>
-                    <div class="meta-char-controls">
+                    <div class="meta-char-panel-scroll">
                         <div id="meta-char-class-grid" class="meta-char-class-grid"></div>
                         <p id="meta-char-class-desc" class="meta-char-desc"></p>
                         <div id="meta-char-customize" class="meta-char-customize"></div>
+                        <button type="button" class="meta-char-pose-tune-toggle" id="meta-char-pose-tune-toggle" aria-expanded="false">Pose tune ▸</button>
+                        <div id="meta-char-pose-tune" class="meta-char-pose-tune" hidden></div>
+                    </div>
+                    <div class="meta-char-actions">
+                        <button type="button" class="meta-btn meta-btn-primary" id="meta-character-save-btn">Continue</button>
+                        <button type="button" class="meta-btn meta-btn-ghost" id="meta-character-new-btn">New character</button>
+                        <button type="button" class="meta-btn meta-btn-ghost" id="meta-character-back-btn">Back</button>
                     </div>
                 </div>
-                <button type="button" class="meta-btn meta-btn-primary" id="meta-character-save-btn">Continue</button>
-                <button type="button" class="meta-btn meta-btn-ghost" id="meta-character-back-btn">Back</button>
+                <div class="meta-char-stage">
+                    <div id="meta-char-preview" class="meta-char-preview" aria-label="Character preview"></div>
+                    <button type="button" class="meta-char-spin-btn" id="meta-char-spin-btn" aria-pressed="true" title="Toggle turntable">⟳ Auto-spin</button>
+                </div>
             </div>
             <div id="meta-asteroid-home" class="meta-panel meta-panel-wide" hidden>
                 <h2 class="meta-heading">Your claim</h2>
@@ -529,12 +535,12 @@
     <script src="worldstream.js?v=51"></script>
     <script src="planetgen.js?v=12"></script>
     <script src="planet.js?v=173"></script>
-    <script src="voxel-character.js?v=35"></script>
+    <script src="voxel-character.js?v=36"></script>
     <script src="meta-char-preview.js?v=3"></script>
     <script src="asteroid-profile.js?v=2"></script>
-    <script src="voxelworld.js?v=110"></script>
+    <script src="voxelworld.js?v=112"></script>
     <script src="modes.js?v=9"></script>
     <script src="game.js?v=152"></script>
-    <script src="game-modes-impl.js?v=38"></script>
+    <script src="game-modes-impl.js?v=40"></script>
 </body>
 </html>
