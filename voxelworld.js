@@ -905,27 +905,44 @@
             lerp(lerp(c(0,0,1),c(1,0,1),tx), lerp(c(0,1,1),c(1,1,1),tx), ty), tz);
         }
 
-        // Deterministic, periodic surface profile (height + surface block) for a column.
-        function columnProfile(x, z){
-          const SEA=SEA_LEVEL;
+        // Periodic terrain height for a column (continents + hills + ridged mountains).
+        function columnHeight(x, z){
           const cont = pfbm2(x,z, 1000, 16, 3);                  // broad continents (~192-block)
           const hill = pfbm2(x,z, 3000, 64, 2);                  // rolling hills (~48-block)
           const ridge= 1-Math.abs(2*pfbm2(x,z, 5000, 32, 2)-1);  // mountain ridges (~96-block)
-          const hh = (SEA-9) + cont*38 + hill*9 + ridge*ridge*ridge*30;
-          const height = Math.max(1, Math.min(H-4, Math.round(hh)));
+          const hh = (SEA_LEVEL-9) + cont*38 + hill*9 + ridge*ridge*ridge*30;
+          return Math.max(1, Math.min(H-4, Math.round(hh)));
+        }
+        // How many solid blocks to keep above a cave: thick on flat ground (no surprise
+        // holes), thin on steep cliff faces so caves open as visible "mouths" you can
+        // spot and walk into.
+        function caveRoof(x, z, height){
+          const e=3;
+          const drop = Math.max(
+            height-columnHeight(x+e,z), height-columnHeight(x-e,z),
+            height-columnHeight(x,z+e), height-columnHeight(x,z-e));
+          return drop>=6 ? 2 : 5;     // ≥6-block cliff → cave mouths; otherwise solid roof
+        }
+
+        // Deterministic, periodic surface profile (height + surface block) for a column.
+        function columnProfile(x, z){
+          const SEA=SEA_LEVEL;
+          const height = columnHeight(x,z);
           const temp  = pfbm2(x,z, 7000, 12, 2);                 // warmth (~256-block regions)
           const moist = pfbm2(x,z, 9000, 12, 2);                 // wetness
-          let top = 1;
-          if(temp<0.40) top = 20;
-          else if(moist<0.34 && temp>0.60) top = 4;
-          else if(moist>0.64) top = (temp>0.5)?12:13;
-          if(height>=SEA+22 && temp<0.5) top = 20;
-          else if(height>=SEA+28) top = 16;
-          if(height<=SEA+1) top = 4;
-          if(top===1 && ihash(pmod(x),7,pmod(z))<0.04) top = 2;
+          let top = 1;                                           // grass
+          if(temp<0.40) top = 20;                                // tundra / snow
+          else if(moist<0.34 && temp>0.60) top = 4;              // desert sand
+          else if(moist>0.70) top = (temp>0.55)?12:13;           // lush alien frond / spore
+          else if(moist>0.55 && temp>0.62) top = 15;             // golden plume meadows
+          else if(moist>0.50 && temp<0.46) top = 14;             // glowing quill (cool & damp)
+          if(height>=SEA+22 && temp<0.5) top = 20;               // snowy peaks
+          else if(height>=SEA+28) top = 16;                      // bare rock high up
+          if(height<=SEA+1) top = 4;                             // sandy shore
+          if(top===1 && ihash(pmod(x),7,pmod(z))<0.04) top = 2;  // dirt patches
           const icy=(temp<0.40?0.85:0) + (pfbm2(x,z,11000,48,2)-0.5)*0.4;
           if(activeBiome && activeBiome.remap) top = activeBiome.remap(top, {bn:moist, icy, rad:0, h:ihash(pmod(x),0,pmod(z))});
-          if(height<SEA && (top===1||top===20||top===12||top===13)) top = 4;   // underwater bed → sand
+          if(height<SEA && (top===1||top===20||(top>=12&&top<=15)||top===36)) top = 4;   // underwater bed → sand
           return { height, top };
         }
 
@@ -942,6 +959,16 @@
           return 0;
         }
 
+        // Carve underground caves — winding tunnels + occasional caverns, periodic so
+        // they tile seamlessly. Leaves the surface + dirt layer intact (dig to reach).
+        function caveAt(x, y, z){
+          if(y<2) return false;                                  // keep a floor above bedrock
+          const n = pvnoise3(x*0.08, y*0.12, z*0.08, 48, 410);
+          if(Math.abs(n-0.5) < 0.05) return true;                // thin sheet → winding tunnels
+          if(pvnoise3(x*0.05, y*0.07, z*0.05, 32, 420) > 0.86) return true;  // round caverns
+          return false;
+        }
+
         // A grass column above water, sparsely chosen by a periodic hash.
         function isTreeRoot(x, z){
           if(ihash(pmod(x), 999, pmod(z)) > 0.012) return false;
@@ -956,6 +983,7 @@
           const p = columnProfile(x,z);
           if(y > p.height) return (p.height < SEA_LEVEL && y <= SEA_LEVEL) ? WATER : 0;
           if(y === p.height) return p.top;
+          if(y < p.height && y <= p.height-caveRoof(x,z,p.height) && caveAt(x,y,z)) return 0;  // caves / cliff mouths
           if(y >= p.height-4) return 2;
           return oreAt(x,y,z) || 3;
         }
@@ -968,9 +996,11 @@
           for(let lx=0;lx<CH;lx++) for(let lz=0;lz<CH;lz++){
             const x=x0+lx, z=z0+lz;
             const p = columnProfile(x,z);
+            const roof = caveRoof(x,z,p.height);
             for(let y=0;y<=p.height;y++){
               let id;
               if(y===p.height) id=p.top;
+              else if(y<=p.height-roof && caveAt(x,y,z)) continue;   // caves / cliff mouths
               else if(y>=p.height-4) id=2;
               else id = oreAt(x,y,z) || 3;
               buf[cIdx(lx,y,lz)] = id;
