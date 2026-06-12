@@ -645,7 +645,10 @@
         }
         
         // ---------- world data ----------
-        const W=48, H=32, D=48, CH=16;
+        const W=96, H=32, D=96, CH=16;
+        // Horizontal asteroid radius in blocks (leaves a ~2-block margin inside W/D).
+        // Generation scales off this so the rock fills the footprint at any W/D.
+        const ASTEROID_RXZ = W/2 - 2;
         const WORLD_OFFSET = new THREE.Vector3(-W/2, -6, -D/2);   // center asteroid near origin
         let blocks = new Uint8Array(W*H*D);
         const bidx = (x,y,z) => (y*D+z)*W+x;
@@ -712,7 +715,7 @@
           blocks.fill(0);
           // asteroid shell: radial falloff top + bottom with noise
           for(let x=0;x<W;x++) for(let z=0;z<D;z++){
-            const dx=(x-W/2)/22, dz=(z-D/2)/22, rad=Math.sqrt(dx*dx+dz*dz);
+            const dx=(x-W/2)/ASTEROID_RXZ, dz=(z-D/2)/ASTEROID_RXZ, rad=Math.sqrt(dx*dx+dz*dz);
             if(rad>1) continue;
             const topY = 17 + fbm2(x*.09,z*.09)*6*(1-rad*.5) - rad*4;
             const botY = 15 - (1-rad)*(8+fbm2(x*.11+50,z*.11+50)*5);
@@ -726,7 +729,7 @@
             for(let y=H-1;y>0;y--){
               if(!getBlock(x,y,z)) continue;
               if(!getBlock(x,y+1,z)){
-                const dx=(x-W/2)/22, dz=(z-D/2)/22, rad=Math.sqrt(dx*dx+dz*dz);
+                const dx=(x-W/2)/ASTEROID_RXZ, dz=(z-D/2)/ASTEROID_RXZ, rad=Math.sqrt(dx*dx+dz*dz);
                 // biome patches: one noise channel picks which grass family grows here
                 const bn = fbm2(x*.045+777, z*.045+777);
                 let top = bn<.34? 1 : bn<.42? 12 : bn<.48? 13 : bn<.53? 14 : bn<.58? 15
@@ -759,13 +762,17 @@
               }
             }
           }
-          veins(20, 27, 14, 26, 7);        // carbon seams: shallow and long
-          veins(18, 22, 12, 24, 5);        // copper
-          veins(16, 23,  8, 20, 5);        // iron
-          veins(10, 24,  4, 14, 4);        // gold
-          veins(8,  25,  3, 12, 4, true);  // titanium: down in the basalt
-          veins(5,  28,  2,  9, 3, true);  // uranium: deep and rare
-          veins(14, 9,   6, 18, 4);        // aether ore
+          // Fixed-count scatter scales with footprint area so ore/feature density
+          // stays constant as W/D grow (base counts tuned at 48x48).
+          const oreScale = (W*D)/(48*48);
+          const vn = (n) => Math.max(1, Math.round(n*oreScale));
+          veins(vn(20), 27, 14, 26, 7);        // carbon seams: shallow and long
+          veins(vn(18), 22, 12, 24, 5);        // copper
+          veins(vn(16), 23,  8, 20, 5);        // iron
+          veins(vn(10), 24,  4, 14, 4);        // gold
+          veins(vn(8),  25,  3, 12, 4, true);  // titanium: down in the basalt
+          veins(vn(5),  28,  2,  9, 3, true);  // uranium: deep and rare
+          veins(vn(14), 9,   6, 18, 4);        // aether ore
           // cobalt blooms on cave walls
           for(let x=1;x<W-1;x++) for(let y=2;y<14;y++) for(let z=1;z<D-1;z++){
             if(getBlock(x,y,z)!==3 && getBlock(x,y,z)!==17) continue;
@@ -793,7 +800,7 @@
                && fbm3(x*.2+60,y*.2,z*.2+60)>.6) blocks[bidx(x,y,z)]=39;
           }
           // hive colonies: small organic blobs underground
-          for(let h=0;h<3;h++){
+          for(let h=0;h<vn(3);h++){
             const hx=6+((R()*(W-12))|0), hy=8+((R()*8)|0), hz=6+((R()*(D-12))|0);
             for(let dx=-2;dx<=2;dx++) for(let dy=-1;dy<=2;dy++) for(let dz=-2;dz<=2;dz++){
               if(Math.abs(dx)+Math.abs(dy)+Math.abs(dz)>3) continue;
@@ -809,7 +816,7 @@
             }
           }
           // a few trees on grass
-          for(let t=0;t<7;t++){
+          for(let t=0;t<vn(7);t++){
             const x=8+((R()*(W-16))|0), z=8+((R()*(D-16))|0);
             for(let y=H-2;y>4;y--){
               if(getBlock(x,y,z)===1){
@@ -2580,6 +2587,23 @@
             }
         }
 
+        // Danish names shown under the English name in the scanner — a play-to-learn-English
+        // anchor. English is the hero; Danish is the support word the player already knows.
+        const BLOCK_DA = {
+            'Dirt': 'Jord', 'Grass': 'Græs', 'Stone': 'Sten', 'Sand': 'Sand', 'Gravel': 'Grus',
+            'Regolith': 'Regolit', 'Red Rock': 'Rød sten', 'Basalt': 'Basalt', 'Obsidian': 'Obsidian',
+            'Ice': 'Is', 'Snow': 'Sne', 'Wood': 'Træ', 'Leaves': 'Blade',
+            'Frond': 'Bregneblad', 'Spore': 'Spore', 'Quill': 'Pig', 'Plume': 'Fjerbusk',
+            'Fungal': 'Svamp', 'Hive': 'Bistade',
+            'Carbon': 'Kulstof', 'Copper Ore': 'Kobbermalm', 'Iron Ore': 'Jernmalm',
+            'Gold Ore': 'Guldmalm', 'Titanium Ore': 'Titanmalm', 'Cobalt': 'Kobolt',
+            'Uranium Ore': 'Uranmalm', 'Aether Ore': 'Ætermalm',
+            'Crystal': 'Krystal', 'Emerald Crystal': 'Smaragdkrystal', 'Void Crystal': 'Tomrumskrystal',
+            'Metal': 'Metal', 'Alloy': 'Legering', 'Glass': 'Glas', 'Circuit': 'Kredsløb',
+            'Lamp': 'Lampe', 'Hull': 'Skrog', 'Energy': 'Energi',
+            'Lava': 'Lava', 'Acid': 'Syre'
+        };
+
         function fillScanPanelContent(b, id, cracking, expanded) {
             const catEl = document.getElementById('voxel-scan-cat');
             const nameEl = document.getElementById('voxel-scan-name');
@@ -2596,7 +2620,12 @@
             const closeHint = document.getElementById('voxel-scan-close-hint');
 
             if (catEl) catEl.textContent = `${CAT_ICONS[b.cat] || '▪'} ${b.cat || ''}`;
-            if (nameEl) nameEl.textContent = b.name;
+            if (nameEl) {
+                const da = BLOCK_DA[b.name];
+                nameEl.innerHTML = b.name + (da
+                    ? `<span class="vx-scan-da" style="display:block;font-size:0.66em;font-weight:600;letter-spacing:0;opacity:0.7;color:#7fd4ff;margin-top:2px;">🇩🇰 ${da}</span>`
+                    : '');
+            }
             if (descEl) descEl.textContent = b.desc || '';
             const formulaText = (b.sci && b.sci.formula) || '—';
             if (formulaEl) formulaEl.textContent = formulaText;
