@@ -10,8 +10,8 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>3D Second-Person Game - 128-bit Style</title>
-    <link rel="stylesheet" href="style.css?v=47">
-    <link rel="stylesheet" href="style-meta.css?v=4">
+    <link rel="stylesheet" href="style.css?v=48">
+    <link rel="stylesheet" href="style-meta.css?v=11">
 </head>
 <body>
     <div id="gameContainer">
@@ -290,15 +290,38 @@
             </div>
             <div id="meta-profile" class="meta-panel" hidden>
                 <h2 class="meta-heading">Profile</h2>
-                <p class="meta-tagline">Enter a name for your high scores</p>
+                <p class="meta-tagline">Your explorer name — saved on this device for now</p>
                 <input id="meta-profile-input" class="mp-input" type="text" maxlength="16" placeholder="Player" autocomplete="off" spellcheck="false" />
                 <button type="button" class="meta-btn meta-btn-primary" id="meta-profile-save-btn">Continue</button>
+            </div>
+            <div id="meta-character" class="meta-panel meta-panel-wide" hidden>
+                <h2 class="meta-heading">Your explorer</h2>
+                <p class="meta-tagline">Class and look for Asteroid expeditions</p>
+                <div class="meta-char-layout">
+                    <div id="meta-char-preview" class="meta-char-preview" aria-label="Character preview"></div>
+                    <div class="meta-char-controls">
+                        <div id="meta-char-class-grid" class="meta-char-class-grid"></div>
+                        <p id="meta-char-class-desc" class="meta-char-desc"></p>
+                        <div id="meta-char-customize" class="meta-char-customize"></div>
+                    </div>
+                </div>
+                <button type="button" class="meta-btn meta-btn-primary" id="meta-character-save-btn">Continue</button>
+                <button type="button" class="meta-btn meta-btn-ghost" id="meta-character-back-btn">Back</button>
+            </div>
+            <div id="meta-asteroid-home" class="meta-panel meta-panel-wide" hidden>
+                <h2 class="meta-heading">Your claim</h2>
+                <p class="meta-tagline" id="meta-claim-tagline">Personal asteroid — progress saves on this device</p>
+                <div id="meta-claim-stats" class="meta-claim-stats"></div>
+                <div id="meta-mission-card" class="meta-mission-card"></div>
+                <button type="button" class="meta-btn meta-btn-primary" id="meta-asteroid-play-btn">Continue expedition</button>
+                <button type="button" class="meta-btn meta-btn-ghost" id="meta-asteroid-back-btn">Back to modes</button>
             </div>
             <div id="meta-mode-select" class="meta-panel" hidden>
                 <div class="meta-profile-strip">
                     <span class="meta-profile-label">Player:</span>
                     <span class="meta-profile-name" id="meta-profile-display">Player</span>
                     <button type="button" class="meta-btn meta-btn-ghost meta-btn-small" id="meta-profile-change-btn">Change</button>
+                    <button type="button" class="meta-btn meta-btn-ghost meta-btn-small" id="meta-character-edit-btn">Character</button>
                 </div>
                 <h2 class="meta-heading">Choose Mode</h2>
                 <div class="mode-card-grid">
@@ -324,7 +347,7 @@
                     </button>
                     <button type="button" class="mode-card" data-mode-id="asteroid">
                         <span class="mode-card-title">Asteroid</span>
-                        <span class="mode-card-desc">Voxel sandbox — mine, build, jetpack on a procedurally generated rock</span>
+                        <span class="mode-card-desc">Your claim — survey, mine, build, jetpack. Field journal &amp; missions.</span>
                     </button>
                 </div>
                 <div class="meta-mode-actions">
@@ -432,6 +455,7 @@
             </div>
             <div id="voxel-hud">
                 <div><b id="voxel-tri-count">0</b> tris · <span id="voxel-seed-label"></span> · <span id="voxel-weapon-label">Pickaxe</span> · <b>H</b> controls</div>
+                <div id="voxel-journal-hud" class="vx-journal-hud" hidden></div>
             </div>
             <div id="voxel-hotbar"></div>
             <div id="voxel-controls-drawer" class="vx-controls-drawer" hidden>
@@ -502,9 +526,11 @@
     <script src="planetgen.js?v=12"></script>
     <script src="planet.js?v=173"></script>
     <script src="voxel-character.js?v=27"></script>
-    <script src="voxelworld.js?v=106"></script>
+    <script src="meta-char-preview.js?v=3"></script>
+    <script src="asteroid-profile.js?v=1"></script>
+    <script src="voxelworld.js?v=108"></script>
     <script src="modes.js?v=9"></script>
-    <script src="game.js?v=151"></script>
-    <script src="game-modes-impl.js?v=28"></script>
+    <script src="game.js?v=152"></script>
+    <script src="game-modes-impl.js?v=34"></script>
 </body>
 </html>

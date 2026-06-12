@@ -16,9 +16,169 @@
     const CAMPAIGN_SCORES_KEY = 'pjboy.campaignScores.v1';
     const CAMPAIGN_SCORES_MAX = 20;
 
+    function getAsteroidProfileApi() {
+        return typeof AsteroidProfile !== 'undefined' ? AsteroidProfile : null;
+    }
+
+    const META_HAIR_LABELS = ['White', 'Black', 'Brown', 'Blonde', 'Red', 'Pink'];
+    const META_GEAR_LABELS = ['White', 'Charcoal', 'Teal', 'Magenta', 'Blue', 'Gold'];
+    const META_SKIN_LABELS = ['Light', 'Medium', 'Tan', 'Deep'];
+
+    function metaCharOptionRows(VC) {
+        if (!VC) return [];
+        return [
+            { key: 'body', label: 'Body', options: VC.BODY_TYPES, labels: VC.BODY_TYPES },
+            { key: 'deco', label: 'Head', options: VC.HEAD_DECOS, labels: VC.HEAD_DECOS },
+            { key: 'hair', label: 'Hair', options: VC.HAIR_COLORS, labels: META_HAIR_LABELS },
+            { key: 'gear', label: 'Gear', options: VC.GEAR_COLORS, labels: META_GEAR_LABELS },
+            { key: 'skin', label: 'Skin', options: VC.SKIN_TONES, labels: META_SKIN_LABELS }
+        ];
+    }
+
+    function metaCharDisplayFor(row, idx) {
+        const i = ((idx | 0) % row.options.length + row.options.length) % row.options.length;
+        const opt = row.options[i];
+        const label = (row.labels && row.labels[i] != null) ? row.labels[i] : String(opt);
+        const hex = (typeof opt === 'number') ? opt : null;
+        return { label, hex };
+    }
+
+    function fillMetaCharValueEl(el, row, idx) {
+        if (!el) return;
+        const { label, hex } = metaCharDisplayFor(row, idx);
+        el.textContent = '';
+        el.classList.toggle('meta-char-val-color', hex != null);
+        if (hex != null) {
+            const sw = document.createElement('span');
+            sw.className = 'meta-char-swatch';
+            sw.style.background = '#' + (hex >>> 0).toString(16).padStart(6, '0');
+            el.appendChild(sw);
+        }
+        el.appendChild(document.createTextNode(label));
+    }
+
+    function syncMetaCharPalettes(draft) {
+        if (!draft) return;
+        document.querySelectorAll('[data-char-palette]').forEach((pal) => {
+            const key = pal.dataset.charPalette;
+            if (!key) return;
+            const idx = draft[key] | 0;
+            pal.querySelectorAll('.meta-char-chip').forEach((chip, i) => {
+                chip.classList.toggle('active', i === idx);
+                chip.setAttribute('aria-pressed', i === idx ? 'true' : 'false');
+            });
+        });
+    }
+
+    function createMetaCharPreviewHost() {
+        return {
+            scene: null,
+            camera: null,
+            renderer: null,
+            container: null,
+            char: null,
+            spin: 0,
+
+            mount(container) {
+                if (!window.THREE || !container) return false;
+                this.container = container;
+                container.innerHTML = '';
+                const w = Math.max(240, container.clientWidth || 300);
+                const h = Math.max(300, container.clientHeight || 340);
+                this.scene = new THREE.Scene();
+                this.scene.fog = new THREE.Fog(0x121830, 6, 14);
+                this.camera = new THREE.PerspectiveCamera(38, w / Math.max(h, 1), 0.05, 40);
+                this.camera.position.set(0, 1.55, 3.35);
+                this.camera.lookAt(0, 1.05, 0);
+                this.scene.add(new THREE.HemisphereLight(0xc8dcff, 0x3a2868, 0.9));
+                const key = new THREE.DirectionalLight(0xfff0dd, 0.85);
+                key.position.set(2.5, 4, 3);
+                this.scene.add(key);
+                const rim = new THREE.DirectionalLight(0xe878f8, 0.45);
+                rim.position.set(-3, 2, -2);
+                this.scene.add(rim);
+                try {
+                    this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+                } catch (err) {
+                    console.error('[meta-char] WebGL preview failed', err);
+                    container.textContent = '3D preview unavailable (WebGL)';
+                    return false;
+                }
+                this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+                this.renderer.setSize(w, h, false);
+                this.renderer.setClearColor(0x000000, 0);
+                container.appendChild(this.renderer.domElement);
+                return true;
+            },
+
+            resize() {
+                if (!this.container || !this.renderer || !this.camera) return;
+                const w = Math.max(240, this.container.clientWidth || 300);
+                const h = Math.max(300, this.container.clientHeight || 340);
+                this.renderer.setSize(w, h, false);
+                this.camera.aspect = w / Math.max(h, 1);
+                this.camera.updateProjectionMatrix();
+            },
+
+            update(params) {
+                const VC = window.VoxelCharacter;
+                if (!VC || !params || !this.scene) return;
+                if (this.char) {
+                    if (this.char.group && this.char.group.parent) this.char.group.parent.remove(this.char.group);
+                    VC.dispose(this.char);
+                    this.char = null;
+                }
+                const normalized = VC.normalizeParams(Object.assign({}, params));
+                this.char = VC.build(normalized, { weaponEquipped: normalized.weapon >= 0 });
+                if (!this.char || !this.char.group) return;
+                VC.scaleToHeight(this.char.group, 1.75);
+                this.char.group.rotation.y = Math.PI * 0.12;
+                this.scene.add(this.char.group);
+                this.spin = 0;
+                this.resize();
+                this.render(0);
+            },
+
+            render(dt) {
+                if (!this.renderer || !this.scene || !this.camera) return;
+                const VC = window.VoxelCharacter;
+                if (dt > 0 && this.char && this.char.group && VC) {
+                    this.spin += dt * 0.28;
+                    this.char.group.rotation.y = Math.PI * 0.12 + Math.sin(this.spin) * 0.35;
+                    VC.update(this.char, 'idle', dt, { weaponEquipped: this.char.params.weapon >= 0 });
+                }
+                this.renderer.render(this.scene, this.camera);
+            },
+
+            dispose() {
+                const VC = window.VoxelCharacter;
+                if (this.char && VC) {
+                    if (this.char.group && this.char.group.parent) this.char.group.parent.remove(this.char.group);
+                    VC.dispose(this.char);
+                }
+                this.char = null;
+                if (this.renderer) {
+                    this.renderer.dispose();
+                    if (this.renderer.domElement.parentNode) {
+                        this.renderer.domElement.parentNode.removeChild(this.renderer.domElement);
+                    }
+                }
+                this.renderer = null;
+                this.scene = null;
+                this.camera = null;
+                if (this.container) this.container.innerHTML = '';
+            }
+        };
+    }
+
     Object.assign(Game3D.prototype, {
         _initMetaState() {
             this.appPhase = 'boot';
+            this._playerProfile = null;
+            this._charDraft = null;
+            this._metaCharUiReady = false;
+            this._metaCharPreviewHost = null;
+            this._metaCharPreview = null;
             this.activeModeId = null;
             this.run = null;
             this.simPaused = true;
@@ -46,6 +206,9 @@
             this._metaEls = {
                 overlay,
                 title: document.getElementById('meta-title'),
+                profile: document.getElementById('meta-profile'),
+                character: document.getElementById('meta-character'),
+                asteroidHome: document.getElementById('meta-asteroid-home'),
                 modeSelect: document.getElementById('meta-mode-select'),
                 pause: document.getElementById('meta-pause'),
                 results: document.getElementById('meta-results'),
@@ -54,7 +217,45 @@
                 levelBanner: document.getElementById('meta-level-banner')
             };
 
+            this._loadPlayerProfile();
+
             document.getElementById('meta-start-btn')?.addEventListener('click', () => {
+                this.audio && this.audio.play('uiClick');
+                this._metaContinueFromTitle();
+            });
+            document.getElementById('meta-profile-save-btn')?.addEventListener('click', () => {
+                this.audio && this.audio.play('uiClick');
+                this._saveMetaProfileName();
+            });
+            document.getElementById('meta-profile-input')?.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    this._saveMetaProfileName();
+                }
+            });
+            document.getElementById('meta-profile-change-btn')?.addEventListener('click', () => {
+                this.audio && this.audio.play('uiClick');
+                this.setAppPhase('profile');
+            });
+            document.getElementById('meta-character-edit-btn')?.addEventListener('click', () => {
+                this.audio && this.audio.play('uiClick');
+                this._openMetaCharacterEditor();
+            });
+            document.getElementById('meta-character-save-btn')?.addEventListener('click', () => {
+                this.audio && this.audio.play('uiClick');
+                this._saveMetaCharacter();
+            });
+            document.getElementById('meta-character-back-btn')?.addEventListener('click', () => {
+                this.audio && this.audio.play('uiClick');
+                const back = this.appPhase === 'character' && this._playerProfile && this._playerProfile.characterSetupDone
+                    ? 'modeSelect' : 'profile';
+                this.setAppPhase(back);
+            });
+            document.getElementById('meta-asteroid-play-btn')?.addEventListener('click', () => {
+                this.audio && this.audio.play('uiClick');
+                this.startMode('asteroid');
+            });
+            document.getElementById('meta-asteroid-back-btn')?.addEventListener('click', () => {
                 this.audio && this.audio.play('uiClick');
                 this.setAppPhase('modeSelect');
             });
@@ -73,6 +274,8 @@
                     this.audio && this.audio.play('uiClick');
                     if (id === 'campaign' && (this._loadCampaignSave() || this._loadCampaignScores().length)) {
                         this._showCampaignResumePrompt();
+                    } else if (id === 'asteroid') {
+                        this._showAsteroidHome();
                     } else {
                         this.startMode(id);
                     }
@@ -132,23 +335,318 @@
         },
 
         _isPreGameMeta() {
-            return this.appPhase === 'title' || this.appPhase === 'modeSelect';
+            return this.appPhase === 'title' || this.appPhase === 'profile'
+                || this.appPhase === 'character' || this.appPhase === 'modeSelect'
+                || this.appPhase === 'asteroidHome';
+        },
+
+        _loadPlayerProfile() {
+            const AP = getAsteroidProfileApi();
+            this._playerProfile = AP ? AP.load() : null;
+            this._refreshMetaProfileDisplay();
+            return this._playerProfile;
+        },
+
+        _savePlayerProfile() {
+            const AP = getAsteroidProfileApi();
+            if (!AP || !this._playerProfile) return this._playerProfile;
+            this._playerProfile = AP.save(this._playerProfile);
+            this._refreshMetaProfileDisplay();
+            return this._playerProfile;
+        },
+
+        _refreshMetaProfileDisplay() {
+            const el = document.getElementById('meta-profile-display');
+            const input = document.getElementById('meta-profile-input');
+            const name = (this._playerProfile && this._playerProfile.displayName) || 'Player';
+            if (el) el.textContent = name;
+            if (input && document.activeElement !== input) input.value = name;
+        },
+
+        _metaContinueFromTitle() {
+            const p = this._playerProfile || this._loadPlayerProfile();
+            if (!p || !p.displayName) {
+                this.setAppPhase('profile');
+                return;
+            }
+            if (!p.characterSetupDone) {
+                this._openMetaCharacterEditor();
+                return;
+            }
+            this.setAppPhase('modeSelect');
+        },
+
+        _saveMetaProfileName() {
+            const input = document.getElementById('meta-profile-input');
+            const name = (input && input.value || '').trim().slice(0, 16) || 'Player';
+            if (!this._playerProfile) this._loadPlayerProfile();
+            this._playerProfile.displayName = name;
+            this._savePlayerProfile();
+            if (!this._playerProfile.characterSetupDone) {
+                this._openMetaCharacterEditor();
+            } else {
+                this.setAppPhase('modeSelect');
+            }
+        },
+
+
+        _stopMetaCharPreview() {
+            if (this._metaCharPreviewHost) {
+                this._metaCharPreviewHost.dispose();
+                this._metaCharPreviewHost = null;
+            }
+            if (this._metaCharPreview) {
+                this._metaCharPreview.dispose();
+                this._metaCharPreview = null;
+            }
+        },
+
+        _startMetaCharPreview() {
+            this._refreshMetaCharPreview();
+        },
+
+        _refreshMetaCharPreview() {
+            if (this.appPhase !== 'character') return;
+            const el = document.getElementById('meta-char-preview');
+            if (!el) return;
+            const run = () => {
+                if (this.appPhase !== 'character') return;
+                if (!this._metaCharPreviewHost) {
+                    this._metaCharPreviewHost = createMetaCharPreviewHost();
+                    if (!this._metaCharPreviewHost.mount(el)) {
+                        this._metaCharPreviewHost = null;
+                        return;
+                    }
+                }
+                this._metaCharPreviewHost.resize();
+                if (this._charDraft) this._metaCharPreviewHost.update(this._charDraft);
+            };
+            requestAnimationFrame(() => requestAnimationFrame(run));
+        },
+
+        _ensureMetaCharacterUI() {
+            const VC = typeof VoxelCharacter !== 'undefined' ? VoxelCharacter : null;
+            if (!VC) {
+                console.warn('[meta-char] VoxelCharacter module not loaded');
+                return false;
+            }
+            this._buildMetaCharacterUI();
+            this._metaCharUiReady = true;
+            return true;
+        },
+
+        _openMetaCharacterEditor() {
+            const AP = getAsteroidProfileApi();
+            const VC = typeof VoxelCharacter !== 'undefined' ? VoxelCharacter : null;
+            if (!this._playerProfile) this._loadPlayerProfile();
+            if (!this._ensureMetaCharacterUI()) return;
+            const base = this._playerProfile ? this._playerProfile.character : null;
+            let cfg = base;
+            try {
+                cfg = AP ? AP.normalizeCharacter(base) : (VC ? VC.normalizeParams(base) : base);
+            } catch (_) {
+                cfg = VC ? VC.normalizeParams(base) : base;
+            }
+            this._charDraft = Object.assign({}, cfg);
+            this.setAppPhase('character');
+            this._syncMetaCharacterUI();
+        },
+
+        _buildMetaCharacterUI() {
+            const grid = document.getElementById('meta-char-class-grid');
+            const custom = document.getElementById('meta-char-customize');
+            const VC = typeof VoxelCharacter !== 'undefined' ? VoxelCharacter : null;
+            if (!grid || !VC) return;
+
+            grid.innerHTML = '';
+            VC.CLASSES.forEach((cls, i) => {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'meta-char-class-btn';
+                btn.dataset.classIdx = String(i);
+                btn.innerHTML = `<span class="meta-char-icon">${cls.icon}</span>${cls.name}`;
+                btn.addEventListener('click', () => {
+                    this.audio && this.audio.play('uiClick');
+                    if (!this._charDraft) this._charDraft = VC.normalizeParams(null);
+                    this._charDraft.classIdx = i;
+                    const wIdx = VC.weaponIdx(cls.weapon);
+                    if (wIdx >= 0) this._charDraft.weapon = wIdx;
+                    this._syncMetaCharacterUI();
+                });
+                grid.appendChild(btn);
+            });
+
+            if (!custom) return;
+            const rows = metaCharOptionRows(VC);
+            custom.innerHTML = '';
+            rows.forEach((row) => {
+                const wrap = document.createElement('div');
+                wrap.className = 'meta-char-row';
+                wrap.dataset.charKey = row.key;
+                const label = document.createElement('label');
+                label.textContent = row.label;
+                wrap.appendChild(label);
+
+                const isPalette = row.key === 'hair' || row.key === 'gear' || row.key === 'skin';
+                if (isPalette) {
+                    const palette = document.createElement('div');
+                    palette.className = 'meta-char-palette';
+                    palette.dataset.charPalette = row.key;
+                    row.options.forEach((hex, i) => {
+                        const chip = document.createElement('button');
+                        chip.type = 'button';
+                        chip.className = 'meta-char-chip';
+                        chip.title = (row.labels && row.labels[i]) ? row.labels[i] : ('Option ' + (i + 1));
+                        chip.setAttribute('aria-label', row.label + ': ' + chip.title);
+                        chip.style.background = '#' + (hex >>> 0).toString(16).padStart(6, '0');
+                        chip.addEventListener('click', () => {
+                            this.audio && this.audio.play('uiClick');
+                            if (!this._charDraft) this._charDraft = VC.normalizeParams(null);
+                            this._charDraft[row.key] = i;
+                            this._syncMetaCharacterUI();
+                        });
+                        palette.appendChild(chip);
+                    });
+                    wrap.appendChild(palette);
+                } else {
+                    const cycle = document.createElement('div');
+                    cycle.className = 'meta-char-cycle';
+                    const prev = document.createElement('button');
+                    prev.type = 'button';
+                    prev.textContent = '‹';
+                    const val = document.createElement('span');
+                    val.dataset.charVal = row.key;
+                    const next = document.createElement('button');
+                    next.type = 'button';
+                    next.textContent = '›';
+                    const step = (dir) => {
+                        this.audio && this.audio.play('uiClick');
+                        if (!this._charDraft) this._charDraft = VC.normalizeParams(null);
+                        const len = row.options.length;
+                        this._charDraft[row.key] = ((this._charDraft[row.key] | 0) + dir + len) % len;
+                        this._syncMetaCharacterUI();
+                    };
+                    prev.addEventListener('click', () => step(-1));
+                    next.addEventListener('click', () => step(1));
+                    cycle.append(prev, val, next);
+                    wrap.appendChild(cycle);
+                }
+                custom.appendChild(wrap);
+            });
+        },
+
+        _syncMetaCharacterUI() {
+            const VC = typeof VoxelCharacter !== 'undefined' ? VoxelCharacter : null;
+            const draft = this._charDraft;
+            if (!VC || !draft) return;
+            const cls = VC.CLASSES[draft.classIdx | 0] || VC.CLASSES[0];
+            document.querySelectorAll('.meta-char-class-btn').forEach((btn) => {
+                btn.classList.toggle('active', (btn.dataset.classIdx | 0) === (draft.classIdx | 0));
+            });
+            const desc = document.getElementById('meta-char-class-desc');
+            if (desc) {
+                const wIdx = VC.weaponIdx(cls.weapon);
+                const wName = wIdx >= 0 ? VC.WEAPONS[wIdx].name : cls.weapon;
+                desc.textContent = cls.desc + ' Starts with: ' + wName + '.';
+            }
+            metaCharOptionRows(VC).forEach((row) => {
+                const el = document.querySelector(`[data-char-val="${row.key}"]`);
+                if (el) fillMetaCharValueEl(el, row, draft[row.key] | 0);
+            });
+            syncMetaCharPalettes(draft);
+            if (this._metaCharPreviewHost && draft) {
+                this._metaCharPreviewHost.update(draft);
+            } else if (draft) {
+                this._refreshMetaCharPreview();
+            }
+        },
+
+        _saveMetaCharacter() {
+            const AP = getAsteroidProfileApi();
+            const VC = typeof VoxelCharacter !== 'undefined' ? VoxelCharacter : null;
+            if (!this._playerProfile) this._loadPlayerProfile();
+            if (!this._charDraft) return;
+            const cfg = AP ? AP.normalizeCharacter(this._charDraft) : (VC ? VC.normalizeParams(this._charDraft) : this._charDraft);
+            this._playerProfile.character = cfg;
+            this._playerProfile.characterSetupDone = true;
+            if (VC && cfg.weapon >= 0) {
+                const owned = new Set(this._playerProfile.inventory.ownedWeapons || []);
+                owned.add(cfg.weapon | 0);
+                const cls = VC.CLASSES[cfg.classIdx | 0];
+                if (cls && cls.id === 'miner') {
+                    const cutter = VC.weaponIdx('minecutter');
+                    if (cutter >= 0) owned.add(cutter);
+                }
+                this._playerProfile.inventory.ownedWeapons = [...owned];
+            }
+            this._savePlayerProfile();
+            this.setAppPhase('modeSelect');
+        },
+
+        _showAsteroidHome() {
+            this._loadPlayerProfile();
+            this._renderAsteroidHome();
+            this.setAppPhase('asteroidHome');
+        },
+
+        _renderAsteroidHome() {
+            const AP = getAsteroidProfileApi();
+            const p = this._playerProfile;
+            const statsEl = document.getElementById('meta-claim-stats');
+            const missionEl = document.getElementById('meta-mission-card');
+            const tag = document.getElementById('meta-claim-tagline');
+            if (!AP || !p || !statsEl || !missionEl) return;
+            const summary = AP.claimSummary(p);
+            if (tag) {
+                tag.textContent = (p.displayName || 'Explorer') + ' — progress saves on this device until cloud accounts ship.';
+            }
+            statsEl.innerHTML = `
+                <div class="meta-claim-stat"><b>${summary.name}</b>Claim</div>
+                <div class="meta-claim-stat"><b>0x${summary.seedHex}</b>Seed</div>
+                <div class="meta-claim-stat"><b>${summary.cataloged}</b>Types cataloged</div>
+                <div class="meta-claim-stat"><b>${summary.edits}</b>Block changes saved</div>
+            `;
+            const prog = AP.missionProgress(p);
+            if (prog.done && !prog.mission) {
+                missionEl.innerHTML = '<h3>Field journal</h3><p>All starter surveys complete. Keep cataloging — more missions coming.</p>';
+            } else if (prog.mission) {
+                missionEl.innerHTML = `
+                    <h3>${prog.mission.title}</h3>
+                    <p>${prog.mission.desc}</p>
+                    <div class="meta-mission-progress">${prog.label}</div>
+                `;
+            }
         },
 
         setAppPhase(phase) {
             this.appPhase = phase;
-            this.simPaused = (phase === 'title' || phase === 'modeSelect' || phase === 'paused' || phase === 'results');
+            this.simPaused = (phase === 'title' || phase === 'profile' || phase === 'character'
+                || phase === 'modeSelect' || phase === 'asteroidHome' || phase === 'paused' || phase === 'results');
             const e = this._metaEls;
             if (!e.overlay) return;
             e.overlay.hidden = false;
             e.title && (e.title.hidden = phase !== 'title');
+            e.profile && (e.profile.hidden = phase !== 'profile');
+            e.character && (e.character.hidden = phase !== 'character');
+            if (phase === 'character') {
+                this._startMetaCharPreview();
+            } else {
+                this._stopMetaCharPreview();
+            }
+            e.asteroidHome && (e.asteroidHome.hidden = phase !== 'asteroidHome');
             e.modeSelect && (e.modeSelect.hidden = phase !== 'modeSelect');
             e.campaignResume && (e.campaignResume.hidden = true);
             e.pause && (e.pause.hidden = phase !== 'paused');
             e.results && (e.results.hidden = phase !== 'results');
-            if (phase === 'title' || phase === 'modeSelect') {
+            if (phase === 'profile') {
+                this._refreshMetaProfileDisplay();
+                const input = document.getElementById('meta-profile-input');
+                if (input) setTimeout(() => input.focus(), 50);
+            }
+            if (phase === 'title' || phase === 'modeSelect' || phase === 'profile' || phase === 'character' || phase === 'asteroidHome') {
                 if (this.clearEnemies) this.clearEnemies();
             }
+            if (phase === 'modeSelect') this._refreshMetaProfileDisplay();
             if (phase !== 'playing') {
                 this.isFiring = false;
                 if (document.pointerLockElement) document.exitPointerLock();
@@ -160,7 +658,8 @@
             if (phase === 'playing' && document.pointerLockElement && this.isDrawerOpen) {
                 document.exitPointerLock();
             }
-            const preGame = phase === 'title' || phase === 'modeSelect';
+            const preGame = phase === 'title' || phase === 'profile' || phase === 'character'
+                || phase === 'modeSelect' || phase === 'asteroidHome';
             document.body.classList.toggle('meta-pre-game', preGame);
             document.body.classList.toggle('meta-active', !e.overlay.hidden);
             this._setPreGameWorldVisible(!preGame);
@@ -306,6 +805,7 @@
 
         startMode(modeId, opts) {
             if (!this.modeRegistry) return;
+            if (modeId === 'asteroid') this._loadPlayerProfile();
             const resume = !!(opts && opts.resume);
             if (this._settingsOpenedFromMeta) this.closeSettingsFromMeta();
             if (document.pointerLockElement) document.exitPointerLock();
@@ -1406,6 +1906,9 @@
         }
         if (this.activeModeId !== 'asteroid') {
             this.tickMultiplayer(clampedDeltaTime);
+        }
+        if (this.appPhase === 'character' && this._metaCharPreviewHost) {
+            this._metaCharPreviewHost.render(clampedDeltaTime);
         }
         this.render();
     };

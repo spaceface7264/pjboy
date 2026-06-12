@@ -236,6 +236,23 @@ class AudioBus {
             case 'swimStroke': // soft per-stroke swish while swimming
                 this._noise({ dur: 0.22, gain: 0.10 + Math.random() * 0.03, lowpass: 1300 + Math.random() * 300, highpass: 250 });
                 break;
+            case 'laserFire': // Asteroid laser rifle beam
+                this._tone({ type: 'sawtooth', freq: 1380, freqEnd: 400, dur: 0.07, gain: 0.22 });
+                this._tone({ type: 'sine', freq: 2100, freqEnd: 820, dur: 0.09, gain: 0.14, delay: 0.01 });
+                this._noise({ dur: 0.05, gain: 0.12, lowpass: 5200, highpass: 1800 });
+                break;
+            case 'laserCut': // Asteroid mining cutter / handgun carve
+                this._tone({ type: 'sine', freq: 960, freqEnd: 580, dur: 0.055, gain: 0.16 });
+                this._noise({ dur: 0.07, gain: 0.10, lowpass: 3400, highpass: 700 });
+                break;
+            case 'jetpack': // Asteroid thrust burst (throttled in tick)
+                this._noise({ dur: 0.14, gain: 0.07 + Math.random() * 0.04, lowpass: 850 + Math.random() * 220, highpass: 110 });
+                this._tone({ type: 'sawtooth', freq: 92, freqEnd: 62, dur: 0.12, gain: 0.055 });
+                break;
+            case 'voxelPlace': // Asteroid block placement
+                this._noise({ dur: 0.06, gain: 0.11, lowpass: 780, highpass: 180 });
+                this._tone({ type: 'square', freq: 145, freqEnd: 88, dur: 0.07, gain: 0.09 });
+                break;
         }
     }
 

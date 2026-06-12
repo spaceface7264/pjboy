@@ -1865,6 +1865,22 @@ body.mode-asteroid #lava-vignette {
 }
 #voxel-hud b { color: #6fe3ff; }
 
+.vx-journal-hud {
+    margin-top: 0.35rem;
+    padding: 0.35rem 0.5rem;
+    max-width: 280px;
+    color: #a8dce8;
+    background: rgba(8, 24, 36, 0.72);
+    border: 1px solid rgba(90, 200, 230, 0.28);
+    border-radius: 2px;
+    line-height: 1.35;
+}
+.vx-journal-hud b { color: #7ee8ff; }
+.vx-journal-hud.vx-journal-new {
+    border-color: rgba(255, 210, 120, 0.45);
+    color: #ffe8b8;
+}
+
 /* ===== Asteroid controls drawer (right) ===== */
 #voxel-controls-drawer.vx-controls-drawer {
     position: fixed;

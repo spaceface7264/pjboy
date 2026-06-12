@@ -43,6 +43,25 @@
 
     function createRuntime(game) {
         const g = game;
+
+        function playSfx(name) {
+            if (!g.audio || !g.audio.play) return;
+            g.audio.play(name);
+        }
+
+        function mineBreakSfx(blockId) {
+            const block = blockById(blockId);
+            if (block && block.cat === 'Crystals') playSfx('crystalBreak');
+            else playSfx('wallBreak');
+        }
+
+        function getProfileApi() {
+            return typeof AsteroidProfile !== 'undefined' ? AsteroidProfile : null;
+        }
+
+        let _profileFlushTimer = null;
+        let _suppressProfileBlockSave = false;
+
         let scene, camera;
         let _saved = null;
         let _listeners = [];
@@ -636,6 +655,15 @@
         }
         // THE multiplayer primitive: every world change funnels through here.
         // later: broadcast {x,y,z,id} to peers and call this on receive.
+        function persistBlockEdit(x, y, z, id) {
+            if (_suppressProfileBlockSave) return;
+            const AP = getProfileApi();
+            if (!AP) return;
+            const p = AP.load();
+            AP.upsertBlockEdit(p, x, y, z, id);
+            AP.save(p);
+        }
+
         function setBlockEvent(x,y,z,id){
           if(x<0||y<0||z<0||x>=W||y>=H||z>=D) return;
           blocks[bidx(x,y,z)] = id;
@@ -644,6 +672,39 @@
           if(x%CH===0) rebuildChunkAt(x-1,y,z); if(x%CH===CH-1) rebuildChunkAt(x+1,y,z);
           if(y%CH===0) rebuildChunkAt(x,y-1,z); if(y%CH===CH-1) rebuildChunkAt(x,y+1,z);
           if(z%CH===0) rebuildChunkAt(x,y,z-1); if(z%CH===CH-1) rebuildChunkAt(x,y,z+1);
+          persistBlockEdit(x, y, z, id);
+        }
+
+        function loadProfileSeed() {
+            const AP = getProfileApi();
+            if (AP) {
+                const seed = AP.load().asteroid.seed;
+                if (typeof seed === 'number' && isFinite(seed)) {
+                    SEED = seed | 0;
+                    return;
+                }
+            }
+            SEED = (Math.random() * 1e9) | 0;
+            if (AP) {
+                const p = AP.load();
+                p.asteroid.seed = SEED;
+                AP.save(p);
+            }
+        }
+
+        function applyProfileEdits() {
+            const AP = getProfileApi();
+            if (!AP) return;
+            const edits = AP.load().asteroid.edits || [];
+            if (!edits.length) return;
+            _suppressProfileBlockSave = true;
+            for (let i = 0; i < edits.length; i++) {
+                const e = edits[i];
+                if (e.x < 0 || e.y < 0 || e.z < 0 || e.x >= W || e.y >= H || e.z >= D) continue;
+                blocks[bidx(e.x, e.y, e.z)] = e.id | 0;
+            }
+            _suppressProfileBlockSave = false;
+            rebuildWorld();
         }
         
         // ---------- deterministic worldgen: same seed = same asteroid ----------
@@ -1000,6 +1061,12 @@
         }
 
         function loadCharCfg() {
+            const AP = getProfileApi();
+            if (AP) {
+                try {
+                    return normalizeCharCfg(AP.load().character);
+                } catch (_) {}
+            }
             try {
                 let raw = localStorage.getItem('pjboy.voxelCharacter.v1');
                 const VC = getVC();
@@ -1010,9 +1077,16 @@
 
         function saveCharCfg(patch) {
             const cfg = normalizeCharCfg(Object.assign({}, loadCharCfg(), patch || {}));
-            localStorage.setItem('pjboy.voxelCharacter.v1', JSON.stringify(cfg));
-            const VC = getVC();
-            if (VC) VC.saveParams(cfg);
+            const AP = getProfileApi();
+            if (AP) {
+                const p = AP.load();
+                p.character = cfg;
+                AP.save(p);
+            } else {
+                localStorage.setItem('pjboy.voxelCharacter.v1', JSON.stringify(cfg));
+                const VC = getVC();
+                if (VC) VC.saveParams(cfg);
+            }
             return cfg;
         }
 
@@ -1234,6 +1308,7 @@
             { phase: { anticEnd: 0.1, strikeEnd: 0.34, strikePeak: 1.05 },
               pivot: { rx: [0.06, 0.15], ry: [0.08, 0.14], rz: [0.1, 0.16], pz: [0.05, 0.12], py: [0.02, 0.05], px: [0.03, 0.05] } }
         ];
+        let jetpackSfxCd = 0;
         let laserFireLock = 0;
         let laserFireVariant = 0;
         let laserFireNext = 0;
@@ -3139,6 +3214,35 @@
             return { bx, by, w, h };
         }
 
+        function updateJournalHud() {
+            const el = document.getElementById('voxel-journal-hud');
+            const AP = getProfileApi();
+            if (!el || !AP) return;
+            const prog = AP.missionProgress(AP.load());
+            if (!prog.mission) {
+                el.hidden = true;
+                return;
+            }
+            el.hidden = false;
+            el.innerHTML = '<b>' + prog.mission.title + '</b> — ' + prog.label;
+        }
+
+        function recordJournalScan(blockId) {
+            const AP = getProfileApi();
+            if (!AP) return;
+            const { isNew, completed } = AP.recordScan(AP.load(), blockId);
+            updateJournalHud();
+            const b = blockById(blockId);
+            const hud = document.getElementById('voxel-journal-hud');
+            if (isNew && hud) hud.classList.add('vx-journal-new');
+            if (isNew && g.showMessage && b) {
+                g.showMessage('Cataloged: ' + b.name, 1800);
+            }
+            if (completed && g.showMessage) {
+                g.showMessage('Survey complete: ' + completed.title, 2800);
+            }
+        }
+
         function updateBlockScan(t) {
             const panel = document.getElementById('voxel-scan');
             if (!panel) return;
@@ -3183,6 +3287,7 @@
             if (_scanBlockId !== id) {
                 _scanBlockId = id;
                 fillScanPanelContent(b, id, cracking, scanExpanded);
+                if (compactActive) recordJournalScan(id);
             } else {
                 const metaEl = document.getElementById('voxel-scan-meta');
                 if (metaEl) {
@@ -3541,6 +3646,7 @@
         }
 
         function completeMine(t, id) {
+            mineBreakSfx(id);
             burst(
                 t.x + 0.5 + WORLD_OFFSET.x,
                 t.y + 0.5 + WORLD_OFFSET.y,
@@ -3587,6 +3693,7 @@
             }
             mineTarget = { x: t.x, y: t.y, z: t.z };
             mineProgress += mineProgressGain(block);
+            playSfx('wallChip');
             if (mineProgress >= 1) {
                 completeMine(t, id);
                 return true;
@@ -3609,6 +3716,9 @@
             const t = pickTarget();
             const hasBlock = !!(t && getBlock(t.x, t.y, t.z));
             triggerCombatAnim();
+            if (isSwordEquipped()) playSfx('swordSwing');
+            else if (isLaserRifle()) playSfx('laserFire');
+            else if (weaponDef && weaponDef.ranged) playSfx('shoot');
             if (weaponDef && weaponDef.ranged) {
                 spawnRangedShotVfxAt(!hasBlock);
             }
@@ -3617,6 +3727,7 @@
         function tryLaserMine() {
             if (!isMineLaser()) return false;
             const t = pickTarget();
+            playSfx(weaponDef && weaponDef.id === 'laser' ? 'laserFire' : 'laserCut');
             triggerMineAnim({ laserPulse: true });
             if (!t || !getBlock(t.x, t.y, t.z)) {
                 resetMining();
@@ -4593,6 +4704,15 @@
             }
             if (!spendFromInventory(slot.id, 1)) return;
             setBlockEvent(x, y, z, slot.id);
+            playSfx('voxelPlace');
+            const AP = getProfileApi();
+            if (AP) {
+                const { completed } = AP.recordPlace(AP.load());
+                updateJournalHud();
+                if (completed && g.showMessage) {
+                    g.showMessage('Survey complete: ' + completed.title, 2800);
+                }
+            }
             renderHotbar();
             if (drawerOpen) renderDrawer();
             updateHUD();
@@ -4651,14 +4771,53 @@
         function backpackTypes() {
             return Object.keys(backpack).filter((k) => backpack[k] > 0).length;
         }
+        function scheduleProfileFlush() {
+            if (_profileFlushTimer) return;
+            _profileFlushTimer = setTimeout(() => {
+                _profileFlushTimer = null;
+                flushProfileState();
+            }, 350);
+        }
+
+        function flushProfileState() {
+            const AP = getProfileApi();
+            if (!AP) return;
+            const p = AP.load();
+            p.inventory.backpack = Object.assign({}, backpack);
+            p.inventory.hotbar = hotbar.map((s) => (s ? { id: s.id, count: s.count } : null));
+            p.inventory.ownedWeapons = [...ownedWeapons];
+            p.character = normalizeCharCfg(loadCharCfg());
+            p.asteroid.seed = SEED;
+            AP.save(p);
+        }
+
+        function loadInventoryFromProfile() {
+            const AP = getProfileApi();
+            if (!AP) return;
+            const inv = AP.load().inventory;
+            if (inv && inv.backpack) {
+                Object.keys(backpack).forEach((k) => { delete backpack[k]; });
+                Object.assign(backpack, inv.backpack);
+            }
+        }
+
         function loadOwnedWeapons() {
             ownedWeapons.clear();
-            try {
-                const raw = localStorage.getItem(WEAPONS_SAVE_KEY);
-                if (raw) {
-                    JSON.parse(raw).forEach((i) => ownedWeapons.add(i | 0));
+            const AP = getProfileApi();
+            if (AP) {
+                const ow = AP.load().inventory.ownedWeapons;
+                if (ow && ow.length) {
+                    ow.forEach((i) => ownedWeapons.add(i | 0));
                 }
-            } catch (_) {}
+            }
+            if (!ownedWeapons.size) {
+                try {
+                    const raw = localStorage.getItem(WEAPONS_SAVE_KEY);
+                    if (raw) {
+                        JSON.parse(raw).forEach((i) => ownedWeapons.add(i | 0));
+                    }
+                } catch (_) {}
+            }
             const defs = weaponList();
             const cfg = loadCharCfg();
             const VC = getVC();
@@ -4677,6 +4836,7 @@
             saveOwnedWeapons();
         }
         function saveOwnedWeapons() {
+            scheduleProfileFlush();
             try {
                 localStorage.setItem(WEAPONS_SAVE_KEY, JSON.stringify([...ownedWeapons]));
             } catch (_) {}
@@ -4861,10 +5021,22 @@
         }
 
         function saveHotbarLayout() {
+            scheduleProfileFlush();
             try { localStorage.setItem(HOTBAR_SAVE_KEY, JSON.stringify(hotbar)); } catch (_) {}
         }
 
         function loadHotbarLayout() {
+            const AP = getProfileApi();
+            if (AP) {
+                const saved = AP.load().inventory.hotbar;
+                if (saved && saved.length) {
+                    for (let i = 0; i < HOTBAR_SLOTS; i++) {
+                        const s = saved[i];
+                        hotbar[i] = s && s.id ? { id: s.id | 0, count: s.count | 0 } : null;
+                    }
+                    return;
+                }
+            }
             try {
                 const raw = localStorage.getItem(HOTBAR_SAVE_KEY);
                 if (!raw) return;
@@ -4969,6 +5141,7 @@
         function addToInventory(id, n = 1) {
             backpack[id] = (backpack[id] || 0) + n;
             autoFillHotbar(id, n);
+            scheduleProfileFlush();
             renderHotbar();
             if (drawerOpen) renderDrawer();
         }
@@ -4982,6 +5155,7 @@
                 s.count -= n;
                 if (s.count <= 0) hotbar[i] = null;
             }
+            scheduleProfileFlush();
             return true;
         }
         function selectSlot(i) {
@@ -5327,6 +5501,7 @@
             downBtn = 0;
             fireHeld = false;
             laserCooldown = 0;
+            jetpackSfxCd = 0;
             resetMining();
             _aimShownTarget = null;
             _aimCandidateTarget = null;
@@ -5427,6 +5602,14 @@
             const sp=Math.hypot(mvx,mvz);
             player.state = !player.grounded ? (thrusting ? 'fly' : 'air')
                 : sp < 0.3 ? 'idle' : 'run';
+            if (player.grounded && sp > 0.35 && g.audio && g.audio.footstep) {
+                g.audio.footstep(0.32);
+            }
+            jetpackSfxCd -= dt;
+            if (thrusting && !player.grounded && jetpackSfxCd <= 0) {
+                playSfx('jetpack');
+                jetpackSfxCd = 0.14;
+            }
             if (av && av.group) {
                 if (!firstPerson) {
                     updateTpCharacter(dt, sp);
@@ -5568,6 +5751,7 @@
             loadOwnedWeapons();
             loadDrawerTab();
             loadHotbarLayout();
+            loadInventoryFromProfile();
             weaponIndex = loadCharCfg().weapon;
             if (weaponIndex >= 0) ownedWeapons.add(weaponIndex);
             updateWeaponLabel();
@@ -5639,10 +5823,13 @@
                 }
                 if (e.code === 'KeyR' && (e.shiftKey || e.metaKey)) {
                     SEED = (Math.random() * 1e9) | 0;
+                    const AP = getProfileApi();
+                    if (AP) AP.setAsteroidSeed(AP.load(), SEED);
                     generateWorld();
                     rebuildWorld();
                     spawnPlayerAtCenter();
-                    if (g.showMessage) g.showMessage('New asteroid seed: ' + (SEED >>> 0).toString(16), 2200);
+                    flushProfileState();
+                    if (g.showMessage) g.showMessage('New claim seed: 0x' + (SEED >>> 0).toString(16), 2200);
                 }
             });
             on(window, 'keyup', e => { keys[e.code] = false; });
@@ -5760,9 +5947,12 @@
                 texturesReady = true;
             }
             rebuildMaterials();
+            loadProfileSeed();
             generateWorld();
+            applyProfileEdits();
             rebuildWorld();
             renderHotbar();
+            updateJournalHud();
             if (!av) {
                 av = buildPlayer();
                 if (av && av.group && !av.group.parent) scene.add(av.group);
@@ -5801,6 +5991,11 @@
 
         function exit() {
             if (!_active) return;
+            if (_profileFlushTimer) {
+                clearTimeout(_profileFlushTimer);
+                _profileFlushTimer = null;
+            }
+            flushProfileState();
             _active = false;
             hideFpTuner();
             hideTpTuner();
