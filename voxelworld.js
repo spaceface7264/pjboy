@@ -665,7 +665,7 @@
         // to identical land ("arrive where you started") with no seam. Only the columns
         // within VIEW_R chunks of the player stay loaded/meshed.
         const WORLD_PERIOD = 3072;              // blocks before terrain repeats (must be a multiple of CH)
-        const VIEW_R = 20;                      // column-chunks meshed around the player (~fog distance)
+        const VIEW_R = 14;                      // column-chunks meshed around the player (~fog distance). 14*CH=224 block radius; ~half the columns/draw-calls of 20, fog hides the nearer edge.
         const KEEP_R = VIEW_R + 2;              // column-chunks kept buffered (margin for border meshing)
         const UNLOAD_R = VIEW_R + 4;            // beyond this, columns are disposed
         // Sea level sits at world y=0; a voxel (x,y,z) renders at (x, y-SEA_LEVEL, z).
@@ -822,7 +822,7 @@
             }
           }
         };
-        const FOG_NEAR = 48, FOG_FAR = 300;     // < VIEW_R*CH so the streamed edge stays hidden
+        const FOG_NEAR = 48, FOG_FAR = 200;     // < VIEW_R*CH (=224) so the streamed edge stays hidden behind haze
 
         function _hex(n){ return '#' + (n & 0xffffff).toString(16).padStart(6, '0'); }
         function _mixHex(a, b, t){
@@ -1370,6 +1370,25 @@
           for(let i=0;i<N;i++){ const j=buildQueue.shift(); if(j && !meshedCols.has(colKey(j.cx,j.cz))) meshColumn(j.cx,j.cz); }
           updateHUD();
         }
+
+        // ---------- loading screen (covers the synchronous spawn-area build) ----------
+        let _loadEl = null;
+        function showVoxelLoading(title, sub){
+          if(!_loadEl){
+            _loadEl = document.createElement('div');
+            _loadEl.id = 'voxel-loading';
+            _loadEl.innerHTML = '<div class="vx-load-box"><div class="vx-load-ring"></div>'
+              + '<div class="vx-load-title"></div><div class="vx-load-sub"></div>'
+              + '<div class="vx-load-hint">Generating your world…</div></div>';
+            (document.getElementById('gameContainer') || document.body).appendChild(_loadEl);
+          }
+          _loadEl.querySelector('.vx-load-title').textContent = title || 'Loading…';
+          _loadEl.querySelector('.vx-load-sub').textContent = sub || '';
+          _loadEl.classList.add('vx-load-on');
+        }
+        function hideVoxelLoading(){ if(_loadEl) _loadEl.classList.remove('vx-load-on'); }
+        // run fn after the browser has painted (so the overlay is on screen first)
+        function afterPaint(fn){ requestAnimationFrame(() => requestAnimationFrame(fn)); }
         // ---------- materials + boot ----------
         let decoMat=null, matGlass=null;
         function rebuildMaterials(){
@@ -1395,11 +1414,17 @@
         
         
         // stub: engine's rebuildWorld() calls this; we update the tri readout
+        let _hudTriFrame = 0, _hudTriCached = 0;
         function updateHUD(){
-          let tris=0;
-          scene3.chunks.forEach(c=>['static','anim','glass','deco'].forEach(k=>{
-            if(c[k]) tris += c[k].geometry.index.count/3; }));
-          document.getElementById('voxel-tri-count').textContent = tris|0;
+          // The tri-count is a debug readout — walking every chunk's geometry each frame is
+          // wasteful. Recompute it only every 30 calls; cache the value in between.
+          if((_hudTriFrame++ % 30) === 0){
+            let tris=0;
+            scene3.chunks.forEach(c=>['static','anim','glass','deco'].forEach(k=>{
+              if(c[k]) tris += c[k].geometry.index.count/3; }));
+            _hudTriCached = tris|0;
+          }
+          document.getElementById('voxel-tri-count').textContent = _hudTriCached;
           document.getElementById('voxel-seed-label').textContent = 'seed '+(SEED>>>0).toString(16);
         }
         
@@ -2424,6 +2449,45 @@
           return meshes;
         }
 
+        // Voxel DDA (Amanatides–Woo): march the ray cell-by-cell through the block grid
+        // instead of triangle-testing every loaded chunk mesh. Cost is O(reach), independent
+        // of how dense the area is — the win is biggest underground / in forests, where the
+        // old ray.intersectObjects() hit many high-triangle meshes at close range.
+        // `dir` must be unit length. Fills + returns _vrHit on a hit, null on a miss.
+        // Grid space = world − WORLD_OFFSET (a voxel x,y,z renders at x, y−SEA_LEVEL, z),
+        // so the world hit point is simply origin + dir*t (the translation cancels).
+        const _vrHit = { point: new THREE.Vector3(), normal: new THREE.Vector3(), x:0, y:0, z:0, id:0 };
+        function voxelRaycast(origin, dir, maxDist) {
+          const px = origin.x - WORLD_OFFSET.x, py = origin.y - WORLD_OFFSET.y, pz = origin.z - WORLD_OFFSET.z;
+          const dx = dir.x, dy = dir.y, dz = dir.z;
+          let ix = Math.floor(px), iy = Math.floor(py), iz = Math.floor(pz);
+          const stepX = dx>0?1:(dx<0?-1:0), stepY = dy>0?1:(dy<0?-1:0), stepZ = dz>0?1:(dz<0?-1:0);
+          const tDeltaX = dx!==0 ? Math.abs(1/dx) : Infinity;
+          const tDeltaY = dy!==0 ? Math.abs(1/dy) : Infinity;
+          const tDeltaZ = dz!==0 ? Math.abs(1/dz) : Infinity;
+          let tMaxX = dx!==0 ? ((stepX>0 ? (ix+1-px) : (px-ix)) * tDeltaX) : Infinity;
+          let tMaxY = dy!==0 ? ((stepY>0 ? (iy+1-py) : (py-iy)) * tDeltaY) : Infinity;
+          let tMaxZ = dz!==0 ? ((stepZ>0 ? (iz+1-pz) : (pz-iz)) * tDeltaZ) : Infinity;
+          let t = 0, nx = 0, ny = 0, nz = 0;
+          const MAX_STEPS = Math.ceil(maxDist) + 3;
+          for (let s = 0; s < MAX_STEPS; s++) {
+            // step into the next cell across the nearest axis boundary; the face we cross
+            // (opposite the step direction) is the struck face normal.
+            if (tMaxX < tMaxY && tMaxX < tMaxZ) { ix += stepX; t = tMaxX; tMaxX += tDeltaX; nx = -stepX; ny = 0; nz = 0; }
+            else if (tMaxY < tMaxZ)             { iy += stepY; t = tMaxY; tMaxY += tDeltaY; nx = 0; ny = -stepY; nz = 0; }
+            else                                { iz += stepZ; t = tMaxZ; tMaxZ += tDeltaZ; nx = 0; ny = 0; nz = -stepZ; }
+            if (t > maxDist) return null;
+            const id = getBlock(ix, iy, iz);
+            if (id) {
+              _vrHit.x = ix; _vrHit.y = iy; _vrHit.z = iz; _vrHit.id = id;
+              _vrHit.normal.set(nx, ny, nz);
+              _vrHit.point.copy(origin).addScaledVector(dir, t);
+              return _vrHit;
+            }
+          }
+          return null;
+        }
+
         const _shotDir = new THREE.Vector3();
         const _shotScratch = new THREE.Vector3();
         const _camPos = new THREE.Vector3();
@@ -2454,13 +2518,15 @@
             _aimState.origin.copy(getMuzzleWorldPos());
 
             ray.setFromCamera({ x: 0, y: 0 }, camera);
-            const hit = ray.intersectObjects(collectAimMeshes(), true)[0];
             const reach = currentAimReach();
             camera.getWorldPosition(_camPos);
+            // +16: in third person the camera sits behind the player, so a target within
+            // `reach` of the player can be farther from the camera; we filter by player dist below.
+            const hit = voxelRaycast(ray.ray.origin, ray.ray.direction, reach + 16);
             const inRange = hit && hit.point.distanceTo(player.pos) <= reach;
             if (inRange) {
                 _aimState.hasSurfaceHit = true;
-                _aimState.normal.copy(hit.face.normal);
+                _aimState.normal.copy(hit.normal);
                 _aimState.hit.copy(hit.point);
                 _aimState.end.copy(hit.point);
             } else {
@@ -2487,25 +2553,14 @@
 
         function pickTarget(){
           ray.setFromCamera({x:0,y:0}, camera);
-          const hit=ray.intersectObjects(collectAimMeshes(), true)[0];
+          const reach = currentAimReach();
+          // +16 so a target within reach of the player is still found from the (TP) camera; filtered below.
+          const hit = voxelRaycast(ray.ray.origin, ray.ray.direction, reach + 16);
           if(!hit) return null;
-          if(hit.point.distanceTo(player.pos)>currentAimReach()) return null;
-          const p = hit.point.clone().sub(WORLD_OFFSET);
-          const nx = Math.round(hit.face.normal.x);
-          const ny = Math.round(hit.face.normal.y);
-          const nz = Math.round(hit.face.normal.z);
-          // Nudge into the struck block before flooring — stops boundary jitter.
-          const vox = {
-            x: Math.floor(p.x - nx * 0.002),
-            y: Math.floor(p.y - ny * 0.002),
-            z: Math.floor(p.z - nz * 0.002)
-          };
-          const place = {
-            x: Math.floor(p.x + nx * 0.002),
-            y: Math.floor(p.y + ny * 0.002),
-            z: Math.floor(p.z + nz * 0.002)
-          };
-          return { x: vox.x, y: vox.y, z: vox.z, place };
+          if(hit.point.distanceTo(player.pos) > reach) return null;
+          // DDA already gives the struck cell and an integer face normal — no flooring/nudge needed.
+          const place = { x: hit.x + hit.normal.x, y: hit.y + hit.normal.y, z: hit.z + hit.normal.z };
+          return { x: hit.x, y: hit.y, z: hit.z, place };
         }
 
         let aimOutline = null;
@@ -6573,16 +6628,21 @@
             const AP = getProfileApi();
             if (!AP || !AP.setCurrentPlanet) return false;
             if (!AP.setCurrentPlanet(AP.load(), id)) return false;
-            loadActivePlanet();
-            loadProfileEdits();
-            resetStreaming();
-            clearCritters();
-            spawnPlayerAtCenter();
-            streamInit();
-            flushProfileState();
             const def = AP.planetDef ? AP.planetDef(id) : null;
-            if (def && g.showMessage) g.showMessage('Arrived at ' + def.name + ' · ' + def.nameDa, 2600);
-            if (typeof updateJournalHud === 'function') updateJournalHud();
+            showVoxelLoading(def ? ('Traveling to ' + def.name) : 'Traveling…', def ? def.nameDa : '');
+            afterPaint(() => {
+                if (!_active) { hideVoxelLoading(); return; }
+                loadActivePlanet();
+                loadProfileEdits();
+                resetStreaming();
+                clearCritters();
+                spawnPlayerAtCenter();
+                streamInit();
+                flushProfileState();
+                hideVoxelLoading();
+                if (def && g.showMessage) g.showMessage('Arrived at ' + def.name + ' · ' + def.nameDa, 2600);
+                if (typeof updateJournalHud === 'function') updateJournalHud();
+            });
             return true;
         }
 
@@ -7018,10 +7078,10 @@
             const len = _tpRayDir.length();
             if (len < 0.05) return to.clone();
             _tpRayDir.multiplyScalar(1 / len);
-            ray.set(from, _tpRayDir);
-            const hit = ray.intersectObjects(collectAimMeshes(), true)[0];
-            if (hit && hit.distance < len) {
-                return from.clone().addScaledVector(_tpRayDir, Math.max(0.45, hit.distance - 0.32));
+            const hit = voxelRaycast(from, _tpRayDir, len);
+            if (hit) {
+                const d = hit.point.distanceTo(from);
+                if (d < len) return from.clone().addScaledVector(_tpRayDir, Math.max(0.45, d - 0.32));
             }
             return to.clone();
         }
@@ -7285,7 +7345,16 @@
             resetStreaming();
             clearCritters();
             spawnPlayerAtCenter();
-            streamInit();
+            (function () {
+                const AP = getProfileApi();
+                const def = (AP && AP.currentPlanetDef) ? AP.currentPlanetDef(AP.load()) : null;
+                showVoxelLoading(def ? ('Charting ' + def.name) : 'Loading…', def ? def.nameDa : '');
+                afterPaint(() => {
+                    if (!_active) { hideVoxelLoading(); return; }
+                    streamInit();
+                    hideVoxelLoading();
+                });
+            })();
             renderHotbar();
             updateJournalHud();
             if (!av) {
@@ -7318,6 +7387,7 @@
             if (!firstPerson && !tpTune.dismissed) showTpTuner();
             else hideTpTuner();
             spawnPlayerAtCenter();
+            orbit.phi = Math.PI / 2;   // start looking level at the horizon, not up/down
             elapsed = 0;
             updateViewHints();
             updateCamera();
@@ -7332,6 +7402,7 @@
             }
             flushProfileState();
             _active = false;
+            hideVoxelLoading();
             disposeGearViewer();
             disposeThumbRenderer();
             clearCritters();

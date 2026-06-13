@@ -2992,6 +2992,38 @@ body.mode-asteroid {
     font-size: 9px;
 }
 
+/* ===== Asteroid loading screen (covers world build on enter / travel) ===== */
+#voxel-loading {
+    position: fixed;
+    inset: 0;
+    z-index: 10090;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: radial-gradient(ellipse at 50% 44%, #2a2014, #110c06 80%);
+    font-family: 'Courier New', monospace;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.35s ease;   /* smooth fade-out */
+}
+#voxel-loading.vx-load-on {
+    opacity: 1;
+    pointer-events: auto;
+    transition: none;                 /* instant show, so the empty world never flashes */
+}
+.vx-load-box { text-align: center; }
+.vx-load-ring {
+    width: 54px; height: 54px; margin: 0 auto 20px;
+    border-radius: 50%;
+    border: 5px solid rgba(122, 96, 56, 0.35);
+    border-top-color: #ffd472;
+    animation: vx-load-spin 0.85s linear infinite;   /* transform-only: keeps spinning while JS builds */
+}
+@keyframes vx-load-spin { to { transform: rotate(360deg); } }
+.vx-load-title { font-size: 19px; font-weight: bold; color: #ffd472; letter-spacing: 1.5px; text-transform: uppercase; }
+.vx-load-sub { font-size: 13px; color: #bda985; margin-top: 6px; }
+.vx-load-hint { font-size: 11px; color: #8a795c; margin-top: 18px; }
+
 /* ===== Field Journal pages (Catalog / Missions / Worlds) ===== */
 .vx-page-intro {
     font-size: 11px;
