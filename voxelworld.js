@@ -952,6 +952,203 @@
           g.scene.background = _voxelBg;
         }
 
+        // ---------- skydome: a real celestial sphere around the camera. Replaces the flat
+        // screen backdrop so stars live in 3D (rotate as you look around), the sun/moon sit
+        // at their true light direction, and a uSpaceF altitude blend dives the atmosphere
+        // into starry space when the player flies up. Day/night/sunset/space are all just
+        // uniform changes — no canvas repaints. ----------
+        let _skyDome=null, _skyMat=null, _baseFogHex=0xbfe0f5;
+        const SPACE_DARK=0x05060c;
+        const _SPACE_COL=new THREE.Color(SPACE_DARK);
+        function buildSkyDome(){
+          if(_skyDome || !g.scene) return;
+          const geo = new THREE.SphereGeometry(560, 48, 32);
+          _skyMat = new THREE.ShaderMaterial({
+            side:THREE.BackSide, depthWrite:false, depthTest:false, fog:false,
+            uniforms:{
+              uTime:{value:0},
+              uSunDir:{value:new THREE.Vector3(0.4,0.7,0.3)},
+              uSunColor:{value:new THREE.Color(0xfff4e0)},
+              uZenith:{value:new THREE.Color(0x3a78b4)},
+              uHorizon:{value:new THREE.Color(0xbfe0f5)},
+              uNight:{value:new THREE.Color(NIGHT_SKY)},
+              uNightHorizon:{value:new THREE.Color(NIGHT_HORIZON)},
+              uDayF:{value:1.0}, uSpaceF:{value:0.0},
+              uBandN:{value:new THREE.Vector3(0.22,0.93,0.30).normalize()},   // Milky Way tilt
+              uP1Dir:{value:new THREE.Vector3(-0.62,0.26,0.74).normalize()}, uP1Col:{value:new THREE.Color(0xffb27a)},
+              uP2Dir:{value:new THREE.Vector3(0.55,0.16,-0.82).normalize()}, uP2Col:{value:new THREE.Color(0x8fd0ff)},
+            },
+            vertexShader:`
+              varying vec3 vDir;
+              void main(){ vDir = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
+            fragmentShader:`
+              precision highp float;
+              uniform float uTime, uDayF, uSpaceF;
+              uniform vec3 uSunDir, uSunColor, uZenith, uHorizon, uNight, uNightHorizon, uBandN;
+              uniform vec3 uP1Dir, uP1Col, uP2Dir, uP2Col;
+              varying vec3 vDir;
+              float hash13(vec3 p){ p=fract(p*0.1031); p+=dot(p,p.yzx+33.33); return fract((p.x+p.y)*p.z); }
+              float vnoise(vec3 p){
+                vec3 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f);
+                float n000=hash13(i),n100=hash13(i+vec3(1,0,0)),n010=hash13(i+vec3(0,1,0)),n110=hash13(i+vec3(1,1,0));
+                float n001=hash13(i+vec3(0,0,1)),n101=hash13(i+vec3(1,0,1)),n011=hash13(i+vec3(0,1,1)),n111=hash13(i+vec3(1,1,1));
+                return mix(mix(mix(n000,n100,f.x),mix(n010,n110,f.x),f.y),mix(mix(n001,n101,f.x),mix(n011,n111,f.x),f.y),f.z);
+              }
+              float fbm(vec3 p){ float a=0.5,s=0.0; for(int i=0;i<4;i++){ s+=a*vnoise(p); p*=2.03; a*=0.5; } return s; }
+              float starLayer(vec3 dir,float scale,float thr){
+                vec3 p=dir*scale; vec3 id=floor(p); vec3 f=fract(p)-0.5;
+                float h=hash13(id); if(h<thr) return 0.0;
+                return smoothstep(0.5,0.0,length(f)*6.0)*((h-thr)/(1.0-thr));
+              }
+              void main(){
+                vec3 dir=normalize(vDir);
+                float t=smoothstep(-0.08,0.55,dir.y);
+                vec3 day=mix(uHorizon,uZenith,t);
+                vec3 night=mix(uNightHorizon,uNight,t);
+                vec3 col=mix(night,day,uDayF);
+                // dive into space: atmosphere -> near-black vacuum, keep a thin lit planet limb at the horizon
+                vec3 space=vec3(0.004,0.006,0.013);
+                float limb=exp(-pow(max(dir.y,0.0)/0.05,2.0));
+                col=mix(col, space + uHorizon*limb*0.45*uDayF, uSpaceF);
+                // stars: visible at night OR in space
+                float starVis=clamp(max(1.0-uDayF,uSpaceF),0.0,1.0);
+                if(starVis>0.01){
+                  float s = starLayer(dir,150.0,0.880) + starLayer(dir,300.0,0.915)*0.8
+                          + starLayer(dir,540.0,0.945)*0.6 + starLayer(dir,820.0,0.965)*0.45;
+                  float tw = 0.7+0.3*sin(uTime*2.5 + hash13(floor(dir*150.0))*6.2831);
+                  float band=1.0-abs(dot(dir,normalize(uBandN)));
+                  float mw=smoothstep(0.80,1.0,band)*fbm(dir*4.0+vec3(3.1))*0.6;
+                  col += (s*tw*vec3(0.95,0.97,1.0) + mw*vec3(0.55,0.60,0.85))*starVis;
+                }
+                // sibling worlds: small colored discs (faint by day, bright at night/space)
+                float pv=clamp(max(1.0-uDayF*0.7,uSpaceF),0.0,1.0);
+                col += smoothstep(0.99965,0.99986,dot(dir,normalize(uP1Dir)))*uP1Col*pv;
+                col += smoothstep(0.99975,0.99991,dot(dir,normalize(uP2Dir)))*uP2Col*pv;
+                // moon: opposite the sun, pale, mostly at night/space
+                vec3 md=normalize(-uSunDir); float mdd=dot(dir,md);
+                float moonVis=clamp(max(1.0-uDayF,uSpaceF*0.85),0.0,1.0);
+                col += (smoothstep(0.9994,0.99965,mdd)*vec3(0.92,0.93,1.0) + pow(max(mdd,0.0),900.0)*0.5*vec3(0.5,0.55,0.7))*moonVis;
+                // sun: sharp disc + atmospheric glow/halo (glow fades to nothing in vacuum)
+                vec3 sd=normalize(uSunDir); float sdd=dot(dir,sd);
+                float glow=pow(max(sdd,0.0),180.0)*(1.0-uSpaceF*0.85);
+                float halo=pow(max(sdd,0.0),12.0)*0.12*(1.0-uSpaceF)*uDayF;
+                col += uSunColor*(smoothstep(0.9995,0.99975,sdd)*1.4 + glow*0.7 + halo);
+                gl_FragColor=vec4(col,1.0);
+              }`,
+          });
+          _skyDome = new THREE.Mesh(geo, _skyMat);
+          _skyDome.renderOrder = -1000;
+          _skyDome.frustumCulled = false;
+          g.scene.add(_skyDome);
+          g.scene.background = null;       // dome replaces the flat backdrop
+        }
+        // Push day-sky colours + sun to the dome (called from applyDaySky). Theme day colours
+        // go to uZenith/uHorizon; the shader does the night + space blends itself via uDayF/uSpaceF.
+        function updateSkyColors(skyHex, dayHorizonHex, sunHex, dayF){
+          if(!_skyMat) return;
+          const u=_skyMat.uniforms;
+          u.uZenith.value.setHex(skyHex); u.uHorizon.value.setHex(dayHorizonHex);
+          u.uSunColor.value.setHex(sunHex); u.uDayF.value=dayF;
+          const Ls=g._voxelLights; if(Ls&&Ls[1]) u.uSunDir.value.copy(Ls[1].position).normalize();
+        }
+        // Per-frame: follow the camera, advance twinkle, and blend atmosphere->space by altitude.
+        const SPACE_Y0=72, SPACE_Y1=148;          // world-Y where space transition starts / completes
+        function updateSky(dt){
+          if(!_skyMat) return;
+          const u=_skyMat.uniforms; u.uTime.value=elapsed;
+          if(_skyDome) _skyDome.position.copy(camera.position);
+          const Ls=g._voxelLights; if(Ls&&Ls[1]){ u.uSunDir.value.copy(Ls[1].position).normalize(); u.uSunColor.value.copy(Ls[1].color); }
+          const sf=_cl01((player.pos.y - SPACE_Y0)/(SPACE_Y1 - SPACE_Y0));
+          u.uSpaceF.value=sf;
+          // thin the atmosphere as we climb: push fog out + darken toward space so the world
+          // recedes into a shrinking lit disc below instead of a hard fog wall.
+          if(g.scene.fog){
+            g.scene.fog.near = FOG_NEAR + sf*60;
+            g.scene.fog.far  = FOG_FAR  + sf*(1400 - FOG_FAR);
+            g.scene.fog.color.setHex(_baseFogHex).lerp(_SPACE_COL, sf);
+          }
+          // curved planet globe below: fade in with altitude, sit under the player, face the sun.
+          if(_planetMat){
+            const pu=_planetMat.uniforms;
+            pu.uOpacity.value = _cl01((sf-0.04)/0.46);          // fully present by mid-ascent
+            if(_planetBody) _planetBody.position.set(camera.position.x, PLANET_SURFACE_Y - PLANET_R, camera.position.z);
+            if(Ls&&Ls[1]) pu.uSunDir.value.copy(Ls[1].position).normalize();
+            const th=activeBiome||BIOME_THEMES.verdant;
+            if(th.ground!=null) pu.uGround.value.setHex(th.ground);
+            if(th.sky!=null) pu.uAtmo.value.setHex(th.sky);
+          }
+          // grow the far plane in space so the globe's limb (and stars) aren't clipped at far=700.
+          const wantFar = 700 + sf*(3000-700);
+          if(Math.abs(camera.far - wantFar) > 2){ camera.far = wantFar; camera.updateProjectionMatrix(); }
+        }
+        function disposeSkyDome(){
+          if(!_skyDome) return;
+          g.scene.remove(_skyDome); _skyDome.geometry.dispose(); _skyMat.dispose();
+          _skyDome=null; _skyMat=null;
+        }
+
+        // ---------- planet body: a big lit sphere below the player so that leaving the
+        // surface reads as leaving a real globe (the streamed voxel terrain is only a small
+        // flat disc). Procedural land/ocean/ice + atmosphere rim, lit by the scene sun.
+        // Fades in with altitude (uSpaceF) so it never clips the ground-level world. ----------
+        let _planetBody=null, _planetMat=null;
+        const PLANET_R=2200, PLANET_SURFACE_Y=8;        // radius + world-Y of its "sea level"
+        function buildPlanetBody(){
+          if(_planetBody || !g.scene) return;
+          const geo=new THREE.SphereGeometry(PLANET_R, 96, 64);
+          const th=activeBiome||BIOME_THEMES.verdant;
+          _planetMat=new THREE.ShaderMaterial({
+            transparent:true, depthWrite:false, fog:false,
+            uniforms:{
+              uSunDir:{value:new THREE.Vector3(0.4,0.7,0.3)},
+              uGround:{value:new THREE.Color(th.ground!=null?th.ground:0x6a8a4a)},
+              uOcean:{value:new THREE.Color(0x163b63)},
+              uIce:{value:new THREE.Color(0xeaf3ff)},
+              uAtmo:{value:new THREE.Color(th.sky!=null?th.sky:0x4a90e0)},
+              uOpacity:{value:0.0},
+            },
+            vertexShader:`
+              varying vec3 vN; varying vec3 vW;
+              void main(){ vN=normalize(position); vec4 w=modelMatrix*vec4(position,1.0); vW=w.xyz; gl_Position=projectionMatrix*viewMatrix*w; }`,
+            fragmentShader:`
+              precision highp float;
+              uniform vec3 uSunDir,uGround,uOcean,uIce,uAtmo; uniform float uOpacity;
+              varying vec3 vN; varying vec3 vW;
+              float h13(vec3 p){ p=fract(p*0.1031); p+=dot(p,p.yzx+33.33); return fract((p.x+p.y)*p.z); }
+              float vn(vec3 p){ vec3 i=floor(p),f=fract(p); f=f*f*(3.0-2.0*f);
+                float a=h13(i),b=h13(i+vec3(1,0,0)),c=h13(i+vec3(0,1,0)),d=h13(i+vec3(1,1,0));
+                float e=h13(i+vec3(0,0,1)),g2=h13(i+vec3(1,0,1)),h2=h13(i+vec3(0,1,1)),i2=h13(i+vec3(1,1,1));
+                return mix(mix(mix(a,b,f.x),mix(c,d,f.x),f.y),mix(mix(e,g2,f.x),mix(h2,i2,f.x),f.y),f.z); }
+              float fbm(vec3 p){ float s=0.0,a=0.5; for(int k=0;k<5;k++){ s+=a*vn(p); p*=2.04; a*=0.5; } return s; }
+              void main(){
+                vec3 n=normalize(vN);
+                float cont=fbm(n*2.3);
+                float land=smoothstep(0.48,0.56,cont);
+                vec3 surf=mix(uOcean,uGround,land);
+                surf=mix(surf, surf*1.16, land*smoothstep(0.60,0.82,fbm(n*6.0)));   // land relief
+                float ice=smoothstep(0.80,0.92,abs(n.y));                           // polar caps
+                surf=mix(surf,uIce,ice);
+                vec3 L=normalize(uSunDir);
+                float diff=max(dot(n,L),0.0);
+                float lit=0.10+0.98*diff;
+                vec3 V=normalize(cameraPosition - vW);
+                float rim=pow(1.0-max(dot(n,V),0.0),3.0);                           // atmosphere limb
+                vec3 col=surf*lit + uAtmo*rim*(0.45+0.6*diff);
+                col += pow(max(dot(reflect(-L,n),V),0.0),30.0)*(1.0-land)*0.4*uAtmo; // ocean sun glint
+                gl_FragColor=vec4(col, uOpacity);
+              }`,
+          });
+          _planetBody=new THREE.Mesh(geo,_planetMat);
+          _planetBody.renderOrder=-2;          // behind water (1), in front of the star dome
+          _planetBody.frustumCulled=false;
+          g.scene.add(_planetBody);
+        }
+        function disposePlanetBody(){
+          if(!_planetBody) return;
+          g.scene.remove(_planetBody); _planetBody.geometry.dispose(); _planetMat.dispose();
+          _planetBody=null; _planetMat=null;
+        }
+
         // Set sky / fog / lights from the current planet palette + time of day.
         function applyDaySky(){
           if(!g.scene) return;
@@ -965,6 +1162,7 @@
           horizon = _mixHex(horizon, SUNSET, sunsetF*0.6);
           let sunCol = _mixHex(MOON, th.sun!=null?th.sun:0xfff4e0, dayF);
           sunCol = _mixHex(sunCol, 0xffb060, sunsetF*0.5);
+          _baseFogHex = horizon;        // ground fog target; updateSky() blends this toward space by altitude
           if(g.scene.fog && g.scene.fog.color){ g.scene.fog.color.setHex(horizon); g.scene.fog.near=FOG_NEAR; g.scene.fog.far=FOG_FAR; }
           if(g._voxelLights){
             const [hemi, key, rim] = g._voxelLights;
@@ -977,10 +1175,10 @@
             }
             if(rim){ rim.color.setHex(horizon); rim.intensity=0.16+dayF*0.12; }
           }
-          if(_skyMark<0 || Math.abs(dayTime-_skyMark)>0.008){      // throttle canvas rebuilds (~6s)
-            _skyMark = dayTime;
-            buildSkyBackground(sky, horizon, sunCol, _cl01(0.55-dayF), elev);
-          }
+          // Feed the dome: theme DAY colours (it does its own night blend via uDayF) and a
+          // sunset-tinted day horizon. No canvas repaint — the dome shader handles everything.
+          const dayHorizon = _mixHex(th.horizon!=null?th.horizon:0xbfe0f5, SUNSET, sunsetF*0.6);
+          updateSkyColors(th.sky!=null?th.sky:0x4a90e0, dayHorizon, sunCol, dayF);
         }
         // Advance time + refresh sky each frame.
         function _dayNightOn(){ return DAYNIGHT_ENABLED || (activeSpec && activeSpec.visual && activeSpec.visual.dayNight); }
@@ -2061,6 +2259,7 @@ ${waveConsts}
               pivot: { rx: [0.06, 0.15], ry: [0.08, 0.14], rz: [0.1, 0.16], pz: [0.05, 0.12], py: [0.02, 0.05], px: [0.03, 0.05] } }
         ];
         let jetpackSfxCd = 0;
+        let jetBoost = false;            // B toggles a high-thrust jetpack (rocket up to space fast)
         let laserFireLock = 0;
         let laserFireVariant = 0;
         let laserFireNext = 0;
@@ -6855,7 +7054,9 @@ ${waveConsts}
                 g.scene.add(hemi, keyL, rim);
                 g._voxelLights.push(hemi, keyL, rim);
             }
-            applyPlanetAtmosphere();   // paints sky bg + tints fog/lights for the active planet
+            buildSkyDome();            // must exist before applyPlanetAtmosphere so it gets the theme colours
+            buildPlanetBody();         // curved globe seen from space
+            applyPlanetAtmosphere();   // tints sky dome + fog/lights for the active planet
             buildClouds();
             _hideLegacyEnvironment();
             if (g._hideLegacyPlayUI) g._hideLegacyPlayUI();
@@ -6867,6 +7068,9 @@ ${waveConsts}
         function _restoreScene() {
             if (!_saved) return;
             disposeClouds();
+            disposeSkyDome();
+            disposePlanetBody();
+            if(g.camera){ g.camera.far = 700; g.camera.updateProjectionMatrix(); }   // undo space far-plane
             if (g.camera && g.camera.up) g.camera.up.set(0, 1, 0);   // undo radial camera up
             if (_voxelBg && _voxelBg !== _saved.bg) {
                 _voxelBg.dispose();
@@ -7327,6 +7531,7 @@ ${waveConsts}
             streamAround(player.pos.x, player.pos.z);
             processBuildQueue(2.5);            // ms/frame — granular (per sub-chunk) so it spreads without spiking
             updateDayNight(dt);
+            updateSky(dt);
             updateClouds(dt);
             updateWater(dt);
             elapsed += dt;
@@ -7368,10 +7573,15 @@ ${waveConsts}
             } else {
                 player.vel.y -= 22*_gravMul*dt;            // per-planet gravity
                 if(keys.Space){
-                    if(wasGrounded) player.vel.y = 8.5;     // jump (floatier on low-g worlds)
-                    else { player.vel.y = Math.min(player.vel.y+40*dt, 5.5); thrusting=true; }
+                    if(wasGrounded) player.vel.y = jetBoost ? 11 : 8.5;   // jump (floatier on low-g worlds)
+                    else {                                  // B-boost: rocket up to space fast
+                        const climbAcc = jetBoost ? 80 : 40, climbMax = jetBoost ? 17 : 5.5;
+                        player.vel.y = Math.min(player.vel.y+climbAcc*dt, climbMax);
+                        thrusting=true;
+                    }
                 }
                 player.vel.y = Math.max(player.vel.y, -28*_gravMul);
+                if(jetBoost && !player.grounded){ mvx*=1.7; mvz*=1.7; }   // faster horizontal flight too
             }
             const hv=new THREE.Vector3(mvx,0,mvz);
             moveAxis('x', hv.x*dt);
@@ -7587,6 +7797,11 @@ ${waveConsts}
                 }
                 if (e.code === 'KeyV') {
                     setFirstPerson(!firstPerson);
+                }
+                if (e.code === 'KeyB') {
+                    jetBoost = !jetBoost;
+                    if (g.showMessage) g.showMessage('🚀 Jetpack boost ' + (jetBoost ? 'ON — hold Space to rocket up!' : 'off'), 1600);
+                    return;
                 }
                 if (e.code === 'F8') {
                     e.preventDefault();
