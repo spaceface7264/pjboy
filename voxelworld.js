@@ -830,9 +830,17 @@
           const r=Math.round(ar+(br-ar)*t), g2=Math.round(ag+(bg-ag)*t), b2=Math.round(ab+(bb-ab)*t);
           return (r<<16)|(g2<<8)|b2;
         }
+        const _cl01 = (v)=> v<0?0 : v>1?1 : v;
 
-        // Paint a daytime sky gradient (zenith -> horizon haze) with a soft sun glow.
-        function buildSkyBackground(sky, horizon, sun){
+        // ---------- day / night cycle ----------
+        const DAYNIGHT_ENABLED = false;         // master switch — flip to true to run the cycle
+        const DAY_LENGTH = 600;                 // seconds for a full day-night cycle
+        const NIGHT_SKY=0x0a1430, NIGHT_HORIZON=0x16203c, MOON=0x8a96b8, SUNSET=0xff7a3c;
+        let dayTime = 0.20;                     // 0=sunrise .25=noon .5=sunset .75=midnight
+        let _skyMark = -1, _dayF = 1;
+
+        // Paint the sky gradient for the current sun height; stars + sun/moon glow.
+        function buildSkyBackground(sky, horizon, sun, starsA, elev){
           if(!g.scene) return;
           const c=document.createElement('canvas'); c.width=64; c.height=512;
           const x=c.getContext('2d');
@@ -841,34 +849,95 @@
           grd.addColorStop(0.62, _hex(_mixHex(sky, horizon, 0.55)));
           grd.addColorStop(1, _hex(horizon));
           x.fillStyle=grd; x.fillRect(0,0,64,512);
-          const sg=x.createRadialGradient(44,150,4,44,150,120);   // soft sun, upper area
-          sg.addColorStop(0, 'rgba(255,250,238,0.9)');
-          sg.addColorStop(0.35, 'rgba(255,246,224,0.4)');
-          sg.addColorStop(1, 'rgba(255,246,224,0)');
-          x.fillStyle=sg; x.fillRect(0,0,64,512);
+          if(starsA>0.02){                                       // deterministic starfield at night
+            for(let i=0;i<70;i++){
+              const sx=(i*53)%64, sy=(i*89)%300, big=(i%9===0);
+              x.fillStyle='rgba(255,255,255,'+(starsA*(0.35+(i%5)*0.13)).toFixed(2)+')';
+              x.fillRect(sx, sy, big?2:1, big?2:1);
+            }
+          }
+          if(elev>-0.1){                                         // sun/moon glow, rides up/down with elevation
+            const gy=Math.max(24, 250 - elev*210);
+            const sg=x.createRadialGradient(44,gy,4,44,gy,118);
+            const a0=(0.45+_cl01(elev)*0.45).toFixed(2);
+            sg.addColorStop(0, 'rgba('+((sun>>16)&255)+','+((sun>>8)&255)+','+(sun&255)+','+a0+')');
+            sg.addColorStop(0.35, 'rgba(255,246,224,0.35)');
+            sg.addColorStop(1, 'rgba(255,246,224,0)');
+            x.fillStyle=sg; x.fillRect(0,0,64,512);
+          }
           if(_voxelBg) _voxelBg.dispose();
           _voxelBg = new THREE.CanvasTexture(c);
           g.scene.background = _voxelBg;
         }
 
-        // Apply the active planet's sky, horizon fog and daytime lighting.
-        function applyPlanetAtmosphere(){
-          const th = activeBiome || BIOME_THEMES.verdant;
-          const sky = th.sky!=null? th.sky : 0x4a90e0;
-          const horizon = th.horizon!=null? th.horizon : 0xbfe0f5;
-          const sun = th.sun!=null? th.sun : 0xfff4e0;
+        // Set sky / fog / lights from the current planet palette + time of day.
+        function applyDaySky(){
           if(!g.scene) return;
-          if(g.scene.fog && g.scene.fog.color){
-            g.scene.fog.color.setHex(horizon);
-            g.scene.fog.near = FOG_NEAR; g.scene.fog.far = FOG_FAR;
-          }
-          buildSkyBackground(sky, horizon, sun);
+          const th = activeBiome || BIOME_THEMES.verdant;
+          const a = dayTime*Math.PI*2, elev = Math.sin(a);
+          const dayF = _cl01(elev*2.2 + 0.4);                   // 1 by day, 0 deep night
+          const sunsetF = _cl01(1 - Math.abs(elev)/0.32) * _cl01(0.4+elev*4);  // warm only near sunrise/set
+          _dayF = dayF;
+          let sky = _mixHex(NIGHT_SKY, th.sky!=null?th.sky:0x4a90e0, dayF);
+          let horizon = _mixHex(NIGHT_HORIZON, th.horizon!=null?th.horizon:0xbfe0f5, dayF);
+          horizon = _mixHex(horizon, SUNSET, sunsetF*0.6);
+          let sunCol = _mixHex(MOON, th.sun!=null?th.sun:0xfff4e0, dayF);
+          sunCol = _mixHex(sunCol, 0xffb060, sunsetF*0.5);
+          if(g.scene.fog && g.scene.fog.color){ g.scene.fog.color.setHex(horizon); g.scene.fog.near=FOG_NEAR; g.scene.fog.far=FOG_FAR; }
           if(g._voxelLights){
             const [hemi, key, rim] = g._voxelLights;
-            if(hemi){ hemi.color.setHex(sky); if(hemi.groundColor) hemi.groundColor.setHex(th.ground||0x6a7a4a); hemi.intensity=0.9; }
-            if(key){ key.color.setHex(sun); key.intensity=1.05; }
-            if(rim){ rim.color.setHex(horizon); rim.intensity=0.22; }
+            if(hemi){ hemi.color.setHex(sky); if(hemi.groundColor) hemi.groundColor.setHex(th.ground||0x6a7a4a); hemi.intensity=0.32+dayF*0.62; }
+            if(key){
+              key.color.setHex(sunCol); key.intensity=0.16+dayF*0.95;
+              const sx=Math.cos(a);
+              if(elev>=0) key.position.set(sx*150, elev*150+20, 60);
+              else key.position.set(-sx*150, -elev*120+50, -60);   // soft moonlight from above
+            }
+            if(rim){ rim.color.setHex(horizon); rim.intensity=0.16+dayF*0.12; }
           }
+          if(_skyMark<0 || Math.abs(dayTime-_skyMark)>0.008){      // throttle canvas rebuilds (~6s)
+            _skyMark = dayTime;
+            buildSkyBackground(sky, horizon, sunCol, _cl01(0.55-dayF), elev);
+          }
+        }
+        // Advance time + refresh sky each frame.
+        function updateDayNight(dt){ if(!DAYNIGHT_ENABLED) return; dayTime = (dayTime + dt/DAY_LENGTH) % 1; applyDaySky(); }
+        // Forced full refresh (planet change / enter).
+        function applyPlanetAtmosphere(){ _skyMark = -1; applyDaySky(); }
+
+        // ---------- drifting cloud layer ----------
+        const CLOUDS_ENABLED = false;           // master switch — flip to true to show clouds
+        let cloudMesh=null, _cloudTex=null;
+        function buildCloudTexture(){
+          const c=document.createElement('canvas'); c.width=c.height=256; const x=c.getContext('2d');
+          for(let i=0;i<26;i++){
+            const cx=Math.random()*256, cy=Math.random()*256, r=14+Math.random()*30;
+            const gr=x.createRadialGradient(cx,cy,2,cx,cy,r);
+            gr.addColorStop(0,'rgba(255,255,255,0.92)'); gr.addColorStop(1,'rgba(255,255,255,0)');
+            x.fillStyle=gr; x.fillRect(cx-r,cy-r,r*2,r*2);
+          }
+          const t=new THREE.CanvasTexture(c); t.wrapS=t.wrapT=THREE.RepeatWrapping; t.repeat.set(4,4); return t;
+        }
+        function buildClouds(){
+          if(!CLOUDS_ENABLED || cloudMesh || !g.scene) return;
+          _cloudTex=buildCloudTexture();
+          const mat=new THREE.MeshBasicMaterial({ map:_cloudTex, transparent:true, opacity:0.72, depthWrite:false, fog:false, side:THREE.DoubleSide });
+          cloudMesh=new THREE.Mesh(new THREE.PlaneGeometry(900,900), mat);
+          cloudMesh.rotation.x=-Math.PI/2; cloudMesh.position.y=62;
+          g.scene.add(cloudMesh);
+        }
+        function updateClouds(dt){
+          if(!cloudMesh) return;
+          cloudMesh.position.x=player.pos.x; cloudMesh.position.z=player.pos.z;
+          if(_cloudTex){ _cloudTex.offset.x += dt*0.004; _cloudTex.offset.y += dt*0.0022; }
+          const tint=_mixHex(0x39435e, 0xffffff, _dayF);     // clouds darken at night
+          cloudMesh.material.color.setHex(tint);
+        }
+        function disposeClouds(){
+          if(!cloudMesh) return;
+          g.scene.remove(cloudMesh); cloudMesh.geometry.dispose(); cloudMesh.material.dispose();
+          if(_cloudTex) _cloudTex.dispose();
+          cloudMesh=null; _cloudTex=null;
         }
 
         // ---------- deterministic worldgen: same seed = same world ----------
@@ -1049,15 +1118,17 @@
           if(dir[1]===-1) return t.bottom;
           return t.side;
         }
-        // classic 3-neighbor corner occlusion
-        function vertexAO(x,y,z,dir,corner){
+        // classic 3-neighbor corner occlusion. `read` is an optional fast block
+        // reader (defaults to getBlock); buildChunkMesh passes a local 3×3 reader.
+        function vertexAO(x,y,z,dir,corner,read){
+          read = read || getBlock;
           const a = dir[0]? 0 : (dir[1]? 1:2);          // face axis
           const [b,c] = a===0? [1,2] : a===1? [0,2] : [0,1];
           const n=[dir[0],dir[1],dir[2]];
           const t1=[0,0,0], t2=[0,0,0];
           t1[b]=corner.pos[b]? 1:-1;
           t2[c]=corner.pos[c]? 1:-1;
-          const occ = p => getBlock(x+p[0],y+p[1],z+p[2])? 1:0;
+          const occ = p => read(x+p[0],y+p[1],z+p[2])? 1:0;
           const s1=occ([n[0]+t1[0],n[1]+t1[1],n[2]+t1[2]]);
           const s2=occ([n[0]+t2[0],n[1]+t2[1],n[2]+t2[2]]);
           const co=occ([n[0]+t1[0]+t2[0],n[1]+t1[1]+t2[1],n[2]+t1[2]+t2[2]]);
@@ -1110,7 +1181,23 @@
           const key=`${cx},${cy},${cz}`;
           const old = scene3.chunks.get(key);
           if(old){ ['static','anim','glass','deco'].forEach(k=>{ if(old[k]){ scene.remove(old[k]); old[k].geometry.dispose(); } }); }
-        
+
+          // Cache the 3×3 neighbour column buffers once so per-voxel reads skip the
+          // string-key build + Map.get in getBlock (meshColumn guarantees neighbours
+          // are resident; rebuildChunkAt edits fall back to getBlock on a cache miss).
+          const nbuf = [
+            [worldCols.get(colKey(cx-1,cz-1)), worldCols.get(colKey(cx-1,cz)), worldCols.get(colKey(cx-1,cz+1))],
+            [worldCols.get(colKey(cx,  cz-1)), worldCols.get(colKey(cx,  cz)), worldCols.get(colKey(cx,  cz+1))],
+            [worldCols.get(colKey(cx+1,cz-1)), worldCols.get(colKey(cx+1,cz)), worldCols.get(colKey(cx+1,cz+1))],
+          ];
+          const localBlock = (x,y,z) => {
+            if(y<0||y>=H) return 0;
+            const ncx = Math.floor(x/CH)-cx, ncz = Math.floor(z/CH)-cz;
+            if(ncx<-1||ncx>1||ncz<-1||ncz>1) return getBlock(x,y,z);   // outside the cached ring
+            const b = nbuf[ncx+1][ncz+1];
+            return b ? b[cIdx(_mod(x,CH), y, _mod(z,CH))] : getBlock(x,y,z);
+          };
+
           const buf = { pos:[], uv:[], col:[], idx:[], nor:[] };
           const abuf = { pos:[], uv:[], col:[], idx:[], nor:[] };
           const gbuf = { pos:[], uv:[], col:[], idx:[], nor:[] };
@@ -1119,7 +1206,7 @@
           for(let lx=0;lx<CH;lx++) for(let ly=0;ly<CH;ly++) for(let lz=0;lz<CH;lz++){
             const x=cx*CH+lx, y=cy*CH+ly, z=cz*CH+lz;
             if(y<0||y>=H) continue;                 // x/z unbounded (streaming world)
-            const id = getBlock(x,y,z);
+            const id = localBlock(x,y,z);
             if(!id) continue;
             const block = blockById(id);
             const B = block.animated? abuf : (block.transparent? gbuf : buf);
@@ -1128,7 +1215,7 @@
         
             for(const face of FACES){
               const [dx,dy,dz] = face.dir;
-              const nid = getBlock(x+dx,y+dy,z+dz);
+              const nid = localBlock(x+dx,y+dy,z+dz);
               if(nid){
                 const nb = blockById(nid);
                 if(!nb.transparent) continue;                   // opaque neighbor hides this face
@@ -1146,7 +1233,7 @@
                 else { u = lerp(tile.u0,tile.u1,corner.uv[0]); v = lerp(tile.v0,tile.v1,corner.uv[1]); }
                 B.uv.push(u,v);
                 B.nor.push(dx,dy,dz);                            // flat face normal (no computeVertexNormals)
-                const br = face.bright * vertexAO(x,y,z,face.dir,corner);
+                const br = face.bright * vertexAO(x,y,z,face.dir,corner,localBlock);
                 B.col.push(br,br,br);
               }
               B.idx.push(base, base+1, base+2, base+2, base+1, base+3);
@@ -1188,8 +1275,9 @@
 
         // ---------- chunk streaming: keep a disc of columns around the player ----------
         const VCH = H/CH;                       // vertical sub-chunks per column
-        const meshedCols = new Set();           // "cx,cz" columns currently meshed
-        let buildQueue = [];                    // pending column meshes, nearest first
+        const meshedCols = new Set();           // "cx,cz" columns claimed (generated/meshing)
+        let buildQueue = [];                    // pending columns to GENERATE, nearest first
+        let meshQueue = [];                     // pending per-sub-chunk MESH jobs {cx,cy,cz}
         let _streamCx = null, _streamCz = null;
 
         function meshColumn(cx,cz){
@@ -1237,16 +1325,33 @@
             if(ddx*ddx+ddz*ddz>drop2){ worldCols.delete(k); colMaxY.delete(k); }
           }
         }
-        // Mesh queued columns under a per-frame TIME budget (ms) so streaming spreads
-        // across frames instead of hitching. Always advances at least one column.
+        // Generation step for the streamed path: buffer the column + its 8 neighbours,
+        // claim it (so streamAround won't re-enqueue), then queue its non-empty
+        // sub-chunks for meshing. Cheaper, bounded unit than meshing a whole column.
+        function genColumnJob(cx,cz){
+          for(let dx=-1;dx<=1;dx++) for(let dz=-1;dz<=1;dz++) ensureCol(cx+dx, cz+dz);
+          meshedCols.add(colKey(cx,cz));
+          const topCy = Math.min(VCH-1, Math.floor((colMaxY.get(colKey(cx,cz)) || (H-1))/CH));
+          for(let cy=0; cy<=topCy; cy++) meshQueue.push({cx,cy,cz});
+        }
+        // Drain the streaming queues under a per-frame TIME budget (ms) so work spreads
+        // across frames instead of hitching. The budget is checked between each unit
+        // (one sub-chunk mesh, or one column generation), never spanning a whole column.
+        // Mesh jobs run first so claimed columns finish before new ones generate.
         function processBuildQueue(maxMs){
-          if(!buildQueue.length) return;
+          if(!meshQueue.length && !buildQueue.length) return;
           const now = (typeof performance!=='undefined' && performance.now) ? ()=>performance.now() : ()=>Date.now();
           const t0 = now();
           do {
-            const job = buildQueue.shift();
-            if(job && !meshedCols.has(colKey(job.cx,job.cz))) meshColumn(job.cx,job.cz);
-          } while(buildQueue.length && now()-t0 < maxMs);
+            if(meshQueue.length){
+              const j = meshQueue.shift();
+              // skip stale jobs whose column drifted out of range before meshing
+              if(meshedCols.has(colKey(j.cx,j.cz))) buildChunkMesh(j.cx,j.cy,j.cz);
+            } else {
+              const job = buildQueue.shift();
+              if(job && !meshedCols.has(colKey(job.cx,job.cz))) genColumnJob(job.cx,job.cz);
+            }
+          } while((meshQueue.length || buildQueue.length) && now()-t0 < maxMs);
         }
         // Dispose all chunks + buffers (used when entering / changing planet).
         function resetStreaming(){
@@ -1255,6 +1360,7 @@
           worldCols.clear();
           colMaxY.clear();
           buildQueue = [];
+          meshQueue = [];
           _streamCx = _streamCz = null;
         }
         // Build the spawn area up front; the rest streams in over the next frames.
@@ -3532,19 +3638,27 @@
             const p = AP.load();
             const prog = AP.missionProgress(p);
             el.hidden = false;
-            let planetLine = '';
+            let badge = '';
             if (AP.currentPlanetDef) {
                 const def = AP.currentPlanetDef(p);
                 const charted = (p.system && p.system.unlocked) ? p.system.unlocked.length : 1;
                 const total = AP.PLANETS ? AP.PLANETS.length : 1;
-                planetLine = '<div class="vx-planet-line">🪐 <b>' + def.name + '</b> · ' + def.nameDa
-                    + ' <span class="vx-planet-count">(' + charted + '/' + total + ' charted · Shift+R to travel)</span></div>';
+                badge = '<div class="vx-quest-top"><span class="vx-quest-badge">🪐 ' + def.name + '</span>'
+                    + '<span class="vx-quest-count">' + charted + ' / ' + total + ' charted</span></div>';
             }
             if (!prog.mission) {
-                el.innerHTML = planetLine + '<b>✓ Surveys complete</b> — all objectives done';
+                el.innerHTML = badge
+                    + '<div class="vx-quest-title vx-quest-done">✓ Surveys complete</div>'
+                    + '<div class="vx-quest-goal">Every objective done on this world — keep exploring.</div>'
+                    + '<div class="vx-quest-bar vx-quest-bar-done"><span style="width:100%"></span></div>';
                 return;
             }
-            el.innerHTML = planetLine + '<b>' + prog.mission.title + '</b> — ' + prog.label;
+            const cur = Math.max(0, prog.current | 0), tgt = Math.max(1, prog.target | 0);
+            const pct = Math.max(0, Math.min(100, Math.round(cur / tgt * 100)));
+            el.innerHTML = badge
+                + '<div class="vx-quest-title">🔬 ' + prog.mission.title + '</div>'
+                + '<div class="vx-quest-goal">' + prog.mission.desc + '</div>'
+                + '<div class="vx-quest-bar"><span style="width:' + pct + '%"></span><em>' + cur + ' / ' + tgt + '</em></div>';
         }
 
         function recordJournalScan(blockId) {
@@ -5061,14 +5175,15 @@
             Terrain: '🪨', Life: '🌿', Resources: '⛏️',
             Crystals: '💎', Crafted: '🔧', Hazards: '☢️', Creature: '🐾'
         };
+        // Field Journal station — one tab per page. The six block categories live as
+        // sections inside Backpack/Catalog rather than as their own tabs.
         const DRAWER_TABS = [
-            { id: 'Weapons', icon: '⚔️', label: 'Weapons' },
+            { id: 'Backpack', icon: '🎒', label: 'Backpack' },
+            { id: 'Catalog',  icon: '📖', label: 'Catalog' },
+            { id: 'Gear',     icon: '⚔️', label: 'Gear' },
             { id: 'Refinery', icon: '⚙️', label: 'Refinery' },
-            ...INV_CATEGORIES.map((cat) => ({
-                id: cat,
-                icon: CAT_ICONS[cat] || '▪',
-                label: cat
-            }))
+            { id: 'Missions', icon: '🎯', label: 'Missions' },
+            { id: 'Worlds',   icon: '🪐', label: 'Worlds' }
         ];
         const INV_TINT = {
             weapon_melee:  { bg: 'rgba(42, 74, 140, 0.72)',  border: 'rgba(100, 160, 255, 0.55)', fill: '#1a3560' },
@@ -5092,7 +5207,7 @@
         let drawerOpen = false;
         let controlsDrawerOpen = false;
         let drawerFilter = 'owned';   // 'owned' | 'all'
-        let drawerTab = 'Weapons';
+        let drawerTab = 'Backpack';
         const hotbarEl = document.getElementById('voxel-hotbar');
         const drawerEl = document.getElementById('voxel-drawer');
         const drawerPanelEl = document.getElementById('voxel-drawer-panel');
@@ -5309,7 +5424,7 @@
                 + (equipped ? ' vx-equipped' : '')
                 + (!owned && ownedOnly ? ' vx-empty' : '');
             item.style.cssText = invTintStyle(tint);
-            item.appendChild(createThumbWrap(tint, weaponThumb(def), def.name));
+            item.appendChild(createThumbWrap(tint, gear3DThumb(index), def.name));
             const name = document.createElement('div');
             name.className = 'vx-name';
             name.title = def.name;
@@ -5332,7 +5447,7 @@
             item.style.cssText = invTintStyle(tint);
             item.draggable = cnt > 0;
             item.dataset.blockId = String(b.id);
-            item.appendChild(createThumbWrap(tint, thumb(b), b.name));
+            item.appendChild(createThumbWrap(tint, block3DThumb(b), b.name));
             const name = document.createElement('div');
             name.className = 'vx-name';
             name.title = b.name;
@@ -5410,35 +5525,514 @@
         function renderDrawerTabBody(body, ownedOnly) {
             body.innerHTML = '';
             if (drawerTab === 'Refinery') { renderRefineryBody(body); return; }
+            if (drawerTab === 'Catalog') { renderCatalogBody(body); return; }
+            if (drawerTab === 'Missions') { renderMissionsBody(body); return; }
+            if (drawerTab === 'Worlds') { renderWorldsBody(body); return; }
+            if (drawerTab === 'Gear') { renderGearBody(body, ownedOnly); return; }
+            renderBackpackBody(body, ownedOnly);
+        }
+
+        // Backpack: all block categories as sections in one page.
+        function renderBackpackBody(body, ownedOnly) {
+            let any = false;
+            INV_CATEGORIES.forEach((cat) => {
+                const blocks = BlockRegistry.filter((b) => b.cat === cat);
+                const visible = ownedOnly ? blocks.filter((b) => getBackpackCount(b.id) > 0) : blocks;
+                if (!visible.length) return;
+                any = true;
+                const sec = document.createElement('div');
+                sec.className = 'vx-section';
+                const h = document.createElement('h4');
+                h.innerHTML = (CAT_ICONS[cat] || '▪') + ' ' + cat + ' <span class="vx-count">' + visible.length + '</span>';
+                sec.appendChild(h);
+                const grid = document.createElement('div');
+                grid.className = 'vx-grid';
+                visible.forEach((b) => grid.appendChild(createBlockInvItem(b, getBackpackCount(b.id))));
+                sec.appendChild(grid);
+                body.appendChild(sec);
+            });
+            if (!any) {
+                const e = document.createElement('div');
+                e.className = 'vx-inv-empty';
+                e.textContent = ownedOnly ? 'Your backpack is empty — go mine some blocks!' : 'No blocks.';
+                body.appendChild(e);
+            }
+        }
+
+        // Gear: empty hands + weapons.
+        function renderGearBody(body, ownedOnly) {
             const grid = document.createElement('div');
             grid.className = 'vx-grid';
-            if (drawerTab === 'Weapons') {
-                grid.appendChild(createEmptyHandsInvItem());
-                const defs = weaponList();
-                const visible = ownedOnly
-                    ? defs.map((d, i) => ({ def: d, i })).filter((x) => ownedWeapons.has(x.i))
-                    : defs.map((d, i) => ({ def: d, i }));
-                if (!visible.length) {
-                    const empty = document.createElement('div');
-                    empty.className = 'vx-inv-empty';
-                    empty.textContent = 'No weapons unlocked yet.';
-                    grid.appendChild(empty);
-                } else {
-                    visible.forEach(({ def, i }) => grid.appendChild(createWeaponInvItem(def, i, ownedOnly)));
-                }
+            grid.appendChild(createEmptyHandsInvItem());
+            const defs = weaponList();
+            const visible = ownedOnly
+                ? defs.map((d, i) => ({ def: d, i })).filter((x) => ownedWeapons.has(x.i))
+                : defs.map((d, i) => ({ def: d, i }));
+            if (!visible.length) {
+                const empty = document.createElement('div');
+                empty.className = 'vx-inv-empty';
+                empty.textContent = 'No weapons unlocked yet.';
+                grid.appendChild(empty);
             } else {
-                const blocks = BlockRegistry.filter((b) => b.cat === drawerTab);
-                const visible = ownedOnly ? blocks.filter((b) => getBackpackCount(b.id) > 0) : blocks;
-                if (!visible.length) {
-                    const empty = document.createElement('div');
-                    empty.className = 'vx-inv-empty';
-                    empty.textContent = ownedOnly ? 'Nothing here yet.' : 'No blocks in this category.';
-                    grid.appendChild(empty);
-                } else {
-                    visible.forEach((b) => grid.appendChild(createBlockInvItem(b, getBackpackCount(b.id))));
-                }
+                visible.forEach(({ def, i }) => grid.appendChild(createWeaponInvItem(def, i, ownedOnly)));
             }
             body.appendChild(grid);
+        }
+
+        // Catalog: Pokédex of every block — discovered ones show science, the rest
+        // are locked silhouettes, with a "X / N discovered" progress bar.
+        // Short, kid-friendly "where to find it" hints by block id.
+        const BLOCK_WHERE = {
+            1: 'On the surface of mild, green meadows.',
+            2: 'Just under the grass, all across the surface.',
+            3: 'Underground below the soil — the bulk of every world.',
+            4: 'On beaches by the water and across dry deserts.',
+            19: 'Scattered over bare, rocky ground.',
+            16: 'On dry, dusty and barren worlds.',
+            18: 'High mountains and hot volcanic worlds.',
+            17: 'Deep down, near the bottom of the world.',
+            21: 'Where lava cools against stone, deep underground.',
+            8: 'Frozen poles and icy worlds.',
+            20: 'Cold mountaintops and snowy tundra.',
+            40: 'Fills the oceans, lakes and rivers.',
+            5: 'The trunks of trees on grassy ground.',
+            6: 'The leafy crowns of trees.',
+            12: 'On lush, wet alien ground.',
+            13: 'On lush, wet alien ground.',
+            14: 'In cool, damp meadows — it glows.',
+            15: 'In warm golden grasslands.',
+            36: 'On fungal worlds where green plants cannot grow.',
+            27: 'Shallow underground, in long dark seams.',
+            22: 'Underground, above the deeper metals.',
+            23: 'Underground, a little deeper than copper.',
+            24: 'Deep underground in small pockets.',
+            25: 'Very deep, down in the basalt.',
+            28: 'The deepest, rarest ore near the bedrock.',
+            26: 'On the walls of underground caves.',
+            9: 'In strange, glowing veins underground.',
+            11: 'Trapped in rock deep near the molten core.',
+            38: 'In the hot molten core of the world.',
+            39: 'In pools on cave floors underground.',
+            37: 'Organic nests hidden underground.'
+        };
+        function blockWhere(b) {
+            if (BLOCK_WHERE[b.id]) return BLOCK_WHERE[b.id];
+            if (b.cat === 'Crafted') return 'Made by you at the Refinery.';
+            if (b.cat === 'Crystals') return 'Growing in deep underground caves.';
+            return 'Out in the world — keep exploring to find it.';
+        }
+        const CATEGORY_BADGES = {
+            Terrain: { icon: '🪨', title: 'Geologist' }, Life: { icon: '🌿', title: 'Botanist' },
+            Resources: { icon: '⛏️', title: 'Miner' }, Crystals: { icon: '💎', title: 'Gemologist' },
+            Crafted: { icon: '🔧', title: 'Engineer' }, Hazards: { icon: '☢️', title: 'Survivor' }
+        };
+        let codexView = null;     // null = overview, else {kind:'block',id} | {kind:'gear',idx}
+        let codexSection = 'Blocks';   // 'Blocks' | 'Gear'
+
+        // Codex overview: a Blocks/Gear toggle, then the chosen section.
+        function renderCatalogBody(body) {
+            if (codexView) { renderCodexDetail(body); return; }
+            const seg = document.createElement('div');
+            seg.className = 'vx-codex-seg';
+            ['Blocks', 'Gear'].forEach((s) => {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'vx-seg-btn' + (codexSection === s ? ' vx-seg-on' : '');
+                btn.textContent = s === 'Blocks' ? '📖 Blocks' : '⚔️ Gear';
+                btn.addEventListener('click', () => { codexSection = s; renderDrawer(); });
+                seg.appendChild(btn);
+            });
+            body.appendChild(seg);
+            if (codexSection === 'Gear') { renderCodexGearList(body); return; }
+            const AP = getProfileApi();
+            const scanned = (AP && AP.load().journal && AP.load().journal.scanned) || {};
+            const all = BlockRegistry.slice();
+            const discovered = all.filter((b) => scanned[String(b.id)]).length;
+            const total = all.length;
+            const pct = Math.round(discovered / Math.max(1, total) * 100);
+            const head = document.createElement('div');
+            head.className = 'vx-cat-head';
+            let badges = '<div class="vx-badges">';
+            INV_CATEGORIES.forEach((cat) => {
+                const blocks = all.filter((b) => b.cat === cat);
+                if (!blocks.length) return;
+                const earned = blocks.every((b) => scanned[String(b.id)]);
+                const bd = CATEGORY_BADGES[cat] || { icon: '▪', title: cat };
+                badges += '<span class="vx-badge' + (earned ? ' vx-badge-earned' : '') + '" title="' + bd.title + (earned ? ' — earned!' : '') + '">' + bd.icon + '</span>';
+            });
+            badges += '</div>';
+            head.innerHTML = '<div class="vx-cat-label">Codex — <b>' + discovered + ' / ' + total + '</b> discovered</div>'
+                + '<div class="vx-quest-bar"><span style="width:' + pct + '%"></span><em>' + pct + '%</em></div>' + badges;
+            body.appendChild(head);
+            INV_CATEGORIES.forEach((cat) => {
+                const blocks = all.filter((b) => b.cat === cat);
+                if (!blocks.length) return;
+                const dCount = blocks.filter((b) => scanned[String(b.id)]).length;
+                const earned = dCount === blocks.length;
+                const bd = CATEGORY_BADGES[cat] || { icon: '▪', title: cat };
+                const sec = document.createElement('div');
+                sec.className = 'vx-section';
+                const h = document.createElement('h4');
+                h.innerHTML = (CAT_ICONS[cat] || '▪') + ' ' + cat + ' <span class="vx-count">' + dCount + ' / ' + blocks.length
+                    + (earned ? ' · <b class="vx-badge-tag">' + bd.icon + ' ' + bd.title + '</b>' : '') + '</span>';
+                sec.appendChild(h);
+                const grid = document.createElement('div');
+                grid.className = 'vx-cat-grid';
+                blocks.forEach((b) => {
+                    const found = !!scanned[String(b.id)];
+                    const tile = document.createElement('div');
+                    tile.className = 'vx-cat-tile' + (found ? '' : ' vx-cat-locked');
+                    if (found) {
+                        tile.style.cssText = invTintStyle(blockTint(b.cat));
+                        tile.appendChild(createThumbWrap(blockTint(b.cat), block3DThumb(b), b.name));
+                        const nm = document.createElement('div');
+                        nm.className = 'vx-cat-name';
+                        nm.textContent = b.name;
+                        tile.appendChild(nm);
+                        tile.addEventListener('click', () => { codexView = { kind: 'block', id: b.id }; renderDrawer(); });
+                    } else {
+                        const q = document.createElement('div');
+                        q.className = 'vx-cat-q';
+                        q.textContent = '?';
+                        tile.appendChild(q);
+                        const nm = document.createElement('div');
+                        nm.className = 'vx-cat-name';
+                        nm.textContent = '???';
+                        tile.appendChild(nm);
+                    }
+                    grid.appendChild(tile);
+                });
+                sec.appendChild(grid);
+                body.appendChild(sec);
+            });
+        }
+
+        // Codex › Gear: every tool + weapon, tap for full stats + backstory.
+        function renderCodexGearList(body) {
+            const defs = weaponList();
+            const intro = document.createElement('div');
+            intro.className = 'vx-page-intro';
+            intro.textContent = 'Tap a tool or weapon to read its stats and story.';
+            body.appendChild(intro);
+            const grid = document.createElement('div');
+            grid.className = 'vx-cat-grid';
+            defs.forEach((def, i) => {
+                const tint = weaponTint(def);
+                const tile = document.createElement('div');
+                tile.className = 'vx-cat-tile';
+                tile.style.cssText = invTintStyle(tint);
+                tile.appendChild(createThumbWrap(tint, gear3DThumb(i), def.name));
+                const nm = document.createElement('div');
+                nm.className = 'vx-cat-name';
+                nm.textContent = def.name;
+                tile.appendChild(nm);
+                tile.addEventListener('click', () => { codexView = { kind: 'gear', idx: i }; renderDrawer(); });
+                grid.appendChild(tile);
+            });
+            body.appendChild(grid);
+        }
+
+        function renderCodexDetail(body) {
+            const back = document.createElement('button');
+            back.type = 'button';
+            back.className = 'vx-btn vx-codex-back';
+            back.innerHTML = '← Back to Codex';
+            back.addEventListener('click', () => { codexView = null; renderDrawer(); });
+            body.appendChild(back);
+            if (codexView.kind === 'gear') renderGearDetail(body, weaponList()[codexView.idx], codexView.idx);
+            else renderBlockDetail(body, blockById(codexView.id));
+        }
+
+        function renderBlockDetail(body, b) {
+            if (!b) return;
+            const da = (typeof BLOCK_DA !== 'undefined' && BLOCK_DA[b.name]) ? ' · ' + BLOCK_DA[b.name] : '';
+            const page = document.createElement('div');
+            page.className = 'vx-codex';
+            let html = '<div class="vx-codex-head">'
+                + '<div class="vx-codex-thumb" style="background-image:url(' + block3DThumb(b) + ')"></div>'
+                + '<div class="vx-codex-headtext"><div class="vx-codex-name">' + b.name + '<span class="vx-codex-da">' + da + '</span></div>'
+                + '<div class="vx-codex-cat">' + (CAT_ICONS[b.cat] || '▪') + ' ' + b.cat + '</div></div></div>';
+            const hard = Math.max(0, Math.min(10, b.hardness | 0));
+            let pips = '';
+            for (let i = 0; i < 10; i++) pips += '<span class="vx-pip' + (i < hard ? ' vx-pip-on' : '') + '"></span>';
+            html += '<div class="vx-codex-statline"><span class="vx-codex-statlabel">Hardness</span><span class="vx-pips">' + pips + '</span></div>';
+            const counts = parseFormulaCounts(b.sci && b.sci.formula);
+            if (counts) {
+                let chips = '';
+                Object.entries(counts).sort((a, c) => c[1] - a[1]).forEach(([el, n]) => {
+                    const e = formulaElm(el);
+                    const col = '#' + (e.color & 0xffffff).toString(16).padStart(6, '0');
+                    chips += '<span class="vx-elm"><span class="vx-elm-dot" style="background:' + col + '"></span>' + n + '× ' + e.name + '</span>';
+                });
+                html += '<div class="vx-codex-block"><div class="vx-codex-h">Made of</div>'
+                    + '<div class="vx-codex-formula">' + b.sci.formula + '</div><div class="vx-elms">' + chips + '</div></div>';
+            }
+            if (b.sci && b.sci.mineral) html += '<div class="vx-codex-row"><b>Mineral</b> ' + b.sci.mineral + '</div>';
+            html += '<div class="vx-codex-row"><b>Where</b> ' + blockWhere(b) + '</div>';
+            if (b.tags && b.tags.length) html += '<div class="vx-codex-tags">' + b.tags.map((t) => '<span class="vx-codex-tag">' + t + '</span>').join('') + '</div>';
+            if (b.desc) html += '<div class="vx-codex-desc">' + b.desc + '</div>';
+            if (b.sci && b.sci.fact) html += '<div class="vx-codex-fact"><span class="vx-codex-fact-icon">🔬</span><span>' + b.sci.fact + '</span></div>';
+            page.innerHTML = html;
+            body.appendChild(page);
+        }
+
+        function renderGearDetail(body, def, idx) {
+            if (!def) return;
+            idx = idx | 0;
+            const page = document.createElement('div');
+            page.className = 'vx-codex';
+            const type = (def.ranged ? 'Ranged' : 'Melee') + ' · ' + (def.twoHanded ? 'Two-handed' : 'One-handed');
+            const equipped = (weaponIndex === idx);
+            let stats = '';
+            if (def.stats) {
+                stats += '<div class="vx-codex-block"><div class="vx-codex-h">Stats</div>';
+                Object.entries(def.stats).forEach(([k, v]) => {
+                    const w = Math.max(0, Math.min(100, (v / 10) * 100));
+                    stats += '<div class="vx-statbar"><span class="vx-statbar-label">' + k + '</span>'
+                        + '<span class="vx-statbar-track"><span class="vx-statbar-fill" style="width:' + w + '%"></span></span>'
+                        + '<span class="vx-statbar-num">' + v + '</span></div>';
+                });
+                stats += '</div>';
+            }
+            const desc = def.desc ? '<div class="vx-codex-fact"><span class="vx-codex-fact-icon">📖</span><span>' + def.desc + '</span></div>' : '';
+            page.innerHTML = '<div class="vx-gear-detail">'
+                + '<div class="vx-gear-stage"><canvas class="vx-gear-canvas" aria-label="' + def.name + '"></canvas></div>'
+                + '<div class="vx-gear-headrow"><div>'
+                + '<div class="vx-codex-name">' + def.name + '</div>'
+                + '<div class="vx-codex-cat">⚔️ ' + type + '</div></div>'
+                + '<button type="button" class="vx-equip-btn' + (equipped ? ' vx-equip-on' : '') + '" data-equip' + (equipped ? ' disabled' : '') + '>'
+                + (equipped ? '✓ Equipped' : 'Equip') + '</button>'
+                + '</div>'
+                + stats + desc
+                + '</div>';
+            body.appendChild(page);
+            const eb = page.querySelector('[data-equip]');
+            if (eb && !equipped) eb.addEventListener('click', () => {
+                ownedWeapons.add(idx); saveOwnedWeapons(); setWeaponIndex(idx); renderDrawer();
+            });
+            startGearViewer(page.querySelector('.vx-gear-canvas'), idx);
+        }
+
+        // Bounding box of an object's VISIBLE geometry only — beam weapons carry a long
+        // hidden beam mesh that would otherwise blow up the box (and shrink the model).
+        function _visibleBox(root) {
+            const box = new THREE.Box3();
+            root.updateWorldMatrix(true, true);
+            root.traverse((o) => {
+                if (!o.geometry) return;
+                let n = o, hidden = false;
+                while (n) { if (n.visible === false) { hidden = true; break; } if (n === root) break; n = n.parent; }
+                if (hidden) return;
+                if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+                const bb = o.geometry.boundingBox;
+                if (bb && isFinite(bb.min.x)) box.union(bb.clone().applyMatrix4(o.matrixWorld));
+            });
+            return box;
+        }
+
+        // ---- mini orbiting 3D preview of the codex weapon/tool ----
+        const gearViewer = { renderer: null, scene: null, camera: null, pivot: null, raf: 0 };
+        function disposeGearViewer() {
+            if (gearViewer.raf) { cancelAnimationFrame(gearViewer.raf); gearViewer.raf = 0; }
+            if (gearViewer.pivot) {
+                gearViewer.pivot.traverse((o) => {
+                    if (o.geometry) o.geometry.dispose();
+                    if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => m.dispose());
+                });
+                gearViewer.pivot = null;
+            }
+            if (gearViewer.renderer) { gearViewer.renderer.dispose(); gearViewer.renderer = null; }
+            gearViewer.scene = null; gearViewer.camera = null;
+        }
+        function startGearViewer(canvas, idx) {
+            disposeGearViewer();
+            if (!canvas || typeof THREE === 'undefined') return;
+            const w = Math.max(8, canvas.clientWidth), h = Math.max(8, canvas.clientHeight);
+            const r = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+            r.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+            r.setSize(w, h, false);
+            const scene = new THREE.Scene();
+            const cam = new THREE.PerspectiveCamera(30, w / h, 0.1, 40);
+            cam.position.set(0, 0.1, 3.0); cam.lookAt(0, 0, 0);
+            scene.add(new THREE.AmbientLight(0xfff0d8, 0.85));
+            const key = new THREE.DirectionalLight(0xffffff, 1.0); key.position.set(2.2, 3, 3.5); scene.add(key);
+            const rim = new THREE.DirectionalLight(0xffce8a, 0.5); rim.position.set(-2.5, -1, -2); scene.add(rim);
+            const pivot = new THREE.Group();
+            let mesh = null;
+            try { mesh = buildWeaponMesh(charAccent(), idx | 0).mesh; } catch (_) { mesh = null; }
+            if (mesh) {
+                const box = _visibleBox(mesh);
+                const size = new THREE.Vector3(); box.getSize(size);
+                const center = new THREE.Vector3(); box.getCenter(center);
+                mesh.position.sub(center);
+                const holder = new THREE.Group();
+                holder.add(mesh);
+                // Natural orientation in a wide landscape stage; fit so the turntable
+                // sweep (around Y) fits the width and the height fits the frame height.
+                const halfH = 3.0 * Math.tan((30 * Math.PI / 180) / 2);
+                const halfW = halfH * (w / h);
+                const horizEnv = Math.hypot(size.x, size.z) || 0.001;   // worst-case width while spinning around Y
+                const vertEnv = (size.y || 0.001) * 1.06;               // a touch of headroom for the tilt
+                holder.scale.setScalar(Math.min((halfW * 2 * 0.84) / horizEnv, (halfH * 2 * 0.84) / vertEnv));
+                pivot.add(holder);
+            }
+            pivot.rotation.x = 0.34;
+            scene.add(pivot);
+            gearViewer.renderer = r; gearViewer.scene = scene; gearViewer.camera = cam; gearViewer.pivot = pivot;
+            const loop = () => {
+                if (!gearViewer.renderer) return;
+                pivot.rotation.y += 0.012;
+                r.render(scene, cam);
+                gearViewer.raf = requestAnimationFrame(loop);
+            };
+            loop();
+        }
+
+        // ---- shared offscreen renderer for mini 3D tile thumbnails (rendered once,
+        // cached as images so the journal grids stay cheap) ----
+        let _thumbRenderer = null, _thumbScene = null, _thumbCam = null;
+        const _block3DCache = {}, _gear3DCache = {};
+        function ensureThumbRenderer() {
+            if (_thumbRenderer || typeof THREE === 'undefined') return;
+            try {
+                const c = document.createElement('canvas'); c.width = c.height = 128;
+                _thumbRenderer = new THREE.WebGLRenderer({ canvas: c, alpha: true, antialias: true });
+                _thumbRenderer.setPixelRatio(1);
+                _thumbRenderer.setSize(128, 128, false);
+                _thumbScene = new THREE.Scene();
+                _thumbScene.add(new THREE.AmbientLight(0xfff2e0, 0.95));
+                const key = new THREE.DirectionalLight(0xffffff, 0.9); key.position.set(3, 5, 4); _thumbScene.add(key);
+                const rim = new THREE.DirectionalLight(0xffce8a, 0.4); rim.position.set(-3, 1, -2); _thumbScene.add(rim);
+                _thumbCam = new THREE.PerspectiveCamera(30, 1, 0.1, 50);
+            } catch (_) { _thumbRenderer = null; }
+        }
+        function disposeThumbRenderer() {
+            if (_thumbRenderer) { _thumbRenderer.dispose(); _thumbRenderer = null; }
+            _thumbScene = null; _thumbCam = null;
+        }
+        function _tileTex(name, frame) {
+            const t = new THREE.CanvasTexture(paintTile(name, frame));
+            t.magFilter = THREE.NearestFilter; t.minFilter = THREE.NearestFilter;
+            return t;
+        }
+        // A lit, angled 3D cube of the block (top + two sides), cached by id.
+        function block3DThumb(b) {
+            if (_block3DCache[b.id]) return _block3DCache[b.id];
+            ensureThumbRenderer();
+            if (!_thumbRenderer) return thumb(b);
+            const tl = b.tiles, fr = b.animated ? 0 : undefined;
+            const topN = tl.all || tl.top || tl.side, sideN = tl.all || tl.side || tl.top, botN = tl.all || tl.bottom || tl.side || tl.top;
+            const opt = b.transparent ? { transparent: true, opacity: 0.9 } : {};
+            const sideM = new THREE.MeshLambertMaterial(Object.assign({ map: _tileTex(sideN, fr) }, opt));
+            const topM = new THREE.MeshLambertMaterial(Object.assign({ map: _tileTex(topN, fr) }, opt));
+            const botM = new THREE.MeshLambertMaterial(Object.assign({ map: _tileTex(botN, fr) }, opt));
+            const mats = [sideM, sideM, topM, botM, sideM, sideM];
+            const cube = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), mats);
+            const grp = new THREE.Group(); grp.add(cube); grp.rotation.set(0.5, -0.62, 0);
+            _thumbScene.add(grp);
+            _thumbCam.fov = 30; _thumbCam.position.set(0, 0, 3.4); _thumbCam.lookAt(0, 0, 0); _thumbCam.updateProjectionMatrix();
+            _thumbRenderer.render(_thumbScene, _thumbCam);
+            const url = _thumbRenderer.domElement.toDataURL();
+            _thumbScene.remove(grp);
+            cube.geometry.dispose();
+            [sideM, topM, botM].forEach((m) => { if (m.map) m.map.dispose(); m.dispose(); });
+            _block3DCache[b.id] = url;
+            return url;
+        }
+        // The procedural weapon mesh rendered at an angle, cached by index.
+        function gear3DThumb(idx) {
+            idx = idx | 0;
+            if (_gear3DCache[idx]) return _gear3DCache[idx];
+            ensureThumbRenderer();
+            let mesh = null;
+            try { mesh = buildWeaponMesh(charAccent(), idx).mesh; } catch (_) { mesh = null; }
+            if (!_thumbRenderer || !mesh) return weaponThumb(weaponList()[idx]);
+            const box = _visibleBox(mesh);
+            const size = box.getSize(new THREE.Vector3());
+            const center = box.getCenter(new THREE.Vector3());
+            mesh.position.sub(center);
+            const holder = new THREE.Group(); holder.add(mesh);
+            holder.scale.setScalar(1.35 / (Math.max(size.x, size.y, size.z) || 1));
+            const grp = new THREE.Group(); grp.add(holder); grp.rotation.set(0.3, -0.7, 0);
+            _thumbScene.add(grp);
+            _thumbCam.fov = 30; _thumbCam.position.set(0, 0, 3.0); _thumbCam.lookAt(0, 0, 0); _thumbCam.updateProjectionMatrix();
+            _thumbRenderer.render(_thumbScene, _thumbCam);
+            const url = _thumbRenderer.domElement.toDataURL();
+            _thumbScene.remove(grp);
+            grp.traverse((o) => { if (o.geometry) o.geometry.dispose(); if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => m.dispose()); });
+            _gear3DCache[idx] = url;
+            return url;
+        }
+
+        // Missions: the survey quest log with progress.
+        function renderMissionsBody(body) {
+            const AP = getProfileApi();
+            if (!AP) { body.innerHTML = '<div class="vx-inv-empty">No profile loaded.</div>'; return; }
+            const p = AP.load();
+            const missions = AP.MISSIONS || [];
+            const completed = (p.missions && p.missions.completed) || [];
+            const activeId = p.missions && p.missions.active;
+            const prog = AP.missionProgress(p);
+            const intro = document.createElement('div');
+            intro.className = 'vx-page-intro';
+            intro.textContent = 'Survey missions — finish them to chart new worlds.';
+            body.appendChild(intro);
+            missions.forEach((m) => {
+                const done = completed.indexOf(m.id) >= 0;
+                const isActive = m.id === activeId;
+                const row = document.createElement('div');
+                row.className = 'vx-mission' + (done ? ' vx-mission-done' : '') + (isActive ? ' vx-mission-active' : '');
+                let foot = '';
+                if (done) foot = '<div class="vx-mission-status vx-status-done">✓ Complete</div>';
+                else if (isActive) {
+                    const cur = Math.max(0, prog.current | 0), tgt = Math.max(1, prog.target | 0);
+                    const pct = Math.min(100, Math.round(cur / tgt * 100));
+                    foot = '<div class="vx-quest-bar"><span style="width:' + pct + '%"></span><em>' + cur + ' / ' + tgt + '</em></div>';
+                } else foot = '<div class="vx-mission-status vx-status-locked">🔒 Upcoming</div>';
+                row.innerHTML = '<div class="vx-mission-icon">' + (done ? '✓' : isActive ? '🔬' : '🔒') + '</div>'
+                    + '<div class="vx-mission-main"><div class="vx-mission-title">' + m.title + '</div>'
+                    + '<div class="vx-mission-desc">' + m.desc + '</div>' + foot + '</div>';
+                body.appendChild(row);
+            });
+        }
+
+        // Worlds: the planet map — current, charted, and locked worlds with travel.
+        function renderWorldsBody(body) {
+            const AP = getProfileApi();
+            if (!AP) { body.innerHTML = '<div class="vx-inv-empty">No profile loaded.</div>'; return; }
+            const p = AP.load();
+            const planets = AP.PLANETS || [];
+            const unlocked = (p.system && p.system.unlocked) || [];
+            const current = p.system && p.system.current;
+            const swatch = { verdant: '#6cae54', frost: '#bfe0f5', fungal: '#a86ad0', desert: '#d8b878', volcanic: '#c0563a' };
+            const intro = document.createElement('div');
+            intro.className = 'vx-page-intro';
+            intro.textContent = 'Travel between the worlds you have charted.';
+            body.appendChild(intro);
+            planets.forEach((pl) => {
+                const isUnlocked = unlocked.indexOf(pl.id) >= 0;
+                const isCurrent = pl.id === current;
+                const need = (pl.grant && pl.grant.missionsDone) | 0;
+                const c = swatch[pl.biome] || '#8a8a8a';
+                let action;
+                if (isCurrent) action = '<div class="vx-world-here">● You are here</div>';
+                else if (isUnlocked) action = '<button type="button" class="vx-btn vx-btn-on" data-travel="' + pl.id + '">Travel</button>';
+                else action = '<div class="vx-world-need">🔒 Finish ' + need + ' survey' + (need === 1 ? '' : 's') + '</div>';
+                const card = document.createElement('div');
+                card.className = 'vx-world' + (isCurrent ? ' vx-world-current' : '') + (isUnlocked ? '' : ' vx-world-locked');
+                card.innerHTML = '<div class="vx-world-orb" style="background:radial-gradient(circle at 34% 30%, rgba(255,255,255,0.7), ' + c + ' 62%, rgba(0,0,0,0.55))"></div>'
+                    + '<div class="vx-world-main"><div class="vx-world-name">' + pl.name + ' <span class="vx-world-da">· ' + pl.nameDa + '</span></div>'
+                    + '<div class="vx-world-blurb">' + (isUnlocked ? pl.blurb : 'A world waiting to be charted.') + '</div></div>'
+                    + '<div class="vx-world-action">' + action + '</div>';
+                body.appendChild(card);
+            });
+            body.querySelectorAll('[data-travel]').forEach((btn) => {
+                btn.addEventListener('click', () => {
+                    const id = btn.getAttribute('data-travel');
+                    toggleDrawer(false);
+                    if (typeof travelToPlanet === 'function') travelToPlanet(id);
+                });
+            });
         }
         function refineryMatName(id) {
             const b = blockById(id);
@@ -5694,43 +6288,47 @@
             if (drawerOpen) {
                 releasePointerLock();
                 syncViewCursor();
+                codexView = null;
                 renderDrawer();
                 if (g.showMessage) g.showMessage('Inventory — equip weapons, drag blocks to quickbar', 2200);
             } else {
+                disposeGearViewer();
                 renderHotbar();
                 if (firstPerson) requestFpPointerLock();
             }
         }
         function renderDrawer() {
             if (!drawerPanelEl) return;
+            disposeGearViewer();   // tear down any orbiting preview before the panel is rebuilt
             syncHotbarFromBackpack();
             const ownedOnly = drawerFilter === 'owned';
+            const invTab = (drawerTab === 'Backpack' || drawerTab === 'Gear');
             drawerPanelEl.innerHTML = `
                 <div class="vx-header">
-                    <h3 class="vx-title"><span>🎒</span> Inventory</h3>
+                    <h3 class="vx-title"><span>📖</span> Field Journal</h3>
                     <div class="vx-actions">
-                        <button type="button" class="vx-btn ${ownedOnly ? 'vx-btn-on' : ''}" data-vx-filter="owned">Owned</button>
+                        ${invTab ? `<button type="button" class="vx-btn ${ownedOnly ? 'vx-btn-on' : ''}" data-vx-filter="owned">Owned</button>
                         <button type="button" class="vx-btn ${ownedOnly ? '' : 'vx-btn-on'}" data-vx-filter="all">All</button>
-                        <button type="button" class="vx-btn" data-vx-clear-bar>Clear bar</button>
+                        <button type="button" class="vx-btn" data-vx-clear-bar>Clear bar</button>` : ''}
                         <button type="button" class="vx-btn" data-vx-close>Close (Esc)</button>
                     </div>
                 </div>
-                <div class="vx-strip-wrap">
-                    <div class="vx-strip" id="voxel-drawer-strip"></div>
-                </div>
+                ${invTab ? `<div class="vx-strip-wrap"><div class="vx-strip" id="voxel-drawer-strip"></div></div>` : ''}
                 <div class="vx-inv-nav" id="voxel-drawer-nav"></div>
                 <div class="vx-body" id="voxel-drawer-body"></div>
                 <div class="vx-help">
-                    <kbd>1</kbd>–<kbd>9</kbd> pick slot · <kbd>Q</kbd>/<kbd>E</kbd> cycle weapon · <kbd>Tab</kbd>/<kbd>M</kbd> inventory · <kbd>H</kbd> controls · <kbd>Esc</kbd> close
+                    <kbd>1</kbd>–<kbd>9</kbd> pick slot · <kbd>Q</kbd>/<kbd>E</kbd> cycle weapon · <kbd>Tab</kbd>/<kbd>M</kbd> journal · <kbd>H</kbd> controls · <kbd>Esc</kbd> close
                 </div>`;
 
             const strip = drawerPanelEl.querySelector('#voxel-drawer-strip');
-            for (let i = 0; i < HOTBAR_SLOTS; i++) {
-                strip.appendChild(makeSlotEl(i, {
-                    strip: true,
-                    onClick: () => selectSlot(i),
-                    onContext: (e) => { e.preventDefault(); clearHotbarSlot(i); }
-                }));
+            if (strip) {
+                for (let i = 0; i < HOTBAR_SLOTS; i++) {
+                    strip.appendChild(makeSlotEl(i, {
+                        strip: true,
+                        onClick: () => selectSlot(i),
+                        onContext: (e) => { e.preventDefault(); clearHotbarSlot(i); }
+                    }));
+                }
             }
 
             const nav = drawerPanelEl.querySelector('#voxel-drawer-nav');
@@ -5741,6 +6339,7 @@
                 btn.innerHTML = `<span class="vx-tab-icon">${tab.icon}</span><span class="vx-tab-label">${tab.label}</span>`;
                 btn.addEventListener('click', () => {
                     drawerTab = tab.id;
+                    codexView = null;
                     saveDrawerTab();
                     renderDrawer();
                 });
@@ -5751,7 +6350,8 @@
             renderDrawerTabBody(body, ownedOnly);
 
             drawerPanelEl.querySelector('[data-vx-close]').addEventListener('click', () => toggleDrawer(false));
-            drawerPanelEl.querySelector('[data-vx-clear-bar]').addEventListener('click', () => {
+            const clearBtn = drawerPanelEl.querySelector('[data-vx-clear-bar]');
+            if (clearBtn) clearBtn.addEventListener('click', () => {
                 for (let i = 0; i < HOTBAR_SLOTS; i++) hotbar[i] = null;
                 renderHotbar();
                 renderDrawer();
@@ -5829,6 +6429,7 @@
                 g._voxelLights.push(hemi, keyL, rim);
             }
             applyPlanetAtmosphere();   // paints sky bg + tints fog/lights for the active planet
+            buildClouds();
             _hideLegacyEnvironment();
             if (g._hideLegacyPlayUI) g._hideLegacyPlayUI();
             const hud = document.getElementById('voxel-overlay');
@@ -5838,6 +6439,7 @@
 
         function _restoreScene() {
             if (!_saved) return;
+            disposeClouds();
             if (g.camera && g.camera.up) g.camera.up.set(0, 1, 0);   // undo radial camera up
             if (_voxelBg && _voxelBg !== _saved.bg) {
                 _voxelBg.dispose();
@@ -6291,7 +6893,9 @@
             if (g._hideLegacyPlayUI) g._hideLegacyPlayUI();
             // stream chunks around the player (load ahead, unload behind)
             streamAround(player.pos.x, player.pos.z);
-            processBuildQueue(3.5);            // ms/frame — spreads meshing to avoid hitches
+            processBuildQueue(2.5);            // ms/frame — granular (per sub-chunk) so it spreads without spiking
+            updateDayNight(dt);
+            updateClouds(dt);
             elapsed += dt;
             // --- movement intent in camera space ---
             let ix=0,iz=0;
@@ -6562,7 +7166,11 @@
                 on(drawerEl, 'click', (e) => {
                     if (e.target === drawerEl) toggleDrawer(false);
                 });
-                on(drawerEl, 'wheel', (e) => e.preventDefault(), { passive: false });
+                on(drawerEl, 'wheel', (e) => {
+                    // allow the scrollable panel body to scroll; block the game zoom elsewhere
+                    if (e.target.closest && e.target.closest('.vx-body')) return;
+                    e.preventDefault();
+                }, { passive: false });
             }
             if (controlsDrawerEl) {
                 on(controlsDrawerEl, 'click', (e) => {
@@ -6724,6 +7332,8 @@
             }
             flushProfileState();
             _active = false;
+            disposeGearViewer();
+            disposeThumbRenderer();
             clearCritters();
             hideFpTuner();
             hideTpTuner();
