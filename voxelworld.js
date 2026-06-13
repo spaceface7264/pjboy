@@ -2883,7 +2883,7 @@
             'Lamp': 'Lampe', 'Hull': 'Skrog', 'Energy': 'Energi',
             'Lava': 'Lava', 'Acid': 'Syre', 'Water': 'Vand',
             'Meadowhopper': 'Engehopper', 'Woolback': 'Uldryg', 'Dunefin': 'Klitøgle',
-            'Frostfox': 'Frostræv', 'Sporeling': 'Sporeyngel'
+            'Frostfox': 'Frostræv', 'Sporeling': 'Sporeyngel', 'Glidewing': 'Svæveving'
         };
 
         function fillScanPanelContent(b, id, cracking, expanded) {
@@ -6050,7 +6050,11 @@
           { id:'sporeling', name:'Sporeling', cat:'Creature', on:[13,36,12], shy:false, scale:0.7,
             body:0xc46ae8, belly:0xf0c2ff, glow:true, scanOn:36,
             desc:'A gentle glowing critter of the fungal worlds. Pulses with soft light.',
-            sci:{ formula:'alien biolum.', kingdom:'Xenofauna', fact:'Glowing without heat is real: bioluminescence mixes a chemical (luciferin) with oxygen to make cold light.' } }
+            sci:{ formula:'alien biolum.', kingdom:'Xenofauna', fact:'Glowing without heat is real: bioluminescence mixes a chemical (luciferin) with oxygen to make cold light.' } },
+          { id:'glidewing', name:'Glidewing', cat:'Creature', on:[1,15,4,20,12,13,36], shy:false, scale:0.7,
+            body:0x6a8fc4, belly:0xd6e6f4, fly:true, scanOn:1,
+            desc:'A wide-winged glider that drifts on the wind, high over the land.',
+            sci:{ formula:'avifauna', kingdom:'Animal', fact:'A wing is an airfoil: air rushes faster over its curved top, lowering the pressure there, so the wing is pushed upward — that is lift.' } }
         ];
         const _creatureById = {}; CREATURES.forEach(c => _creatureById[c.id] = c);
 
@@ -6061,41 +6065,74 @@
         const CRIT_FLEE = 7;             // shy critters flee inside this radius
         const critters = [];
         const creatureGroups = [];       // groups for the scan raycast
-        let _critTimer = 0;
+        let _critTimer = 0, _chirpTimer = 3;
 
+        // Multiply a hex colour by a factor (per-individual tint) and clamp.
+        function _tintHex(hex,f){
+          const r=Math.min(255,Math.round(((hex>>16)&255)*f)), g2=Math.min(255,Math.round(((hex>>8)&255)*f)), b=Math.min(255,Math.round((hex&255)*f));
+          return (r<<16)|(g2<<8)|b;
+        }
         function _critMat(hex){ return new THREE.MeshLambertMaterial({ color: hex }); }
         function _pbox(w,h,d,mat,x,y,z){ const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),mat); m.position.set(x,y,z); return m; }
 
-        // Build a simple procedural box creature; returns {group, legs[]} for animation.
-        function buildCreatureMesh(sp){
+        // Build a procedural box creature; `tint` lightly varies its colour per
+        // individual. Returns {group, legs[], wings[]} for animation.
+        function buildCreatureMesh(sp, tint){
+          tint = tint || 1;
           const g0 = new THREE.Group();
-          const bodyMat = _critMat(sp.body), bellyMat = _critMat(sp.belly||sp.body);
-          const body = _pbox(0.7,0.5,1.0, bodyMat, 0, 0.55, 0);
-          const belly = _pbox(0.62,0.18,0.92, bellyMat, 0, 0.4, 0);
-          const head = _pbox(0.5,0.46,0.46, bodyMat, 0, 0.7, 0.62);
-          const snout = _pbox(0.26,0.22,0.2, bellyMat, 0, 0.62, 0.86);
-          g0.add(body, belly, head, snout);
-          if(sp.id==='meadowhopper' || sp.id==='frostfox'){             // ears
-            g0.add(_pbox(0.1,0.34,0.08, bodyMat, -0.14,1.02,0.6));
-            g0.add(_pbox(0.1,0.34,0.08, bodyMat,  0.14,1.02,0.6));
+          const bodyMat = _critMat(_tintHex(sp.body,tint)), bellyMat = _critMat(_tintHex(sp.belly||sp.body,tint));
+          const legs = [], wings = [];
+          if(sp.fly){
+            const body = _pbox(0.4,0.34,0.7, bodyMat, 0,0,0);
+            const head = _pbox(0.3,0.3,0.3, bodyMat, 0,0.06,0.45);
+            const beak = _pbox(0.12,0.1,0.18, bellyMat, 0,0.02,0.62);
+            const tail = _pbox(0.24,0.06,0.34, bellyMat, 0,0,-0.5);
+            g0.add(body,head,beak,tail);
+            [-1,1].forEach(s=>{ const w=_pbox(0.9,0.06,0.5, bellyMat, s*0.62,0.04,0); w.userData.side=s; g0.add(w); wings.push(w); });
+          } else {
+            const body = _pbox(0.7,0.5,1.0, bodyMat, 0, 0.55, 0);
+            const belly = _pbox(0.62,0.18,0.92, bellyMat, 0, 0.4, 0);
+            const head = _pbox(0.5,0.46,0.46, bodyMat, 0, 0.7, 0.62);
+            const snout = _pbox(0.26,0.22,0.2, bellyMat, 0, 0.62, 0.86);
+            g0.add(body, belly, head, snout);
+            if(sp.id==='meadowhopper' || sp.id==='frostfox'){             // ears
+              g0.add(_pbox(0.1,0.34,0.08, bodyMat, -0.14,1.02,0.6));
+              g0.add(_pbox(0.1,0.34,0.08, bodyMat,  0.14,1.02,0.6));
+            }
+            g0.add(_pbox(0.16,0.16,0.4, bodyMat, 0,0.6,-0.62));            // tail stub
+            [[-0.24,0.42],[0.24,0.42],[-0.24,-0.42],[0.24,-0.42]].forEach(([lx,lz])=>{
+              const leg = _pbox(0.16,0.5,0.16, bellyMat, lx,0.25,lz);
+              leg.userData.lz = lz;
+              g0.add(leg); legs.push(leg);
+            });
+            if(sp.glow){ body.material = new THREE.MeshBasicMaterial({color:_tintHex(sp.body,tint)}); }  // self-lit alien
           }
-          g0.add(_pbox(0.16,0.16,0.4, bodyMat, 0,0.6,-0.62));            // tail stub
-          const legs = [];
-          const legMat = _critMat(sp.belly||sp.body);
-          [[-0.24,0.42],[0.24,0.42],[-0.24,-0.42],[0.24,-0.42]].forEach(([lx,lz])=>{
-            const leg = _pbox(0.16,0.5,0.16, legMat, lx,0.25,lz);
-            leg.userData.lz = lz;
-            g0.add(leg); legs.push(leg);
-          });
-          if(sp.glow){ body.material = new THREE.MeshBasicMaterial({color:sp.body}); }  // self-lit alien
           g0.scale.setScalar(sp.scale||1);
-          return { group:g0, legs };
+          return { group:g0, legs, wings };
         }
 
         // World height to stand on at a voxel column: top non-water solid, or null.
         function surfaceTopVox(vx,vz){
           for(let y=H-1;y>0;y--){ const b=getBlock(vx,y,vz); if(b){ return b===WATER ? null : y; } }
           return null;
+        }
+
+        // Instantiate one critter with per-individual scale + colour variation.
+        function placeCritter(sp, vx, vz, top){
+          const tint = 0.86 + Math.random()*0.28;
+          const built = buildCreatureMesh(sp, tint);
+          built.group.scale.multiplyScalar(0.85 + Math.random()*0.3);
+          const baseY = top+1+WORLD_OFFSET.y;
+          const flyH = 7 + Math.random()*5;
+          const cr = { sp, group:built.group, legs:built.legs, wings:built.wings,
+            pos:new THREE.Vector3(vx+0.5, sp.fly ? baseY+flyH : baseY, vz+0.5),
+            target:null, state:'idle', timer:0.5+Math.random()*2, phase:Math.random()*6,
+            face:Math.random()*Math.PI*2, flyH };
+          built.group.userData.critter = cr;
+          built.group.position.copy(cr.pos);
+          scene.add(built.group);
+          critters.push(cr); creatureGroups.push(built.group);
+          return cr;
         }
 
         function spawnOneCritter(){
@@ -6109,14 +6146,16 @@
             const choices=CREATURES.filter(c=>c.on.indexOf(surf)>=0);
             if(!choices.length) continue;
             const sp=choices[(Math.random()*choices.length)|0];
-            const built=buildCreatureMesh(sp);
-            const cr={ sp, group:built.group, legs:built.legs,
-              pos:new THREE.Vector3(vx+0.5, top+1+WORLD_OFFSET.y, vz+0.5),
-              target:null, state:'idle', timer:0.5+Math.random()*2, phase:Math.random()*6, face:Math.random()*Math.PI*2 };
-            built.group.userData.critter = cr;
-            built.group.position.copy(cr.pos);
-            scene.add(built.group);
-            critters.push(cr); creatureGroups.push(built.group);
+            placeCritter(sp, vx, vz, top);
+            // herds: ground species sometimes spawn a small cluster of their kind
+            if(!sp.fly && Math.random()<0.6){
+              const extra=1+((Math.random()*3)|0);
+              for(let e=0; e<extra && critters.length<CRIT_CAP; e++){
+                const ox=vx+((Math.random()*7)|0)-3, oz=vz+((Math.random()*7)|0)-3;
+                const t2=surfaceTopVox(ox,oz);
+                if(t2!==null && sp.on.indexOf(getBlock(ox,t2,oz))>=0) placeCritter(sp, ox, oz, t2);
+              }
+            }
             return;
           }
         }
@@ -6155,12 +6194,22 @@
             _critTimer=0.6;
             if(critters.length<CRIT_CAP) spawnOneCritter();
           }
+          // occasional ambient call from a nearby calm critter
+          _chirpTimer-=dt;
+          if(_chirpTimer<=0){
+            _chirpTimer=3+Math.random()*5;
+            for(const cr of critters){
+              if(cr.sp.shy) continue;
+              if(Math.hypot(cr.pos.x-player.pos.x, cr.pos.z-player.pos.z)<22){ playSfx('critterChirp'); break; }
+            }
+          }
           for(let i=critters.length-1;i>=0;i--){
             const cr=critters[i];
+            const fly=cr.sp.fly;
             const dxp=cr.pos.x-player.pos.x, dzp=cr.pos.z-player.pos.z;
             const distP=Math.hypot(dxp,dzp);
             if(distP>CRIT_DESPAWN){ despawnCritter(i); continue; }
-            let moving=false, speed=CRIT_SPEED;
+            let moving=false, speed=fly?CRIT_SPEED*2.2:CRIT_SPEED;
             // shy: flee the player
             if(cr.sp.shy && distP<CRIT_FLEE){
               const inv=1/(distP||1);
@@ -6169,7 +6218,9 @@
             }
             if(cr.state==='idle'){
               cr.timer-=dt;
-              if(cr.timer<=0){ cr.state='walk'; cr.timer=1.5+Math.random()*3; _pickWanderTarget(cr); }
+              if(cr.timer<=0){ cr.state='walk'; cr.timer=1.5+Math.random()*3;
+                if(fly){ const a=Math.random()*Math.PI*2, d=8+Math.random()*16; cr.target=new THREE.Vector3(cr.pos.x+Math.cos(a)*d,0,cr.pos.z+Math.sin(a)*d); }
+                else _pickWanderTarget(cr); }
             } else {
               cr.timer-=dt;
               if(!cr.target || cr.timer<=0){ cr.state='idle'; cr.timer=1+Math.random()*2.5; cr.target=null; }
@@ -6181,20 +6232,29 @@
               else {
                 const step=Math.min(d, speed*dt), inv=1/d;
                 const nx=cr.pos.x+dx*inv*step, nz=cr.pos.z+dz*inv*step;
-                const top=surfaceTopVox(Math.floor(nx),Math.floor(nz));
-                if(top===null){ cr.target=null; }                   // hit water — stop
-                else {
-                  cr.pos.x=nx; cr.pos.z=nz; cr.pos.y=top+1+WORLD_OFFSET.y;
+                if(fly){                                            // flyers drift over anything
+                  const t=surfaceTopVox(Math.floor(nx),Math.floor(nz));
+                  const groundY=(t!==null? t+1 : SEA_LEVEL+1)+WORLD_OFFSET.y;
+                  cr.pos.x=nx; cr.pos.z=nz;
+                  cr.pos.y += (groundY+cr.flyH+Math.sin(elapsed*1.5+cr.phase)*0.6 - cr.pos.y)*Math.min(1,3*dt);
                   cr.face=Math.atan2(dx,dz); moving=true;
+                } else {
+                  const top=surfaceTopVox(Math.floor(nx),Math.floor(nz));
+                  if(top===null){ cr.target=null; }                 // hit water — stop
+                  else { cr.pos.x=nx; cr.pos.z=nz; cr.pos.y=top+1+WORLD_OFFSET.y; cr.face=Math.atan2(dx,dz); moving=true; }
                 }
               }
             }
             // animate
             cr.group.position.copy(cr.pos);
             cr.group.rotation.y=cr.face;
-            if(moving){ cr.phase+=dt*speed*3; const sw=Math.sin(cr.phase)*0.5;
-              cr.legs.forEach((leg,k)=>{ leg.rotation.x=(leg.userData.lz>0? sw : -sw)*(k%2?1:-1); }); }
-            else cr.legs.forEach(leg=>{ leg.rotation.x*=0.8; });
+            if(fly){
+              cr.phase+=dt*9; const flap=Math.sin(cr.phase)*0.7;
+              cr.wings.forEach(w=>{ w.rotation.z = w.userData.side*flap; });
+            } else if(moving){
+              cr.phase+=dt*speed*3; const sw=Math.sin(cr.phase)*0.5;
+              cr.legs.forEach((leg,k)=>{ leg.rotation.x=(leg.userData.lz>0? sw : -sw)*(k%2?1:-1); });
+            } else cr.legs.forEach(leg=>{ leg.rotation.x*=0.8; });
             if(cr.sp.glow){ const p=0.6+0.4*Math.sin(elapsed*3+cr.phase); cr.group.children[0].material.color.setRGB((0xc4/255)*p,(0x6a/255)*p,(0xe8/255)*p); }
           }
         }

@@ -186,6 +186,10 @@ class AudioBus {
                 this._tone({ type: 'sine', freq: 660, dur: 0.09, gain: 0.22 });
                 this._tone({ type: 'sine', freq: 880, dur: 0.12, gain: 0.22, delay: 0.06 });
                 break;
+            case 'critterChirp':
+                this._tone({ type: 'sine', freq: 880, freqEnd: 1180, dur: 0.07, gain: 0.09 });
+                this._tone({ type: 'sine', freq: 1180, freqEnd: 940, dur: 0.06, gain: 0.07, delay: 0.08 });
+                break;
             case 'pickupAmmo':
                 this._tone({ type: 'square', freq: 520, dur: 0.07, gain: 0.18 });
                 this._tone({ type: 'square', freq: 780, dur: 0.07, gain: 0.18, delay: 0.05 });
