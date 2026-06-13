@@ -2992,6 +2992,21 @@ body.mode-asteroid {
     font-size: 9px;
 }
 
+/* ===== Underwater screen tint (when the camera eye is submerged) ===== */
+#voxel-underwater {
+    position: fixed;
+    inset: 0;
+    z-index: 9000;
+    pointer-events: none;
+    background:
+        radial-gradient(ellipse at center, rgba(60, 140, 190, 0.12), rgba(18, 70, 120, 0.46) 90%),
+        linear-gradient(rgba(30, 95, 150, 0.18), rgba(20, 80, 130, 0.32));
+    box-shadow: inset 0 0 160px rgba(8, 40, 70, 0.7);
+    opacity: 0;
+    transition: opacity 0.28s ease;
+}
+#voxel-underwater.vx-uw-on { opacity: 1; }
+
 /* ===== Asteroid loading screen (covers world build on enter / travel) ===== */
 #voxel-loading {
     position: fixed;
@@ -3155,6 +3170,7 @@ body.mode-asteroid {
 .vx-world-name { font-size: 13px; font-weight: bold; color: var(--hud-text); }
 .vx-world-da { color: var(--hud-amber-lit); font-weight: normal; font-size: 11px; }
 .vx-world-blurb { font-size: 11px; color: var(--hud-text-dim); line-height: 1.35; margin-top: 2px; }
+.vx-world-stats { font-size: 10px; color: var(--hud-amber); margin-top: 5px; letter-spacing: 0.2px; }
 .vx-world-action { flex: 0 0 auto; }
 .vx-world-here { font-size: 11px; font-weight: bold; color: var(--hud-green); white-space: nowrap; }
 .vx-world-need { font-size: 11px; color: var(--hud-text-dim); white-space: nowrap; }

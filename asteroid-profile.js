@@ -92,12 +92,83 @@
             id: 'ember_glod', name: 'Ember', nameDa: 'Glødehed',
             seed: 0xe11e05, biome: 'volcanic', grant: { missionsDone: 4 },
             blurb: 'A volcanic world. Red rock and basalt lie over hot ground above the molten core.'
+        },
+        {
+            // First spec-driven world: generated entirely from a planet template.
+            id: 'aquaria', name: 'Aquaria', nameDa: 'Vandverden',
+            seed: 0xa10a06, biome: 'verdant', grant: { missionsDone: 1 },
+            blurb: 'A gentle ocean world of scattered green isles under a wide blue sky.',
+            spec: {
+                basics: {
+                    type: 'Ocean', sizeKm: 6200, starSystem: 'Lyra',
+                    atmosphere: { oxygen: 22, toxicity: 0 },
+                    tempRange: [4, 26],
+                    gravity: 0.75,
+                    dayLengthMin: 12
+                },
+                terrain: {
+                    landBias: -18,           // mostly sea, scattered green isles
+                    mountains: 0.6,          // low isle relief
+                    tempBias: 0.08, moistBias: 0.4,
+                    oreRichness: 1.25
+                },
+                visual: {
+                    palette: { sky: 0x2f9fe6, horizon: 0xcdeefb, sun: 0xfff4e0, ground: 0x4a6a5a },
+                    dayNight: true
+                },
+                population: { note: 'Coastal shell-traders in stilt villages.' },
+                wildlife: { note: 'Calm grazers on the isles; no hunters.' },
+                exploration: { note: 'Tide caves and sunken ruins to find.' }
+            }
         }
     ];
     const HOME_PLANET_ID = PLANETS[0].id;
 
     function planetDef(id) {
         return PLANETS.find((pl) => pl.id === id) || PLANETS[0];
+    }
+
+    // A planet's optional `spec` template, with every field defaulted so a planet
+    // without a spec generates exactly as before. GEN fields default to "no change".
+    function normalizeSpec(raw) {
+        const s = (raw && typeof raw === 'object') ? raw : {};
+        const b = s.basics || {}, t = s.terrain || {}, v = s.visual || {};
+        const num = (x, d) => (typeof x === 'number' && isFinite(x)) ? x : d;
+        const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+        const atm = b.atmosphere || {};
+        return {
+            basics: {
+                type: String(b.type || 'World'),
+                sizeKm: num(b.sizeKm, 0),
+                starSystem: String(b.starSystem || ''),
+                atmosphere: { oxygen: num(atm.oxygen, 21), toxicity: num(atm.toxicity, 0) },
+                tempRange: (Array.isArray(b.tempRange) && b.tempRange.length === 2)
+                    ? [num(b.tempRange[0], 0), num(b.tempRange[1], 0)] : null,
+                gravity: clamp(num(b.gravity, 1), 0.5, 1.3),
+                dayLengthMin: clamp(num(b.dayLengthMin, 10), 2, 60)
+            },
+            terrain: {
+                landBias: clamp(num(t.landBias, 0), -20, 20),
+                mountains: clamp(num(t.mountains, 1), 0, 3),
+                tempBias: clamp(num(t.tempBias, 0), -0.5, 0.5),
+                moistBias: clamp(num(t.moistBias, 0), -0.5, 0.5),
+                oreRichness: clamp(num(t.oreRichness, 1), 0.3, 3)
+            },
+            visual: {
+                palette: (v.palette && typeof v.palette === 'object')
+                    ? { sky: v.palette.sky | 0, horizon: v.palette.horizon | 0, sun: v.palette.sun | 0, ground: v.palette.ground | 0 }
+                    : null,
+                dayNight: !!v.dayNight
+            },
+            lore: {
+                population: (s.population && s.population.note) || '',
+                wildlife: (s.wildlife && s.wildlife.note) || '',
+                exploration: (s.exploration && s.exploration.note) || ''
+            }
+        };
+    }
+    function planetSpec(def) {
+        return normalizeSpec(def && def.spec);
     }
 
     function defaultPlanetState() {
@@ -476,6 +547,8 @@
         claimSummary,
         syncLegacyKeys,
         planetDef,
+        normalizeSpec,
+        planetSpec,
         currentPlanetId,
         currentPlanetDef,
         planetState,

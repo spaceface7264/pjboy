@@ -608,8 +608,8 @@
           { id:39, cat:'Hazards', name:'Acid',   tiles:{all:'acid'},   hardness:9, tags:['hazard','glows'], animated:true, glowColor:0x2a6a10,
             desc:'Bubbling solvent pools on cave floors. Eats boots, tools, and patience.',
             sci:{formula:'H₂SO₄', mineral:'Sulfuric acid', fact:'The clouds of Venus are droplets of sulfuric acid. Real planets can be this hostile.'} },
-          { id:40, cat:'Terrain', name:'Water',  tiles:{all:'water'},  hardness:1, tags:['natural','liquid'], transparent:true,
-            desc:'Calm shallow water. Fills the seas and lakes of the world.',
+          { id:40, cat:'Terrain', name:'Water',  tiles:{all:'water'},  hardness:1, tags:['natural','liquid'], transparent:true, water:true,
+            desc:'Swimmable water. Fills the seas, lakes and rivers — dive in and explore.',
             sci:{formula:'H₂O', mineral:'Water', fact:'The only thing on a planet that is solid, liquid and gas at everyday temperatures — and life needs it.'} },
         ];
         const blockById = id => BlockRegistry.find(b=>b.id===id);
@@ -737,6 +737,57 @@
           persistBlockEdit(x, y, z, id);
         }
 
+        // Water seeks its level: after a block is mined below the waterline, flood the
+        // connected air pocket (6-connected, never above SEA_LEVEL) with water — but only
+        // if that pocket can actually reach the sea. Batched: one profile save + one
+        // rebuild pass over the touched chunks so a dig fills smoothly without per-cell lag.
+        const _FLOOD_CAP = 4096;
+        function floodWaterAfterMine(sx, sy, sz){
+          if(sy > SEA_LEVEL) return;                       // mined above the sea: nothing flows
+          if(getBlock(sx,sy,sz) !== 0) return;             // not an empty space
+          const region = [], seen = new Set();
+          const kkey = (x,y,z)=> x+','+y+','+z;
+          const stack = [[sx,sy,sz]]; seen.add(kkey(sx,sy,sz));
+          let touchesWater = false;
+          const NB = [[1,0,0],[-1,0,0],[0,0,1],[0,0,-1],[0,1,0],[0,-1,0]];
+          while(stack.length){
+            const cell = stack.pop(); region.push(cell);
+            if(region.length > _FLOOD_CAP) return;         // huge cavern/cave system — bail, don't lag
+            const x=cell[0], y=cell[1], z=cell[2];
+            for(const d of NB){
+              const nx=x+d[0], ny=y+d[1], nz=z+d[2];
+              if(ny<0 || ny>SEA_LEVEL) continue;           // water can't rise above sea level
+              const b = getBlock(nx,ny,nz);
+              if(b===WATER){ touchesWater = true; continue; }
+              if(b!==0) continue;                          // solid wall bounds the pocket
+              const kk = kkey(nx,ny,nz);
+              if(seen.has(kk)) continue;
+              seen.add(kk); stack.push([nx,ny,nz]);
+            }
+          }
+          if(!touchesWater) return;                        // sealed dry pocket — leave it dry
+          const AP = getProfileApi();
+          const p = (AP && !_suppressProfileBlockSave) ? AP.load() : null;
+          const chunks = new Set();
+          const addChunk = (x,y,z)=> chunks.add(_fdiv(x,CH)+','+_fdiv(y,CH)+','+_fdiv(z,CH));
+          for(const cell of region){
+            const x=cell[0], y=cell[1], z=cell[2];
+            const cx=_fdiv(x,CH), cz=_fdiv(z,CH);
+            const c = ensureCol(cx,cz);
+            c[cIdx(x-cx*CH, y, z-cz*CH)] = WATER;
+            recordEdit(x,y,z,WATER);
+            if(p) AP.upsertBlockEdit(p, pmod(x), y, pmod(z), WATER);
+            const k=colKey(cx,cz); if(y>(colMaxY.get(k)||0)) colMaxY.set(k,y);
+            addChunk(x,y,z);
+            const lx=_mod(x,CH), ly=_mod(y,CH), lz=_mod(z,CH);
+            if(lx===0) addChunk(x-1,y,z); if(lx===CH-1) addChunk(x+1,y,z);
+            if(ly===0) addChunk(x,y-1,z); if(ly===CH-1) addChunk(x,y+1,z);
+            if(lz===0) addChunk(x,y,z-1); if(lz===CH-1) addChunk(x,y,z+1);
+          }
+          if(p) AP.save(p);
+          for(const ck of chunks){ const a=ck.split(','); buildChunkMesh(+a[0],+a[1],+a[2]); }
+        }
+
         // Resolve the player's current planet → drives SEED, biome theme, atmosphere.
         function loadActivePlanet() {
             const AP = getProfileApi();
@@ -745,13 +796,34 @@
                 activePlanetId = def.id;
                 SEED = def.seed | 0;
                 activeBiome = BIOME_THEMES[def.biome] || BIOME_THEMES.verdant;
+                activeSpec = (AP && AP.planetSpec) ? AP.planetSpec(def) : null;
             } else {
                 // No profile API (e.g. standalone) — keep a stable random asteroid.
                 activePlanetId = null;
                 SEED = (Math.random() * 1e9) | 0;
                 activeBiome = BIOME_THEMES.verdant;
+                activeSpec = null;
             }
+            applyActiveSpec();
             applyPlanetAtmosphere();
+        }
+
+        // Cache the active spec's generation/physics inputs and merge any custom sky
+        // palette over the biome theme. Missing spec → all defaults (no change).
+        function applyActiveSpec() {
+            const t = activeSpec ? activeSpec.terrain : null;
+            const b = activeSpec ? activeSpec.basics : null;
+            _mtnMul   = t ? t.mountains   : 1;
+            _landBias = t ? t.landBias    : 0;
+            _tempBias = t ? t.tempBias    : 0;
+            _moistBias= t ? t.moistBias   : 0;
+            _oreRich  = t ? t.oreRichness : 1;
+            _gravMul  = b ? b.gravity     : 1;
+            dayTime = 0.20;   // a fresh planet starts mid-morning
+            if (activeSpec && activeSpec.visual && activeSpec.visual.palette) {
+                const p = activeSpec.visual.palette;
+                activeBiome = Object.assign({}, activeBiome, { sky: p.sky, horizon: p.horizon, sun: p.sun, ground: p.ground });
+            }
         }
 
         // Load saved edits into the canonical edit store; loaded columns pick them up
@@ -777,7 +849,14 @@
             if(!arr) return;
             for(const e of arr){
                 const lx = e.x - ex0, lz = e.z - ez0;
-                if(lx>=0 && lx<CH && lz>=0 && lz<CH && e.y>=0 && e.y<H) buf[cIdx(lx, e.y, lz)] = e.id;
+                if(lx>=0 && lx<CH && lz>=0 && lz<CH && e.y>=0 && e.y<H){
+                    const ci = cIdx(lx, e.y, lz);
+                    // Heal old water-mining holes: water isn't editable anymore, so ignore
+                    // any "removed" (air) edit that sits on a generated water cell. Without
+                    // this, leftover edits from when water was minable punch holes in the sea.
+                    if(e.id === 0 && buf[ci] === WATER) continue;
+                    buf[ci] = e.id;
+                }
             }
         }
         
@@ -790,6 +869,9 @@
         // remap, so the home world generates byte-identically to before.
         let activePlanetId = null;
         let activeBiome = null;
+        // Active planet spec (template) cached into hot-path numbers; defaults = "no change".
+        let activeSpec = null;
+        let _mtnMul = 1, _landBias = 0, _tempBias = 0, _moistBias = 0, _oreRich = 1, _gravMul = 1;
         // Each theme carries a daytime sky palette (sky=zenith, horizon=haze/fog,
         // sun=key light) plus the surface remap. `verdant` is the lush home default.
         const BIOME_THEMES = {
@@ -901,7 +983,9 @@
           }
         }
         // Advance time + refresh sky each frame.
-        function updateDayNight(dt){ if(!DAYNIGHT_ENABLED) return; dayTime = (dayTime + dt/DAY_LENGTH) % 1; applyDaySky(); }
+        function _dayNightOn(){ return DAYNIGHT_ENABLED || (activeSpec && activeSpec.visual && activeSpec.visual.dayNight); }
+        function _dayLenSec(){ return (activeSpec && activeSpec.basics && activeSpec.basics.dayLengthMin) ? activeSpec.basics.dayLengthMin*60 : DAY_LENGTH; }
+        function updateDayNight(dt){ if(!_dayNightOn()) return; dayTime = (dayTime + dt/_dayLenSec()) % 1; applyDaySky(); }
         // Forced full refresh (planet change / enter).
         function applyPlanetAtmosphere(){ _skyMark = -1; applyDaySky(); }
 
@@ -938,6 +1022,23 @@
           g.scene.remove(cloudMesh); cloudMesh.geometry.dispose(); cloudMesh.material.dispose();
           if(_cloudTex) _cloudTex.dispose();
           cloudMesh=null; _cloudTex=null;
+        }
+
+        // ---------- realistic sea: the water surface is meshed per-chunk (top faces of
+        // surface water cells) so it's contained exactly to the shoreline; the Gerstner
+        // ShaderMaterial (matWater) animates it. This updater drives its uniforms each
+        // frame — locking the sun glint / sky reflection to the scene's live lighting so
+        // day/night and sunset carry over. ----------
+        const _seaSky=new THREE.Color(0x8fc4ec);
+        function updateWater(dt){
+          if(!matWater || !matWater.uniforms) return;
+          const u = matWater.uniforms;
+          u.uTime.value = elapsed;
+          const Ls = g._voxelLights;
+          if(Ls && Ls[1]){ u.uSunDir.value.copy(Ls[1].position).normalize(); u.uSunColor.value.copy(Ls[1].color); }
+          const th = activeBiome || BIOME_THEMES.verdant;
+          if(th && th.sky!=null) u.uSkyColor.value.copy(_seaSky.setHex(th.sky));
+          if(g.scene.fog && g.scene.fog.color){ u.uHorizonColor.value.copy(g.scene.fog.color); u.fogColor.value.copy(g.scene.fog.color); u.fogNear.value=g.scene.fog.near; u.fogFar.value=g.scene.fog.far; }
         }
 
         // ---------- deterministic worldgen: same seed = same world ----------
@@ -979,7 +1080,9 @@
           const cont = pfbm2(x,z, 1000, 16, 3);                  // broad continents (~192-block)
           const hill = pfbm2(x,z, 3000, 64, 2);                  // rolling hills (~48-block)
           const ridge= 1-Math.abs(2*pfbm2(x,z, 5000, 32, 2)-1);  // mountain ridges (~96-block)
-          const hh = (SEA_LEVEL-9) + cont*38 + hill*9 + ridge*ridge*ridge*30;
+          // Centre terrain around sea level so basins dip BELOW it and fill with water
+          // (coasts, lakes, oceans). landBias shifts a world wetter (−) or drier (+).
+          const hh = SEA_LEVEL + 4 + _landBias + (cont-0.5)*44 + (hill-0.5)*9 + ridge*ridge*ridge*26*_mtnMul;
           return Math.max(1, Math.min(H-4, Math.round(hh)));
         }
         // How many solid blocks to keep above a cave: thick on flat ground (no surprise
@@ -997,8 +1100,8 @@
         function columnProfile(x, z){
           const SEA=SEA_LEVEL;
           const height = columnHeight(x,z);
-          const temp  = pfbm2(x,z, 7000, 12, 2);                 // warmth (~256-block regions)
-          const moist = pfbm2(x,z, 9000, 12, 2);                 // wetness
+          const temp  = pfbm2(x,z, 7000, 12, 2) + _tempBias;    // warmth (~256-block regions)
+          const moist = pfbm2(x,z, 9000, 12, 2) + _moistBias;   // wetness
           let top = 1;                                           // grass
           if(temp<0.40) top = 20;                                // tundra / snow
           else if(moist<0.34 && temp>0.60) top = 4;              // desert sand
@@ -1019,11 +1122,12 @@
         function oreAt(x, y, z){
           if(y<4) return 17;                                     // basalt floor
           const n = pvnoise3(x*0.16, y*0.16, z*0.16, 96, 210);
-          if(n>0.86){
+          const thr = 1 - 0.14*_oreRich;                         // richer planet → lower threshold → more ore
+          if(n>thr){
             if(y<=8) return 28; if(y<=14) return 25; if(y<=18) return 24;
             if(y<=SEA_LEVEL-4) return 23; if(y<=SEA_LEVEL) return 22; return 27;
           }
-          if(n>0.80 && y>=6 && y<=SEA_LEVEL-2) return 9;          // aether band
+          if(n>(1-0.20*_oreRich) && y>=6 && y<=SEA_LEVEL-2) return 9;   // aether band
           if(y<5 && pvnoise3(x*0.15,y*0.15,z*0.15,96,300)>0.72) return 38;  // lava pocket
           return 0;
         }
@@ -1267,7 +1371,7 @@
         function buildChunkMesh(cx,cy,cz){
           const key=`${cx},${cy},${cz}`;
           const old = scene3.chunks.get(key);
-          if(old){ ['static','anim','glass','deco'].forEach(k=>{ if(old[k]){ scene.remove(old[k]); old[k].geometry.dispose(); } }); }
+          if(old){ ['static','anim','glass','water','deco'].forEach(k=>{ if(old[k]){ scene.remove(old[k]); old[k].geometry.dispose(); } }); }
 
           // Cache the 3×3 neighbour column buffers once so per-voxel reads skip the
           // string-key build + Map.get in getBlock (meshColumn guarantees neighbours
@@ -1289,7 +1393,10 @@
                              : { pos:[], uv:[], col:[], idx:[], nor:[] };
           const abuf = { pos:[], uv:[], col:[], idx:[], nor:[] };
           const gbuf = { pos:[], uv:[], col:[], idx:[], nor:[] };
+          const wbuf = { pos:[], uv:[], col:[], idx:[], nor:[], shore:[] };
           const dbuf = { pos:[], uv:[], col:[], idx:[], sway:[], nor:[] };
+          // surface water present at this column (topmost water cell sits at SEA_LEVEL)
+          const isSurfWater = (cellX,cellZ) => localBlock(cellX, SEA_LEVEL, cellZ) === WATER;
 
           for(let lx=0;lx<CH;lx++) for(let ly=0;ly<CH;ly++) for(let lz=0;lz<CH;lz++){
             const x=cx*CH+lx, y=cy*CH+ly, z=cz*CH+lz;
@@ -1297,6 +1404,30 @@
             const id = localBlock(x,y,z);
             if(!id) continue;
             const block = blockById(id);
+            if(block.water){
+              // Render water as a SURFACE only: the top face of the topmost water cell
+              // (air directly above). This keeps the sea contained exactly to the
+              // shoreline the water blocks define. The Gerstner shader on matWater
+              // displaces these quads into moving waves; underwater volume stays
+              // invisible (physics-only). No faces emitted for submerged water cells.
+              if(localBlock(x,y+1,z)===0){
+                const tf = FACES[3], base = wbuf.pos.length/3;
+                for(const corner of tf.corners){
+                  // Per-corner shore weight: 1 only when all four cells meeting this
+                  // grid point carry surface water; 0 the moment a corner touches land.
+                  // The shader multiplies wave height by it, so the waterline stays flat
+                  // and flush with the beach instead of sliding crests over the sand.
+                  const gx = x + corner.pos[0], gz = z + corner.pos[2];
+                  const w = (isSurfWater(gx-1,gz-1) && isSurfWater(gx-1,gz) &&
+                             isSurfWater(gx,gz-1)   && isSurfWater(gx,gz)) ? 1 : 0;
+                  wbuf.pos.push(x+corner.pos[0], y+corner.pos[1], z+corner.pos[2]);
+                  wbuf.uv.push(0,0); wbuf.col.push(1,1,1); wbuf.nor.push(0,1,0);
+                  wbuf.shore.push(w);
+                }
+                wbuf.idx.push(base, base+1, base+2, base+2, base+1, base+3);
+              }
+              continue;
+            }
             const B = block.animated? abuf : (block.transparent? gbuf : buf);
 
             if(decoFor(id,x,y,z)) emitCarpet(dbuf,block,x,y,z);
@@ -1343,6 +1474,7 @@
             g.setAttribute('normal', new THREE.Float32BufferAttribute(b.nor,3));
             if(b.arect) g.setAttribute('arect', new THREE.Float32BufferAttribute(b.arect,4));
             if(b.sway) g.setAttribute('sway', new THREE.Float32BufferAttribute(b.sway,1));
+            if(b.shore) g.setAttribute('shore', new THREE.Float32BufferAttribute(b.shore,1));
             g.setIndex(b.idx);
             const m = new THREE.Mesh(g, mat);
             m.position.copy(WORLD_OFFSET);
@@ -1352,6 +1484,7 @@
           out.static = mk(buf, matStatic);
           out.anim = mk(abuf, matAnim);
           out.glass = mk(gbuf, matGlass);
+          out.water = mk(wbuf, matWater);
           out.deco = mk(dbuf, decoMat);
           scene3.chunks.set(key, out);
         }
@@ -1387,7 +1520,7 @@
           for(let cy=0; cy<VCH; cy++){
             const key = `${cx},${cy},${cz}`;
             const o = scene3.chunks.get(key);
-            if(o){ ['static','anim','glass','deco'].forEach(k=>{ if(o[k]){ scene.remove(o[k]); o[k].geometry.dispose(); } }); scene3.chunks.delete(key); }
+            if(o){ ['static','anim','glass','water','deco'].forEach(k=>{ if(o[k]){ scene.remove(o[k]); o[k].geometry.dispose(); } }); scene3.chunks.delete(key); }
           }
           meshedCols.delete(colKey(cx,cz));
         }
@@ -1484,7 +1617,7 @@
         // run fn after the browser has painted (so the overlay is on screen first)
         function afterPaint(fn){ requestAnimationFrame(() => requestAnimationFrame(fn)); }
         // ---------- materials + boot ----------
-        let decoMat=null, matGlass=null;
+        let decoMat=null, matGlass=null, matWater=null;
         function rebuildMaterials(){
           matStatic = new THREE.MeshLambertMaterial({map:atlasTex, vertexColors:true});
           if(GREEDY){
@@ -1520,6 +1653,96 @@
                  transformed.z += cos(uTime*1.6 + transformed.x*1.1 + transformed.z*.9) * sway * .08;`);
             decoMat.userData.shader = sh;
           };
+          // water surface: a Gerstner-wave ShaderMaterial applied to the per-chunk
+          // surface quads (top faces of the topmost water cells). Real dispersion
+          // (omega=sqrt(g*k)), analytic Gerstner normals, Schlick Fresnel into the sky
+          // reflection, and a Blinn sun glint locked to the scene's live sun.
+          matWater = makeWaterMaterial();
+        }
+        // Four Gerstner waves: direction (xz, unit), wavelength L, steepness Q, amplitude A.
+        // Mixed directions + wavelengths break up the grid; total amplitude ~0.5m stays
+        // calm and kid-friendly. Built into GLSL consts so the loop is fully unrolled.
+        function makeWaterMaterial(){
+          const WAVES = [
+            //  dirX, dirZ,      L,    Q,     A     (calm: low amplitude + low steepness = gentle rolling, not choppy)
+            [ 0.92,  0.39,   19.0, 0.30, 0.090],
+            [-0.50,  0.87,   12.5, 0.26, 0.055],
+            [ 0.20, -0.98,    7.5, 0.20, 0.030],
+            [ 0.77,  0.64,    4.3, 0.16, 0.015],
+          ];
+          let waveConsts = '';
+          WAVES.forEach((w,i)=>{
+            const [dx,dz,L,Q,A] = w;
+            const k = 2.0*Math.PI/L;            // spatial frequency
+            const c = Math.sqrt(9.8/k);         // deep-water phase speed (dispersion)
+            const dlen = Math.hypot(dx,dz)||1;
+            waveConsts += `  W[${i}]=vec4(${(dx/dlen).toFixed(4)},${(dz/dlen).toFixed(4)},${k.toFixed(5)},${(c*k).toFixed(5)}); QA[${i}]=vec2(${Q.toFixed(4)},${A.toFixed(4)});\n`;
+          });
+          return new THREE.ShaderMaterial({
+            transparent:true, side:THREE.DoubleSide, depthWrite:false, fog:true,
+            uniforms:{
+              uTime:{value:0},
+              uSunDir:{value:new THREE.Vector3(0.4,0.8,0.3)},
+              uSunColor:{value:new THREE.Color(0xfff4e0)},
+              uSkyColor:{value:new THREE.Color(0x8fc4ec)},
+              uHorizonColor:{value:new THREE.Color(0xbfe0f5)},
+              uDeep:{value:new THREE.Color(0x14506f)},
+              uShallow:{value:new THREE.Color(0x2f8fb8)},
+              uOpacity:{value:0.86},
+              fogColor:{value:new THREE.Color(0xbfe0f5)},
+              fogNear:{value:FOG_NEAR}, fogFar:{value:FOG_FAR},
+            },
+            vertexShader:`
+              uniform float uTime;
+              attribute float shore;                    // 1 = open water, 0 = touches land
+              varying vec3 vWorld; varying vec3 vNormal; varying float vFog;
+              void main(){
+                vec4 W[4]; vec2 QA[4];
+${waveConsts}
+                vec3 wp = (modelMatrix * vec4(position,1.0)).xyz;   // grid pos in world XZ
+                float h = 0.0; vec2 slope = vec2(0.0);
+                for(int i=0;i<4;i++){
+                  vec2 dir=W[i].xy; float k=W[i].z, w=W[i].w, A=QA[i].y;
+                  float ph = k*dot(dir, wp.xz) + w*uTime;
+                  h += A*sin(ph);                       // vertical-only (no lateral slide over the shore)
+                  slope += dir * (k*A) * cos(ph);       // d(height)/d(xz) for the analytic normal
+                }
+                // taper waves to zero at the waterline so the edge stays flat & flush,
+                // and tuck the whole sheet a hair under the beach to dodge coplanar z-fight.
+                h = h*shore - 0.07;
+                vec3 nrm = normalize(vec3(-slope.x*shore, 1.0, -slope.y*shore));
+                vec3 world = vec3(wp.x, wp.y + h, wp.z);
+                vWorld = world; vNormal = nrm;
+                vec4 mv = viewMatrix * vec4(world,1.0);
+                vFog = -mv.z;
+                gl_Position = projectionMatrix * mv;
+              }`,
+            fragmentShader:`
+              precision highp float;
+              uniform vec3 uSunDir, uSunColor, uSkyColor, uHorizonColor, uDeep, uShallow;
+              uniform float uOpacity;
+              uniform vec3 fogColor; uniform float fogNear, fogFar;
+              varying vec3 vWorld; varying vec3 vNormal; varying float vFog;
+              void main(){
+                vec3 N = normalize(vNormal);
+                if(!gl_FrontFacing) N = -N;                 // seen from below (underwater)
+                vec3 V = normalize(cameraPosition - vWorld);
+                vec3 L = normalize(uSunDir);
+                float ndv = max(dot(N,V), 0.0);
+                float fres = 0.02 + 0.98*pow(1.0 - ndv, 5.0);          // Schlick Fresnel (F0~0.02)
+                vec3 body = mix(uDeep, uShallow, pow(ndv, 0.5));
+                vec3 skyRef = mix(uSkyColor, uHorizonColor, fres);
+                vec3 col = mix(body, skyRef, fres);
+                float diff = max(dot(N,L), 0.0);
+                col += uSunColor * diff * 0.12;
+                vec3 Hh = normalize(L + V);
+                float spec = pow(max(dot(N,Hh),0.0), 220.0);           // tight Blinn sun glint
+                col += uSunColor * spec * 1.6 * (0.25 + 0.75*max(L.y,0.0));
+                float f = clamp((vFog - fogNear)/(fogFar - fogNear), 0.0, 1.0);
+                col = mix(col, fogColor, f);
+                gl_FragColor = vec4(col, uOpacity);
+              }`,
+          });
         }
         
         
@@ -1531,7 +1754,7 @@
           // wasteful. Recompute it only every 30 calls; cache the value in between.
           if((_hudTriFrame++ % 30) === 0){
             let tris=0;
-            scene3.chunks.forEach(c=>['static','anim','glass','deco'].forEach(k=>{
+            scene3.chunks.forEach(c=>['static','anim','glass','water','deco'].forEach(k=>{
               if(c[k]) tris += c[k].geometry.index.count/3; }));
             _hudTriCached = tris|0;
           }
@@ -2241,8 +2464,32 @@
           grounded:false, yaw:0, state:'idle',
         };
         function solidAt(wx,wy,wz){       // world-space (render) coords -> voxel solid?
-          return getBlock(Math.floor(wx-WORLD_OFFSET.x), Math.floor(wy-WORLD_OFFSET.y),
-                          Math.floor(wz-WORLD_OFFSET.z)) !== 0;
+          const b = getBlock(Math.floor(wx-WORLD_OFFSET.x), Math.floor(wy-WORLD_OFFSET.y),
+                             Math.floor(wz-WORLD_OFFSET.z));
+          return b !== 0 && b !== WATER;   // water is swimmable, not solid
+        }
+        // True when the player's torso is inside water (drives swim physics).
+        function playerInWater(){
+          return getBlock(Math.floor(player.pos.x - WORLD_OFFSET.x),
+                          Math.floor(player.pos.y + 0.9 - WORLD_OFFSET.y),
+                          Math.floor(player.pos.z - WORLD_OFFSET.z)) === WATER;
+        }
+        // True when the camera eye is submerged → underwater screen tint.
+        function eyeInWater(){
+          if(!camera) return false;
+          return getBlock(Math.floor(camera.position.x - WORLD_OFFSET.x),
+                          Math.floor(camera.position.y - WORLD_OFFSET.y),
+                          Math.floor(camera.position.z - WORLD_OFFSET.z)) === WATER;
+        }
+        let _uwEl = null;
+        function setUnderwaterTint(on){
+          if(!_uwEl){
+            if(!on) return;
+            _uwEl = document.createElement('div');
+            _uwEl.id = 'voxel-underwater';
+            (document.getElementById('gameContainer') || document.body).appendChild(_uwEl);
+          }
+          _uwEl.classList.toggle('vx-uw-on', !!on);
         }
         function boxCollides(px,py,pz){
           const {x:hx2,z:hz2}=player.half, h=player.height;
@@ -2589,7 +2836,7 @@
             else                                { iz += stepZ; t = tMaxZ; tMaxZ += tDeltaZ; nx = 0; ny = 0; nz = -stepZ; }
             if (t > maxDist) return null;
             const id = getBlock(ix, iy, iz);
-            if (id) {
+            if (id && id !== WATER) {              // aim passes through water (not minable/scannable)
               _vrHit.x = ix; _vrHit.y = iy; _vrHit.z = iz; _vrHit.id = id;
               _vrHit.normal.set(nx, ny, nz);
               _vrHit.point.copy(origin).addScaledVector(dir, t);
@@ -4270,6 +4517,7 @@
                 blockColor(id)
             );
             setBlockEvent(t.x, t.y, t.z, 0);
+            floodWaterAfterMine(t.x, t.y, t.z);   // sea flows into the new gap if it reaches water
             addToInventory(id);
             updateHUD();
             resetMining();
@@ -5702,7 +5950,7 @@
         function renderBackpackBody(body, ownedOnly) {
             let any = false;
             INV_CATEGORIES.forEach((cat) => {
-                const blocks = BlockRegistry.filter((b) => b.cat === cat);
+                const blocks = BlockRegistry.filter((b) => b.cat === cat && !b.water);
                 const visible = ownedOnly ? blocks.filter((b) => getBackpackCount(b.id) > 0) : blocks;
                 if (!visible.length) return;
                 any = true;
@@ -5812,7 +6060,7 @@
             if (codexSection === 'Gear') { renderCodexGearList(body); return; }
             const AP = getProfileApi();
             const scanned = (AP && AP.load().journal && AP.load().journal.scanned) || {};
-            const all = BlockRegistry.slice();
+            const all = BlockRegistry.filter((b) => !b.water);   // water isn't a collectible block
             const discovered = all.filter((b) => scanned[String(b.id)]).length;
             const total = all.length;
             const pct = Math.round(discovered / Math.max(1, total) * 100);
@@ -6184,11 +6432,24 @@
                 if (isCurrent) action = '<div class="vx-world-here">● You are here</div>';
                 else if (isUnlocked) action = '<button type="button" class="vx-btn vx-btn-on" data-travel="' + pl.id + '">Travel</button>';
                 else action = '<div class="vx-world-need">🔒 Finish ' + need + ' survey' + (need === 1 ? '' : 's') + '</div>';
+                let stats = '';
+                if (isUnlocked && pl.spec && AP.planetSpec) {
+                    const sp = AP.planetSpec(pl);
+                    const bits = [];
+                    if (sp.basics.type) bits.push(sp.basics.type);
+                    if (sp.basics.sizeKm) bits.push(sp.basics.sizeKm.toLocaleString() + ' km');
+                    bits.push(sp.basics.gravity.toFixed(2) + ' g');
+                    if (sp.basics.tempRange) bits.push(sp.basics.tempRange[0] + '° to ' + sp.basics.tempRange[1] + '°C');
+                    bits.push('O₂ ' + sp.basics.atmosphere.oxygen + '%');
+                    if (sp.visual.dayNight) bits.push(sp.basics.dayLengthMin + 'h day');
+                    if (sp.basics.starSystem) bits.push('☀ ' + sp.basics.starSystem + ' system');
+                    stats = '<div class="vx-world-stats">' + bits.join(' · ') + '</div>';
+                }
                 const card = document.createElement('div');
                 card.className = 'vx-world' + (isCurrent ? ' vx-world-current' : '') + (isUnlocked ? '' : ' vx-world-locked');
                 card.innerHTML = '<div class="vx-world-orb" style="background:radial-gradient(circle at 34% 30%, rgba(255,255,255,0.7), ' + c + ' 62%, rgba(0,0,0,0.55))"></div>'
                     + '<div class="vx-world-main"><div class="vx-world-name">' + pl.name + ' <span class="vx-world-da">· ' + pl.nameDa + '</span></div>'
-                    + '<div class="vx-world-blurb">' + (isUnlocked ? pl.blurb : 'A world waiting to be charted.') + '</div></div>'
+                    + '<div class="vx-world-blurb">' + (isUnlocked ? pl.blurb : 'A world waiting to be charted.') + '</div>' + stats + '</div>'
                     + '<div class="vx-world-action">' + action + '</div>';
                 body.appendChild(card);
             });
@@ -6670,7 +6931,7 @@
 
         function _clearWorld() {
             scene3.chunks.forEach(c => {
-                ['static','anim','glass','deco'].forEach(k => {
+                ['static','anim','glass','water','deco'].forEach(k => {
                     if (c[k]) { scene.remove(c[k]); if (c[k].dispose) c[k].dispose(); }
                 });
             });
@@ -7067,6 +7328,7 @@
             processBuildQueue(2.5);            // ms/frame — granular (per sub-chunk) so it spreads without spiking
             updateDayNight(dt);
             updateClouds(dt);
+            updateWater(dt);
             elapsed += dt;
             // --- movement intent in camera space ---
             let ix=0,iz=0;
@@ -7093,15 +7355,24 @@
                 while(d>Math.PI)d-=Math.PI*2; while(d<-Math.PI)d+=Math.PI*2;
                 player.yaw+=d*(1-Math.exp(-(firstPerson?20:12)*dt));
             }
-            player.vel.y-=22*dt;
             const wasGrounded=player.grounded;
             player.grounded=false;
             let thrusting=false;
-            if(keys.Space){
-                if(wasGrounded) player.vel.y=8.5;
-                else { player.vel.y=Math.min(player.vel.y+40*dt, 5.5); thrusting=true; }
+            const inWater = playerInWater();
+            if(inWater){
+                // swim: gentle buoyancy + viscous drag, hold Space to rise, never drowns
+                if(keys.Space) player.vel.y += 26*dt; else player.vel.y -= 7*dt;
+                player.vel.y -= player.vel.y * Math.min(1, 3.2*dt);
+                player.vel.y = Math.max(-3.2, Math.min(4.2, player.vel.y));
+                mvx *= 0.6; mvz *= 0.6;                     // slower through water
+            } else {
+                player.vel.y -= 22*_gravMul*dt;            // per-planet gravity
+                if(keys.Space){
+                    if(wasGrounded) player.vel.y = 8.5;     // jump (floatier on low-g worlds)
+                    else { player.vel.y = Math.min(player.vel.y+40*dt, 5.5); thrusting=true; }
+                }
+                player.vel.y = Math.max(player.vel.y, -28*_gravMul);
             }
-            player.vel.y=Math.max(player.vel.y,-28);
             const hv=new THREE.Vector3(mvx,0,mvz);
             moveAxis('x', hv.x*dt);
             moveAxis('z', hv.z*dt);
@@ -7163,6 +7434,7 @@
             updateCritters(dt);
             updateHUD();
             updateCamera(dt);
+            setUnderwaterTint(eyeInWater());
             updateTpAimVisuals();
         }
 
@@ -7514,6 +7786,7 @@
             flushProfileState();
             _active = false;
             hideVoxelLoading();
+            setUnderwaterTint(false);
             disposeGearViewer();
             disposeThumbRenderer();
             clearCritters();
