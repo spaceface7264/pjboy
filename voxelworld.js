@@ -6058,9 +6058,11 @@
         ];
         const _creatureById = {}; CREATURES.forEach(c => _creatureById[c.id] = c);
 
+        const CRITTERS_ENABLED = false;  // master switch — flip to true to bring wildlife back
         const CRIT_CAP = 14;             // max active critters
-        const CRIT_VIEW = 30;            // spawn within this many blocks of the player
-        const CRIT_DESPAWN = 48;         // despawn beyond this
+        const CRIT_MIN = 26;            // never spawn closer than this to the player
+        const CRIT_VIEW = 46;            // spawn out to this many blocks
+        const CRIT_DESPAWN = 60;         // despawn beyond this
         const CRIT_SPEED = 2.2;          // base walk speed
         const CRIT_FLEE = 7;             // shy critters flee inside this radius
         const critters = [];
@@ -6138,7 +6140,7 @@
         function spawnOneCritter(){
           const px=Math.floor(player.pos.x), pz=Math.floor(player.pos.z);
           for(let tryN=0; tryN<6; tryN++){
-            const ang=Math.random()*Math.PI*2, r=14+Math.random()*(CRIT_VIEW-14);
+            const ang=Math.random()*Math.PI*2, r=CRIT_MIN+Math.random()*(CRIT_VIEW-CRIT_MIN);
             const vx=px+Math.round(Math.cos(ang)*r), vz=pz+Math.round(Math.sin(ang)*r);
             const top=surfaceTopVox(vx,vz);
             if(top===null) continue;
@@ -6151,7 +6153,7 @@
             if(!sp.fly && Math.random()<0.6){
               const extra=1+((Math.random()*3)|0);
               for(let e=0; e<extra && critters.length<CRIT_CAP; e++){
-                const ox=vx+((Math.random()*7)|0)-3, oz=vz+((Math.random()*7)|0)-3;
+                const ox=vx+((Math.random()*15)|0)-7, oz=vz+((Math.random()*15)|0)-7;
                 const t2=surfaceTopVox(ox,oz);
                 if(t2!==null && sp.on.indexOf(getBlock(ox,t2,oz))>=0) placeCritter(sp, ox, oz, t2);
               }
@@ -6188,6 +6190,7 @@
         }
 
         function updateCritters(dt){
+          if(!CRITTERS_ENABLED){ if(critters.length) clearCritters(); return; }
           // maintain population
           _critTimer-=dt;
           if(_critTimer<=0){
