@@ -1135,7 +1135,94 @@
           const ao = (s1&&s2)? 3 : s1+s2+co;
           return 1 - ao*.18;
         }
-        
+
+        // ---------- greedy meshing (static opaque blocks only) ----------
+        // Merges coplanar same-tile, same-lighting block faces into big quads instead of
+        // one quad per face — far fewer triangles in flat/open areas (plains, cliffs, cave
+        // walls), which is where the GPU was choking. Two constraints make it non-trivial:
+        //   1) Atlas tiling: a merged WxH quad must REPEAT its tile, but every block tile
+        //      is a sub-rect of one shared atlas. Solved in the shader (matStatic, see
+        //      rebuildMaterials): fract() the repeating uv, then map into the tile's arect.
+        //   2) Ambient occlusion: faces only merge when their lighting matches, so we only
+        //      merge faces whose 4 AO corners are all equal (flat-lit). Edge-lit faces stay
+        //      1x1 and keep their exact per-corner shading — look is preserved.
+        // Flip GREEDY=false to fall straight back to the proven per-face path above.
+        const GREEDY = true;
+        // Per face: normal axis n, sign s, and in-plane axes u,v chosen so the quad
+        // (u0v0,u1v0,u1v1,u0v1) with tris (0,1,2)+(0,2,3) winds front-facing (eu×ev = s·en).
+        const GREEDY_AXES = [
+          {n:0,s: 1,u:1,v:2}, {n:0,s:-1,u:2,v:1},
+          {n:1,s: 1,u:2,v:0}, {n:1,s:-1,u:0,v:2},
+          {n:2,s: 1,u:0,v:1}, {n:2,s:-1,u:1,v:0},
+        ];
+        function faceBrightDir(dx,dy,dz){ return dx? .8 : (dy>0?1:(dy<0?.5:.7)); }
+        // AO at the four physical corners, in (u0v0,u1v0,u1v1,u0v1) order.
+        function quadAO(wx,wy,wz, dir, n,u,v, read){
+          const baseN = dir[n]>0?1:0;
+          const corner=(uu,vv)=>{ const p=[0,0,0]; p[n]=baseN; p[u]=uu; p[v]=vv; return vertexAO(wx,wy,wz,dir,{pos:p},read); };
+          return [ corner(0,0), corner(1,0), corner(1,1), corner(0,1) ];
+        }
+        function greedyStatic(cx,cy,cz, B, read){
+          const bx=cx*CH, by=cy*CH, bz=cz*CH;
+          const N=CH, dir=[0,0,0], lp=[0,0,0];
+          for(const ax of GREEDY_AXES){
+            const {n,s,u,v}=ax;
+            dir[0]=dir[1]=dir[2]=0; dir[n]=s;
+            const fb=faceBrightDir(dir[0],dir[1],dir[2]);
+            const planeN = s>0?1:0;
+            for(let k=0;k<N;k++){
+              const keys=new Array(N*N).fill(null);
+              const data=new Array(N*N).fill(null);
+              for(let j=0;j<N;j++) for(let i=0;i<N;i++){
+                lp[n]=k; lp[u]=i; lp[v]=j;
+                const wx=bx+lp[0], wy=by+lp[1], wz=bz+lp[2];
+                const id=read(wx,wy,wz);
+                if(!id) continue;
+                const blk=blockById(id);
+                if(blk.animated || blk.transparent) continue;          // static-opaque only
+                const nid=read(wx+dir[0],wy+dir[1],wz+dir[2]);
+                if(nid && !blockById(nid).transparent) continue;        // hidden by opaque neighbour
+                const tile=tileIndex[tileFor(blk,dir)];
+                const ao=quadAO(wx,wy,wz,dir,n,u,v,read);
+                const uniform = (ao[0]===ao[1] && ao[1]===ao[2] && ao[2]===ao[3]);
+                const idx=i+j*N;
+                data[idx]={tile,ao,uniform};
+                // only flat-lit faces get a merge key; edge-lit faces (key=null) stay 1x1
+                if(uniform) keys[idx]=tile.u0+'_'+tile.v0+'_'+ao[0];
+              }
+              const used=new Array(N*N).fill(false);
+              for(let j=0;j<N;j++) for(let i=0;i<N;i++){
+                const idx=i+j*N, d=data[idx];
+                if(!d || used[idx]) continue;
+                let w=1,h=1;
+                if(keys[idx]!==null){
+                  const key=keys[idx];
+                  while(i+w<N && !used[(i+w)+j*N] && keys[(i+w)+j*N]===key) w++;
+                  grow: while(j+h<N){
+                    for(let dd=0;dd<w;dd++){ const id2=(i+dd)+(j+h)*N; if(used[id2]||keys[id2]!==key) break grow; }
+                    h++;
+                  }
+                  for(let jj=0;jj<h;jj++) for(let ii=0;ii<w;ii++) used[(i+ii)+(j+jj)*N]=true;
+                } else used[idx]=true;
+                // emit one quad spanning w×h blocks
+                const o=[0,0,0]; o[n]=k; o[u]=i; o[v]=j;
+                const ox=bx+o[0], oy=by+o[1], oz=bz+o[2];
+                const corner=(uu,vv)=>{ const p=[ox,oy,oz]; p[n]+=planeN; p[u]+=uu; p[v]+=vv; return p; };
+                const c00=corner(0,0), c10=corner(w,0), c11=corner(w,h), c01=corner(0,h);
+                const base=B.pos.length/3;
+                const t=d.tile, du=t.u1-t.u0, dv=t.v1-t.v0;
+                const push=(p,ru,rv,col)=>{ B.pos.push(p[0],p[1],p[2]); B.uv.push(ru,rv); B.col.push(col,col,col);
+                  B.nor.push(dir[0],dir[1],dir[2]); B.arect.push(t.u0,t.v0,du,dv); };
+                push(c00,0,0, fb*d.ao[0]);
+                push(c10,w,0, fb*d.ao[1]);
+                push(c11,w,h, fb*d.ao[2]);
+                push(c01,0,h, fb*d.ao[3]);
+                B.idx.push(base,base+1,base+2, base,base+2,base+3);
+              }
+            }
+          }
+        }
+
         const scene3 = {chunks:new Map()};   // "cx,cy,cz" -> {static:Mesh, anim:Mesh, deco:Mesh}
         let matStatic=null, matAnim=null;
         // star-pattern decoration: three quads at 0/60/120 degrees so the tuft
@@ -1198,11 +1285,12 @@
             return b ? b[cIdx(_mod(x,CH), y, _mod(z,CH))] : getBlock(x,y,z);
           };
 
-          const buf = { pos:[], uv:[], col:[], idx:[], nor:[] };
+          const buf = GREEDY ? { pos:[], uv:[], col:[], idx:[], nor:[], arect:[] }
+                             : { pos:[], uv:[], col:[], idx:[], nor:[] };
           const abuf = { pos:[], uv:[], col:[], idx:[], nor:[] };
           const gbuf = { pos:[], uv:[], col:[], idx:[], nor:[] };
           const dbuf = { pos:[], uv:[], col:[], idx:[], sway:[], nor:[] };
-        
+
           for(let lx=0;lx<CH;lx++) for(let ly=0;ly<CH;ly++) for(let lz=0;lz<CH;lz++){
             const x=cx*CH+lx, y=cy*CH+ly, z=cz*CH+lz;
             if(y<0||y>=H) continue;                 // x/z unbounded (streaming world)
@@ -1210,9 +1298,12 @@
             if(!id) continue;
             const block = blockById(id);
             const B = block.animated? abuf : (block.transparent? gbuf : buf);
-        
+
             if(decoFor(id,x,y,z)) emitCarpet(dbuf,block,x,y,z);
-        
+
+            // static opaque faces are emitted by the greedy pass below
+            if(GREEDY && B===buf) continue;
+
             for(const face of FACES){
               const [dx,dy,dz] = face.dir;
               const nid = localBlock(x+dx,y+dy,z+dz);
@@ -1239,7 +1330,9 @@
               B.idx.push(base, base+1, base+2, base+2, base+1, base+3);
             }
           }
-        
+
+          if(GREEDY) greedyStatic(cx,cy,cz, buf, localBlock);
+
           const out = {};
           const mk = (b, mat) => {
             if(!b.idx.length) return null;
@@ -1248,6 +1341,7 @@
             g.setAttribute('uv', new THREE.Float32BufferAttribute(b.uv,2));
             g.setAttribute('color', new THREE.Float32BufferAttribute(b.col,3));
             g.setAttribute('normal', new THREE.Float32BufferAttribute(b.nor,3));
+            if(b.arect) g.setAttribute('arect', new THREE.Float32BufferAttribute(b.arect,4));
             if(b.sway) g.setAttribute('sway', new THREE.Float32BufferAttribute(b.sway,1));
             g.setIndex(b.idx);
             const m = new THREE.Mesh(g, mat);
@@ -1393,6 +1487,23 @@
         let decoMat=null, matGlass=null;
         function rebuildMaterials(){
           matStatic = new THREE.MeshLambertMaterial({map:atlasTex, vertexColors:true});
+          if(GREEDY){
+            // Atlas tiling for greedy-merged quads: the per-vertex 'arect' carries the
+            // tile's atlas rect (u0,v0,du,dv); the repeating 'uv' (0..W,0..H) is wrapped
+            // with fract() and remapped into that rect. 1x1 faces (uv in [0,1]) sample the
+            // tile normally; merged WxH quads repeat it per block.
+            matStatic.onBeforeCompile = sh=>{
+              sh.vertexShader = 'attribute vec4 arect;\nvarying vec4 vArect;\n' +
+                sh.vertexShader.replace('#include <uv_vertex>', '#include <uv_vertex>\n vArect = arect;');
+              sh.fragmentShader = 'varying vec4 vArect;\n' +
+                sh.fragmentShader.replace('#include <map_fragment>',
+                  `#ifdef USE_MAP
+                     vec4 texelColor = texture2D( map, vArect.xy + fract(vUv) * vArect.zw );
+                     texelColor = mapTexelToLinear( texelColor );
+                     diffuseColor *= texelColor;
+                   #endif`);
+            };
+          }
           matAnim = new THREE.MeshLambertMaterial({map:energyTex, vertexColors:true});
           matGlass = new THREE.MeshLambertMaterial({map:atlasTex, vertexColors:true,
             transparent:true, opacity:.85, side:THREE.DoubleSide, depthWrite:false});
