@@ -381,6 +381,7 @@
             this.appPhase = 'boot';
             this._playerProfile = null;
             this._charDraft = null;
+            this._charReturnPhase = null;
             this._metaCharUiReady = false;
             this._metaCharPreviewHost = null;
             this._metaCharPreview = null;
@@ -463,6 +464,9 @@
             });
             document.getElementById('meta-character-back-btn')?.addEventListener('click', () => {
                 this.audio && this.audio.play('uiClick');
+                const ret = this._charReturnPhase; this._charReturnPhase = null;
+                if (ret === 'profiles') { this._renderProfiles(); this.setAppPhase('profiles'); return; }
+                if (ret === 'asteroidHome') { this._showAsteroidHome(); return; }
                 const back = this.appPhase === 'character' && this._playerProfile && this._playerProfile.characterSetupDone
                     ? 'modeSelect' : 'profile';
                 this.setAppPhase(back);
@@ -837,7 +841,10 @@
                 this._playerProfile.inventory.ownedWeapons = [...owned];
             }
             this._savePlayerProfile();
-            this.setAppPhase('modeSelect');
+            const ret = this._charReturnPhase; this._charReturnPhase = null;
+            if (ret === 'profiles') { this._renderProfiles(); this.setAppPhase('profiles'); }
+            else if (ret === 'asteroidHome') { this._showAsteroidHome(); }
+            else this.setAppPhase('modeSelect');
         },
 
         _showAsteroidHome() {
@@ -930,7 +937,9 @@
             if (!name) return;
             AP.createProfile(name);
             this._loadPlayerProfile();
-            this._showAsteroidHome();
+            // let the new profile pick its own character, then land back on Profiles
+            this._charReturnPhase = 'profiles';
+            this._openMetaCharacterEditor();
         },
 
         _renameProfile(id, current) {
