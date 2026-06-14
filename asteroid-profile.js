@@ -210,7 +210,9 @@
             inventory: {
                 backpack: {},
                 hotbar: Array(9).fill(null),
-                ownedWeapons: []
+                ownedWeapons: [],
+                weaponTier: {},     // { weaponId: 1..3 } — crafted upgrades (Mk I/II/III)
+                droneTier: 1        // companion Drone upgrade level (1..3)
             },
             missions: {
                 active: MISSIONS[0].id,
@@ -245,6 +247,8 @@
         p.inventory.hotbar = Array.isArray(p.inventory.hotbar) ? p.inventory.hotbar.slice(0, 9) : Array(9).fill(null);
         while (p.inventory.hotbar.length < 9) p.inventory.hotbar.push(null);
         p.inventory.ownedWeapons = Array.isArray(p.inventory.ownedWeapons) ? p.inventory.ownedWeapons.map((i) => i | 0) : [];
+        p.inventory.weaponTier = (p.inventory.weaponTier && typeof p.inventory.weaponTier === 'object') ? p.inventory.weaponTier : {};
+        p.inventory.droneTier = Math.max(1, Math.min(3, (p.inventory.droneTier | 0) || 1));
         p.missions = Object.assign({}, base.missions, p.missions || {});
         if (!MISSIONS.some((m) => m.id === p.missions.active)) p.missions.active = MISSIONS[0].id;
         p.missions.completed = Array.isArray(p.missions.completed) ? p.missions.completed : [];
@@ -513,6 +517,26 @@
         return CRAFT_RECIPES.find((r) => r.id === id) || null;
     }
 
+    // ---- Upgrade tiers (Mk I/II/III) — crafted progression for gear + Drone ----
+    function weaponTier(profile, id) {
+        const t = profile && profile.inventory && profile.inventory.weaponTier ? (profile.inventory.weaponTier[id] | 0) : 0;
+        return Math.max(1, Math.min(3, t || 1));
+    }
+    function setWeaponTier(profile, id, tier) {
+        if (!profile.inventory.weaponTier) profile.inventory.weaponTier = {};
+        profile.inventory.weaponTier[id] = Math.max(1, Math.min(3, tier | 0));
+        save(profile);
+        return profile.inventory.weaponTier[id];
+    }
+    function droneTier(profile) {
+        return Math.max(1, Math.min(3, (profile && profile.inventory ? (profile.inventory.droneTier | 0) : 1) || 1));
+    }
+    function setDroneTier(profile, tier) {
+        profile.inventory.droneTier = Math.max(1, Math.min(3, tier | 0));
+        save(profile);
+        return profile.inventory.droneTier;
+    }
+
     function countOf(counts, id) {
         if (!counts) return 0;
         const k = id | 0;
@@ -538,6 +562,10 @@
         HOME_PLANET_ID,
         recipeById,
         craftAvailability,
+        weaponTier,
+        setWeaponTier,
+        droneTier,
+        setDroneTier,
         defaultProfile,
         load,
         save,

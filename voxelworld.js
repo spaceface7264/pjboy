@@ -2441,7 +2441,10 @@ ${waveConsts}
 
         function updateWeaponLabel() {
             const el = document.getElementById('voxel-weapon-label');
-            if (el) el.textContent = weaponDef ? weaponDef.name : 'Empty hands';
+            if (!el) return;
+            if (!weaponDef) { el.textContent = 'Empty hands'; return; }
+            const t = weaponTierOf(weaponDef.id);
+            el.textContent = weaponDef.name + (t > 1 ? ' · ' + TIER_NAME[t] : '');
         }
 
         function mapVcState(state) {
@@ -2868,6 +2871,25 @@ ${waveConsts}
             return out;
         }
 
+        // ---- Upgrade tiers (Mk I/II/III): the real progression, crafted at the Refinery ----
+        // Absolute multipliers on a weapon's base power/range/fire-rate, by tier.
+        const TIER_MULT = { 1:{power:1,range:1,fire:1}, 2:{power:1.4,range:1.2,fire:1.25}, 3:{power:1.85,range:1.45,fire:1.5} };
+        const TIER_NAME = { 1:'Mk I', 2:'Mk II', 3:'Mk III' };
+        // Materials to reach each tier (from the previous one). ids: 7 Metal, 10 Crystal, 30 Void Crystal, 33 Circuit.
+        const UPGRADE_COST = { 2:[{id:7,count:4},{id:10,count:2}], 3:[{id:7,count:6},{id:10,count:4},{id:30,count:1}] };
+        const DRONE_COST   = { 2:[{id:7,count:3},{id:10,count:2}], 3:[{id:7,count:5},{id:10,count:3},{id:33,count:1}] };
+        let _weaponTierCache = {};            // {id: 1..3}, mirrors profile (avoids per-frame localStorage)
+        let _droneTierCache = 1;
+        function refreshTierCache() {
+            const AP = getProfileApi();
+            if (!AP) return;
+            const inv = (AP.load().inventory) || {};
+            _weaponTierCache = inv.weaponTier || {};
+            _droneTierCache = Math.max(1, Math.min(3, (inv.droneTier | 0) || 1));
+        }
+        function weaponTierOf(id) { return Math.max(1, Math.min(3, (_weaponTierCache[id] | 0) || 1)); }
+        function weaponTierMult(id) { return TIER_MULT[weaponTierOf(id)] || TIER_MULT[1]; }
+
         function weaponGameplayFor(id) {
             if (!fpTune) fpTune = loadFpTune();
             const defs = defaultWeaponGameplayStats();
@@ -2875,7 +2897,8 @@ ${waveConsts}
             if (!fpTune.weaponStats[id]) {
                 fpTune.weaponStats[id] = Object.assign({}, defs[id] || { power: 0.5, range: 0.5 });
             }
-            return fpTune.weaponStats[id];
+            const base = fpTune.weaponStats[id], t = weaponTierMult(id);
+            return { power: base.power * t.power, range: Math.min(1, base.range * t.range), fire: t.fire };
         }
 
         function currentAimReach() {
@@ -5889,6 +5912,7 @@ ${waveConsts}
                 Object.keys(backpack).forEach((k) => { delete backpack[k]; });
                 Object.assign(backpack, inv.backpack);
             }
+            refreshTierCache();
         }
 
         function loadOwnedWeapons() {
@@ -6707,6 +6731,80 @@ ${waveConsts}
             if (g.showMessage) g.showMessage('Crafted ' + outCount + '× ' + outName, 2200);
             if (completed && g.showMessage) g.showMessage('Survey complete: ' + completed.title, 2800);
         }
+        function weaponNameById(id) {
+            const w = weaponList().find((w) => w.id === id);
+            return w ? w.name : id;
+        }
+        function canAfford(cost) { return (cost || []).every((c) => getBackpackCount(c.id) >= c.count); }
+        // Spend materials, persist, then bump a tier (order avoids clobbering the backpack).
+        function spendCost(cost) { for (const c of cost) spendFromInventory(c.id, c.count); flushProfileState(); }
+        function upgradeWeapon(id) {
+            const AP = getProfileApi(); if (!AP) return;
+            const cur = weaponTierOf(id); if (cur >= 3) return;
+            const next = cur + 1, cost = UPGRADE_COST[next] || [];
+            if (!canAfford(cost)) { if (g.showMessage) g.showMessage('Not enough materials to upgrade', 2000); return; }
+            spendCost(cost);
+            AP.setWeaponTier(AP.load(), id, next);
+            refreshTierCache();
+            updateWeaponLabel();
+            if (g.showMessage) g.showMessage(weaponNameById(id) + ' → ' + TIER_NAME[next] + '!', 2400);
+            if (drawerOpen) renderDrawer();
+        }
+        function upgradeDrone() {
+            const AP = getProfileApi(); if (!AP) return;
+            const cur = _droneTierCache; if (cur >= 3) return;
+            const next = cur + 1, cost = DRONE_COST[next] || [];
+            if (!canAfford(cost)) { if (g.showMessage) g.showMessage('Not enough materials to upgrade the Drone', 2000); return; }
+            spendCost(cost);
+            AP.setDroneTier(AP.load(), next);
+            refreshTierCache();
+            if (g.showMessage) g.showMessage('Drone → ' + TIER_NAME[next] + '!', 2400);
+            if (drawerOpen) renderDrawer();
+        }
+        // One upgrade card (weapon or drone): name, current Mk, next cost, Upgrade button.
+        function appendUpgradeCard(body, label, curTier, cost, onUp) {
+            const maxed = curTier >= 3;
+            const ok = !maxed && canAfford(cost);
+            const card = document.createElement('div');
+            card.style.cssText = 'display:flex;align-items:center;gap:12px;padding:10px 12px;margin-bottom:8px;border-radius:10px;background:rgba(70,52,110,0.30);border:1px solid rgba(150,120,230,0.4);';
+            const info = document.createElement('div');
+            info.style.cssText = 'flex:1 1 auto;min-width:0;';
+            const title = document.createElement('div');
+            title.style.cssText = 'font-weight:700;color:#e8dcff;';
+            title.textContent = label + ' · ' + TIER_NAME[curTier];
+            info.appendChild(title);
+            const sub = document.createElement('div');
+            sub.style.cssText = 'font-size:12px;margin-top:3px;';
+            sub.innerHTML = maxed ? '<span style="color:#c0b3ff">Fully upgraded</span>'
+                : cost.map((c) => { const have = getBackpackCount(c.id), col = have >= c.count ? '#9be89b' : '#ff9b9b';
+                    return '<span style="color:' + col + '">' + refineryMatName(c.id) + ' ' + have + '/' + c.count + '</span>'; })
+                    .join('<span style="opacity:0.5"> · </span>');
+            info.appendChild(sub);
+            card.appendChild(info);
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'vx-btn' + (ok ? ' vx-btn-on' : '');
+            btn.textContent = maxed ? 'Max' : ('→ ' + TIER_NAME[curTier + 1]);
+            btn.disabled = !ok;
+            btn.style.cssText = 'flex:0 0 auto;' + (ok ? '' : 'opacity:0.45;cursor:not-allowed;');
+            if (ok) btn.addEventListener('click', onUp);
+            card.appendChild(btn);
+            body.appendChild(card);
+        }
+        function renderUpgradesSection(body) {
+            const head = document.createElement('div');
+            head.style.cssText = 'font-weight:700;color:#c0b3ff;letter-spacing:.06em;margin:14px 0 8px;';
+            head.textContent = '⬆ UPGRADES';
+            body.appendChild(head);
+            // owned weapons/tools
+            [...ownedWeapons].sort((a, b) => a - b).forEach((idx) => {
+                const w = weaponList()[idx]; if (!w) return;
+                const cur = weaponTierOf(w.id);
+                appendUpgradeCard(body, w.name, cur, UPGRADE_COST[cur + 1] || [], () => upgradeWeapon(w.id));
+            });
+            // the Drone companion
+            appendUpgradeCard(body, 'Drone companion', _droneTierCache, DRONE_COST[_droneTierCache + 1] || [], upgradeDrone);
+        }
         function renderRefineryBody(body) {
             const AP = getProfileApi();
             const recipes = AP && Array.isArray(AP.CRAFT_RECIPES) ? AP.CRAFT_RECIPES : [];
@@ -6756,6 +6854,7 @@ ${waveConsts}
                 card.appendChild(btn);
                 body.appendChild(card);
             });
+            renderUpgradesSection(body);
         }
         function getBackpackCount(id) {
             return backpack[id] || 0;
@@ -7442,7 +7541,35 @@ ${waveConsts}
           const tgtYaw=(Math.hypot(dx,dz)>0.04)?Math.atan2(dx,dz):yaw;
           let dy=tgtYaw-d._yaw; while(dy>Math.PI)dy-=Math.PI*2; while(dy<-Math.PI)dy+=Math.PI*2;
           d._yaw+=dy*(1-Math.exp(-8*dt)); d.group.rotation.y=d._yaw;
-          d.anim(elapsed, 'idle', dt);
+          if(d._zapFlash>0) d._zapFlash-=dt;
+          d.anim(elapsed, (d._zapFlash>0)?'alert':'idle', dt);
+          // ---- tiered assists (Mk I Scout · Mk II Medic · Mk III Guardian) ----
+          const tier=_droneTierCache;
+          // Mk I: auto-catalogs the nearest creature now and then (educational helper)
+          d._scanT=(d._scanT||0)-dt;
+          if(d._scanT<=0){ d._scanT=2.2;
+            let best=null,bd=12*12;
+            for(const cr of critters){ const dd=(cr.pos.x-gp.x)**2+(cr.pos.z-gp.z)**2; if(dd<bd){bd=dd;best=cr;} }
+            if(best) recordCreatureScan(best.sp);
+          }
+          // Mk II: gently mends you while it's nearby
+          if(tier>=2 && player.health<player.maxHealth) player.health=Math.min(player.maxHealth, player.health+dt*5);
+          // Mk III: zaps the nearest hostile (assist only — keeps combat player-led)
+          if(tier>=3){
+            d._zapT=(d._zapT||0)-dt;
+            if(d._zapT<=0){
+              let tgt=null,td=14*14;
+              for(const cr of critters){ if(!cr.hostile) continue;
+                const dd=(cr.pos.x-gp.x)**2+(cr.pos.y-gp.y)**2+(cr.pos.z-gp.z)**2; if(dd<td){td=dd;tgt=cr;} }
+              if(tgt){ d._zapT=1.4; d._zapFlash=0.22;
+                const ddx=tgt.pos.x-player.pos.x, ddz=tgt.pos.z-player.pos.z, inv=1/(Math.hypot(ddx,ddz)||1);
+                damageCreature(tgt, 2, ddx*inv, ddz*inv);
+                if(_AC){ for(let i=0;i<=6;i++){ const u=i/6;
+                  _AC.spark(new THREE.Vector3(gp.x+(tgt.pos.x-gp.x)*u, gp.y+(tgt.pos.y+0.5-gp.y)*u, gp.z+(tgt.pos.z-gp.z)*u),
+                    0x6fe3ff, new THREE.Vector3(0,0,0), 0.16, 0.07); } }
+              } else d._zapT=0.5;
+            }
+          }
         }
 
         /* ===================== FLIGHT ===================== *
