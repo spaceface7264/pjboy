@@ -668,9 +668,26 @@
         // to identical land ("arrive where you started") with no seam. Only the columns
         // within VIEW_R chunks of the player stay loaded/meshed.
         const WORLD_PERIOD = 3072;              // blocks before terrain repeats (must be a multiple of CH)
-        const VIEW_R = 14;                      // column-chunks meshed around the player (~fog distance). 14*CH=224 block radius; ~half the columns/draw-calls of 20, fog hides the nearer edge.
-        const KEEP_R = VIEW_R + 2;              // column-chunks kept buffered (margin for border meshing)
-        const UNLOAD_R = VIEW_R + 4;            // beyond this, columns are disposed
+        let VIEW_R = 14;                        // column-chunks meshed around the player (~fog distance). adjustable via Settings → View distance.
+        let KEEP_R = VIEW_R + 2;                // column-chunks kept buffered (margin for border meshing)
+        let UNLOAD_R = VIEW_R + 4;              // beyond this, columns are disposed
+
+        // ---- Asteroid player settings (device-global, Settings tab in the drawer) ----
+        const VX_SETTINGS_KEY = 'pjboy.voxelSettings.v1';
+        const VIEW_DIST_R = { low: 10, med: 14, high: 18 };
+        const vxSettings = { sens: 1.0, invertY: false, view: 'first', sound: 0.6, peaceful: false, dist: 'med' };
+        function loadSettings() {
+            try { const r = localStorage.getItem(VX_SETTINGS_KEY); if (r) Object.assign(vxSettings, JSON.parse(r)); } catch (_) {}
+            if (!VIEW_DIST_R[vxSettings.dist]) vxSettings.dist = 'med';
+            if (vxSettings.view !== 'third') vxSettings.view = 'first';
+        }
+        function saveSettings() { try { localStorage.setItem(VX_SETTINGS_KEY, JSON.stringify(vxSettings)); } catch (_) {} }
+        function applyViewDistance(restream) {
+            VIEW_R = VIEW_DIST_R[vxSettings.dist] || 14; KEEP_R = VIEW_R + 2; UNLOAD_R = VIEW_R + 4;
+            if (restream && _active && typeof resetStreaming === 'function') { resetStreaming(); streamInit(); }
+        }
+        function applySound() { if (g.audio && g.audio.setVolume) g.audio.setVolume(vxSettings.sound); }
+        function applySettings() { applySound(); applyViewDistance(false); }
         // Sea level sits at world y=0; a voxel (x,y,z) renders at (x, y-SEA_LEVEL, z).
         const WORLD_OFFSET = new THREE.Vector3(0, -SEA_LEVEL, 0);
         // Back-compat: some code references W/D as "the world span"; with an unbounded
@@ -2772,24 +2789,25 @@ ${waveConsts}
 
         function applyFpMouseLook(dx, dy) {
             if (!firstPerson || voxelPanelOpen()) return;
-            const fc = getFpCam();
-            orbit.theta -= dx * fc.aimSens;
-            orbit.phi = Math.max(fc.pitchMin, Math.min(fc.pitchMax, orbit.phi - dy * fc.aimSens));
+            const fc = getFpCam(), s = vxSettings.sens, iy = vxSettings.invertY ? -1 : 1;
+            orbit.theta -= dx * fc.aimSens * s;
+            orbit.phi = Math.max(fc.pitchMin, Math.min(fc.pitchMax, orbit.phi - dy * fc.aimSens * s * iy));
             player.yaw = orbit.theta + Math.PI;
         }
 
         function applyTpMouseOrbit(dx, dy) {
             if (firstPerson || voxelPanelOpen() || (!dx && !dy)) return;
-            const tc = getTpCam();
-            orbit.theta -= dx * tc.orbitSens;
-            orbit.phi = Math.max(tc.pitchMin, Math.min(tc.pitchMax, orbit.phi - dy * tc.orbitSens));
+            const tc = getTpCam(), s = vxSettings.sens, iy = vxSettings.invertY ? -1 : 1;
+            orbit.theta -= dx * tc.orbitSens * s;
+            orbit.phi = Math.max(tc.pitchMin, Math.min(tc.pitchMax, orbit.phi - dy * tc.orbitSens * s * iy));
         }
 
         // Mouse-fly: horizontal steers the ship, vertical sets nose attitude (up = climb).
         function applyFlightMouse(mx, my) {
             if (!ship) return;
-            ship.yaw -= mx * 0.0024;
-            ship.climbCmd = THREE.MathUtils.clamp((ship.climbCmd || 0) - my * 0.006, -1, 1);
+            const s = vxSettings.sens, iy = vxSettings.invertY ? -1 : 1;
+            ship.yaw -= mx * 0.0024 * s;
+            ship.climbCmd = THREE.MathUtils.clamp((ship.climbCmd || 0) - my * 0.006 * s * iy, -1, 1);
         }
 
         function isViewPointerLocked() {
@@ -5849,7 +5867,8 @@ ${waveConsts}
             { id: 'Gear',     icon: '⚔️', label: 'Gear' },
             { id: 'Refinery', icon: '⚙️', label: 'Refinery' },
             { id: 'Missions', icon: '🎯', label: 'Missions' },
-            { id: 'Worlds',   icon: '🪐', label: 'Worlds' }
+            { id: 'Worlds',   icon: '🪐', label: 'Worlds' },
+            { id: 'Settings', icon: '🎚️', label: 'Settings' }
         ];
         const INV_TINT = {
             weapon_melee:  { bg: 'rgba(42, 74, 140, 0.72)',  border: 'rgba(100, 160, 255, 0.55)', fill: '#1a3560' },
@@ -6202,6 +6221,7 @@ ${waveConsts}
             if (drawerTab === 'Catalog') { renderCatalogBody(body); return; }
             if (drawerTab === 'Missions') { renderMissionsBody(body); return; }
             if (drawerTab === 'Worlds') { renderWorldsBody(body); return; }
+            if (drawerTab === 'Settings') { renderSettingsBody(body); return; }
             if (drawerTab === 'Gear') { renderGearBody(body, ownedOnly); return; }
             renderBackpackBody(body, ownedOnly);
         }
@@ -6838,6 +6858,72 @@ ${waveConsts}
             // the Drone companion
             appendUpgradeCard(body, 'Drone companion', _droneTierCache, DRONE_COST[_droneTierCache + 1] || [], upgradeDrone);
         }
+        // ---- Settings tab (Tab/M → Settings) ----
+        function _settingsRow(body, label, sub, controlEl) {
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex;align-items:center;gap:12px;padding:10px 12px;margin-bottom:8px;border-radius:10px;background:rgba(36,100,118,0.22);border:1px solid rgba(90,200,230,0.3);';
+            const info = document.createElement('div'); info.style.cssText = 'flex:1 1 auto;min-width:0;';
+            const t = document.createElement('div'); t.style.cssText = 'font-weight:700;color:#dff6ff;'; t.textContent = label; info.appendChild(t);
+            if (sub) { const s = document.createElement('div'); s.style.cssText = 'font-size:11px;opacity:0.7;margin-top:2px;'; s.textContent = sub; info.appendChild(s); }
+            row.appendChild(info);
+            controlEl.style.flex = '0 0 auto';
+            row.appendChild(controlEl);
+            body.appendChild(row);
+        }
+        function _segControl(options, current, onPick) {
+            const wrap = document.createElement('div'); wrap.style.cssText = 'display:flex;gap:4px;';
+            options.forEach((o) => {
+                const b = document.createElement('button'); b.type = 'button';
+                b.className = 'vx-btn' + (o.val === current ? ' vx-btn-on' : '');
+                b.textContent = o.label; b.style.cssText = 'padding:5px 9px;font-size:12px;' + (o.val === current ? '' : 'opacity:0.6;');
+                b.addEventListener('click', () => onPick(o.val));
+                wrap.appendChild(b);
+            });
+            return wrap;
+        }
+        function _toggleControl(on, onToggle) {
+            return _segControl([{ label: 'Off', val: false }, { label: 'On', val: true }], !!on, onToggle);
+        }
+        function _sliderControl(min, max, step, val, onInput) {
+            const inp = document.createElement('input'); inp.type = 'range';
+            inp.min = min; inp.max = max; inp.step = step; inp.value = val;
+            inp.style.cssText = 'width:130px;accent-color:#5ac8e6;';
+            inp.addEventListener('input', () => onInput(parseFloat(inp.value)));
+            return inp;
+        }
+        function renderSettingsBody(body) {
+            const intro = document.createElement('div');
+            intro.className = 'vx-inv-empty';
+            intro.style.cssText = 'text-align:left;opacity:0.8;margin-bottom:8px;';
+            intro.textContent = 'Settings save on this device.';
+            body.appendChild(intro);
+
+            _settingsRow(body, 'Mouse sensitivity', 'How fast looking + flying turns',
+                _sliderControl(0.25, 2.5, 0.05, vxSettings.sens, (v) => { vxSettings.sens = v; saveSettings(); }));
+            _settingsRow(body, 'Invert look (Y)', 'Flip up/down for mouse + flight',
+                _toggleControl(vxSettings.invertY, (v) => { vxSettings.invertY = v; saveSettings(); renderDrawer(); }));
+            _settingsRow(body, 'Default camera', 'Which view you start in',
+                _segControl([{ label: 'First', val: 'first' }, { label: 'Third', val: 'third' }], vxSettings.view,
+                    (v) => { vxSettings.view = v; saveSettings(); setFirstPerson(v === 'first'); renderDrawer(); }));
+            _settingsRow(body, 'Sound', 'Music + effects volume',
+                _sliderControl(0, 1, 0.05, vxSettings.sound, (v) => { vxSettings.sound = v; applySound(); saveSettings(); }));
+            _settingsRow(body, 'Peaceful mode', 'No monsters — explore in calm',
+                _toggleControl(vxSettings.peaceful, (v) => { vxSettings.peaceful = v; saveSettings(); if (v) despawnHostiles(); renderDrawer(); }));
+            _settingsRow(body, 'View distance', 'Lower = smoother on slow devices',
+                _segControl([{ label: 'Low', val: 'low' }, { label: 'Med', val: 'med' }, { label: 'High', val: 'high' }], vxSettings.dist,
+                    (v) => { vxSettings.dist = v; saveSettings(); applyViewDistance(true); renderDrawer(); }));
+
+            const resetBtn = document.createElement('button');
+            resetBtn.type = 'button'; resetBtn.className = 'vx-btn'; resetBtn.textContent = 'Reset to defaults';
+            resetBtn.style.cssText = 'margin-top:6px;';
+            resetBtn.addEventListener('click', () => {
+                Object.assign(vxSettings, { sens: 1.0, invertY: false, view: 'first', sound: 0.6, peaceful: false, dist: 'med' });
+                saveSettings(); applySettings(); setFirstPerson(true); applyViewDistance(true); renderDrawer();
+                if (g.showMessage) g.showMessage('Settings reset', 1400);
+            });
+            body.appendChild(resetBtn);
+        }
+
         function renderRefineryBody(body) {
             const AP = getProfileApi();
             const recipes = AP && Array.isArray(AP.CRAFT_RECIPES) ? AP.CRAFT_RECIPES : [];
@@ -8137,8 +8223,9 @@ ${waveConsts}
         // Rare "prowling" hostile spawner — danger is special, not constant.
         let _hostileTimer = 18;
         function countHostiles(){ let n=0; for(const c of critters) if(c.hostile) n++; return n; }
+        function despawnHostiles(){ for(let i=critters.length-1;i>=0;i--) if(critters[i].hostile) despawnCritter(i); }
         function maybeSpawnHostile(dt){
-          if(!_AC) return;
+          if(!_AC || vxSettings.peaceful) return;   // Peaceful mode: no prowlers
           _hostileTimer-=dt;
           if(_hostileTimer>0) return;
           _hostileTimer = 14 + Math.random()*16;
@@ -8488,6 +8575,9 @@ ${waveConsts}
             loadDrawerTab();
             loadHotbarLayout();
             loadInventoryFromProfile();
+            loadSettings();
+            applySettings();                       // sound + view distance (VIEW_R) before streaming
+            setFirstPerson(vxSettings.view === 'first');   // default camera
             weaponIndex = loadCharCfg().weapon;
             if (weaponIndex >= 0) ownedWeapons.add(weaponIndex);
             updateWeaponLabel();
