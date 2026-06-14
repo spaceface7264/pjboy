@@ -2777,6 +2777,13 @@ ${waveConsts}
             orbit.phi = Math.max(tc.pitchMin, Math.min(tc.pitchMax, orbit.phi - dy * tc.orbitSens));
         }
 
+        // Mouse-fly: horizontal steers the ship, vertical sets nose attitude (up = climb).
+        function applyFlightMouse(mx, my) {
+            if (!ship) return;
+            ship.yaw -= mx * 0.0024;
+            ship.climbCmd = THREE.MathUtils.clamp((ship.climbCmd || 0) - my * 0.006, -1, 1);
+        }
+
         function isViewPointerLocked() {
             return !!(canvasEl && document.pointerLockElement === canvasEl);
         }
@@ -4779,6 +4786,7 @@ ${waveConsts}
         }
 
         function fireCombat() {
+            if (flying) return;
             if (!weaponDef) return;
             if (isSwordEquipped() && !canStartSwordSwing()) return;
             if (isLaserRifle() && !canStartLaserFire()) return;
@@ -7289,8 +7297,13 @@ ${waveConsts}
         // CREATURES here is the spawnable subset (peaceful Living wildlife);
         // hostiles / bosses / NPCs are registered but gated until later milestones.
         const _AC = window.AsteroidCreatures;
-        const _AS = window.AsteroidShips;   // voxel fleet registry (Drone companion)
+        const _AS = window.AsteroidShips;   // voxel fleet registry (Drone companion + ships)
         let droneCompanion = null;          // Hero-faction follower that scouts beside the player
+        let flying = false, ship = null;    // arcade flight: pilot a Hero ship (G to board/land)
+        let _flyCamPos = null, _flyCamUp = null;
+        let _shipTrails = null;             // wingtip vapor streaks at high speed
+        const _wingL = new THREE.Vector3(-1.9, 0.6, -1.2), _wingR = new THREE.Vector3(1.9, 0.6, -1.2);
+        const _tmpTip = new THREE.Vector3();
         const CREATURES = (_AC ? _AC.DEFS.filter(d => d.spawn) : []);
         const _creatureById = {}; (_AC ? _AC.DEFS : CREATURES).forEach(c => _creatureById[c.id] = c);
 
@@ -7396,8 +7409,10 @@ ${waveConsts}
           droneCompanion = null;
         }
         function updateDrone(dt){
+          if(flying){ if(droneCompanion) droneCompanion.group.visible=false; return; }  // docked while you fly
           ensureDrone();
           const d = droneCompanion; if(!d) return;
+          d.group.visible = true;
           // hover point: up and to the player's right-rear, with a slow vertical drift
           const yaw=player.yaw, fx=Math.sin(yaw), fz=Math.cos(yaw), rx=Math.cos(yaw), rz=-Math.sin(yaw);
           const tx = player.pos.x - fx*1.0 + rx*0.9;
@@ -7414,6 +7429,176 @@ ${waveConsts}
           let dy=tgtYaw-d._yaw; while(dy>Math.PI)dy-=Math.PI*2; while(dy<-Math.PI)dy+=Math.PI*2;
           d._yaw+=dy*(1-Math.exp(-8*dt)); d.group.rotation.y=d._yaw;
           d.anim(elapsed, 'idle', dt);
+        }
+
+        /* ===================== FLIGHT ===================== *
+         * Arcade Hero-ship flight (kid-forgiving): no stall, gentle
+         * auto-hover, soft terrain lift instead of crashes. The ship is
+         * the player's vehicle — while piloting, player.pos rides the
+         * ship so chunk streaming / wildlife / camera all follow.
+         *   WASD steer+thrust · Space up · Shift down · G to land        */
+        // Arcade flight tuning — momentum-based; the nose flies where you point.
+        const SHIP_TURN = 2.0;                   // keyboard yaw rate (rad/s)
+        const SHIP_MAX  = 38;                    // top cruise speed
+        const SHIP_BOOST = 1.7;                  // afterburner multiplier (Space + W)
+        const SHIP_LIFT = 26;                    // vertical climb/dive speed
+        const SHIP_RESP = 2.8;                   // velocity response — lower = more glide/inertia
+        const SHIP_CEILING = SPACE_Y1 + 120;     // fly well past the space transition (~268)
+        function shipGroundY(x,z){
+          const t=surfaceTopVox(Math.floor(x),Math.floor(z));
+          return (t!==null? t+1 : SEA_LEVEL+1) + WORLD_OFFSET.y;
+        }
+        function boardShip(){
+          if(flying){ landShip(); return; }
+          if(!_AS || !_AS.has('Interceptor')){ if(g.showMessage) g.showMessage('No ship available yet.',1600); return; }
+          ship = _AS.build('Interceptor', { scale:0.8, tilt:0 });
+          if(!ship){ return; }
+          ship.pos = player.pos.clone(); ship.pos.y += 1.4;
+          ship.vel = new THREE.Vector3();
+          ship.yaw = player.yaw; ship.pitch = 0; ship.roll = 0;
+          ship.climbCmd = 0; ship._prevYaw = player.yaw; ship._speed = 0; ship._boost = 0;
+          ship.group.position.copy(ship.pos);
+          ship.group.rotation.set(0, ship.yaw, 0);
+          scene.add(ship.group);
+          flying = true; _flyCamPos = null;
+          makeShipTrails();
+          requestViewPointerLock();           // capture the mouse so it steers the ship
+          if(av && av.group) av.group.visible = false;
+          if(fpPivot) fpPivot.visible = false;
+          playSfx('jetpack');
+          if(g.showMessage) g.showMessage('🚀 Liftoff! Mouse + WASD to fly · W thrust · Space up · G to land', 3600);
+        }
+        function landShip(){
+          if(!flying) return;
+          // set the player down on the surface beneath the ship
+          const gy = shipGroundY(ship.pos.x, ship.pos.z);
+          player.pos.set(ship.pos.x, gy + 0.02, ship.pos.z);
+          player.vel.set(0,0,0); player.knock.set(0,0,0);
+          scene.remove(ship.group); ship.dispose(); ship = null;
+          clearShipTrails();
+          flying = false; _flyCamPos = null; _flyCamUp = null;
+          if(camera) camera.up.set(0,1,0);   // un-tilt for the normal on-foot camera
+          if(av && av.group) av.group.visible = !firstPerson;
+          if(fpPivot) fpPivot.visible = firstPerson;
+          if(firstPerson) requestViewPointerLock();
+          else { releasePointerLock(); syncViewCursor(); }
+          if(g.showMessage) g.showMessage('Landed.', 1400);
+        }
+        // Wingtip vapor: a thin additive line per wingtip that fades to nothing
+        // along its length (vertex colour → black under additive blending), so it
+        // reads as a slim vortex streak. Only shows once you're moving fast.
+        function makeShipTrails(){
+          clearShipTrails();
+          const N=20;
+          const mk=()=>{
+            const geom=new THREE.BufferGeometry();
+            const pos=new Float32Array(N*3), col=new Float32Array(N*3);
+            geom.setAttribute('position', new THREE.BufferAttribute(pos,3));
+            geom.setAttribute('color', new THREE.BufferAttribute(col,3));
+            const mat=new THREE.LineBasicMaterial({ vertexColors:true, transparent:true, opacity:0,
+              blending:THREE.AdditiveBlending, depthWrite:false });
+            const line=new THREE.Line(geom,mat); line.frustumCulled=false;
+            scene.add(line);
+            return { line, geom, pos, col, pts:[], N };
+          };
+          _shipTrails=[mk(), mk()];
+        }
+        function clearShipTrails(){
+          if(!_shipTrails) return;
+          for(const tr of _shipTrails){ scene.remove(tr.line); tr.geom.dispose(); tr.line.material.dispose(); }
+          _shipTrails=null;
+        }
+        function updateShipTrails(){
+          if(!_shipTrails || !ship) return;
+          const q=ship.group.quaternion;
+          const spd01=THREE.MathUtils.clamp(((ship._speed||0)-16)/(SHIP_MAX-16),0,1);
+          const op=spd01*spd01*0.85;                       // ramps in only at speed
+          const offs=[_wingL,_wingR];
+          for(let i=0;i<2;i++){
+            const tr=_shipTrails[i];
+            _tmpTip.copy(offs[i]).applyQuaternion(q).add(ship.pos);
+            tr.pts.unshift(_tmpTip.clone());
+            if(tr.pts.length>tr.N) tr.pts.pop();
+            const n=tr.pts.length;
+            for(let j=0;j<n;j++){
+              const p=tr.pts[j]; tr.pos[j*3]=p.x; tr.pos[j*3+1]=p.y; tr.pos[j*3+2]=p.z;
+              const k=1-j/(tr.N-1);                          // bright at the tip, fades down the tail
+              tr.col[j*3]=0.78*k; tr.col[j*3+1]=0.92*k; tr.col[j*3+2]=1.0*k;
+            }
+            tr.geom.attributes.position.needsUpdate=true;
+            tr.geom.attributes.color.needsUpdate=true;
+            tr.geom.setDrawRange(0, n);
+            tr.line.material.opacity=op;
+          }
+        }
+
+        const _shipFwd=new THREE.Vector3();
+        function updateFlight(dt){
+          if(!ship) { flying=false; return; }
+          const k=keys;
+          const yawIn=(k.KeyA||k.ArrowLeft?1:0)-(k.KeyD||k.ArrowRight?1:0);
+          const thr=(k.KeyW||k.ArrowUp?1:0)-(k.KeyS||k.ArrowDown?1:0);
+          const upIn=(k.Space?1:0)-((k.ShiftLeft||k.ShiftRight)?1:0);
+          // heading: keyboard yaw (mouse yaw is applied live in applyFlightMouse)
+          ship.yaw += yawIn*SHIP_TURN*dt;
+          const boosting = (thr>0 && k.Space);             // afterburner: Space + W
+          const spd = SHIP_MAX*(boosting?SHIP_BOOST:1);
+          _shipFwd.set(Math.sin(ship.yaw),0,Math.cos(ship.yaw));
+          // vertical command: Space/Shift + a decaying mouse climb nudge
+          const climb = THREE.MathUtils.clamp(upIn + (ship.climbCmd||0), -1, 1);
+          ship.climbCmd = (ship.climbCmd||0)*Math.exp(-4*dt);
+          // momentum: ease velocity toward the commanded target (gives weight + glide)
+          const tvx=_shipFwd.x*thr*spd, tvz=_shipFwd.z*thr*spd, tvy=climb*SHIP_LIFT;
+          const r=1-Math.exp(-SHIP_RESP*dt);
+          ship.vel.x += (tvx-ship.vel.x)*r;
+          ship.vel.z += (tvz-ship.vel.z)*r;
+          ship.vel.y += (tvy-ship.vel.y)*r;
+          // integrate
+          ship.pos.x += ship.vel.x*dt; ship.pos.z += ship.vel.z*dt; ship.pos.y += ship.vel.y*dt;
+          // soft terrain lift — rise over hills instead of crashing
+          const minY=shipGroundY(ship.pos.x, ship.pos.z)+1.6;
+          if(ship.pos.y < minY){ ship.pos.y = minY; if(ship.vel.y<0) ship.vel.y=0; }
+          if(ship.pos.y > SHIP_CEILING){ ship.pos.y = SHIP_CEILING; if(ship.vel.y>0) ship.vel.y=0; }
+          // ---- orientation derived from MOTION so it reads as real flight ----
+          const hsp=Math.hypot(ship.vel.x,ship.vel.z);
+          // nose pitches to match the actual climb/dive angle
+          const pitchTarget=THREE.MathUtils.clamp(Math.atan2(ship.vel.y, Math.max(4,hsp)), -0.9, 0.9);
+          ship.pitch += (pitchTarget - ship.pitch)*(1-Math.exp(-7*dt));
+          // bank into the turn from the real yaw rate (keyboard + mouse)
+          const yawRate=(ship.yaw-(ship._prevYaw!=null?ship._prevYaw:ship.yaw))/Math.max(dt,1e-4);
+          ship._prevYaw=ship.yaw;
+          const rollTarget=THREE.MathUtils.clamp(-yawRate*0.14, -0.75, 0.75);
+          ship.roll += (rollTarget - ship.roll)*(1-Math.exp(-5*dt));
+          ship.group.position.copy(ship.pos);
+          ship.group.rotation.set(ship.pitch, ship.yaw, ship.roll);
+          ship._speed=Math.hypot(ship.vel.x,ship.vel.y,ship.vel.z); ship._boost=boosting?1:0;
+          ship.anim(elapsed, (thr>0||upIn>0||boosting)?'alert':'idle', dt);  // throttle drives flames/glow
+          updateShipTrails();
+          // the player rides the ship (keeps streaming/creatures/camera centred)
+          player.pos.copy(ship.pos); player.yaw = ship.yaw;
+          if(av && av.group) av.group.visible = false;
+        }
+        const _fcFwd=new THREE.Vector3(), _fcUp=new THREE.Vector3(), _fcDesired=new THREE.Vector3(), _fcLook=new THREE.Vector3();
+        function updateFlightCamera(dt){
+          if(!ship || !camera) return;
+          // speed-reactive FOV + pullback sell the sense of speed
+          const spd01=Math.min(1, (ship._speed||0)/(SHIP_MAX*1.3));
+          const fov=72 + spd01*12 + (ship._boost?4:0);
+          if(Math.abs(camera.fov-fov)>0.1){ camera.fov=fov; camera.updateProjectionMatrix(); }
+          // rigid chase behind the tail in the SHIP's frame → view tilts with pitch/roll
+          const q = ship.group.quaternion;
+          _fcFwd.set(0,0,1).applyQuaternion(q);            // nose is +z
+          _fcUp.set(0,1,0).applyQuaternion(q);
+          const dist=8.5 + spd01*3.4;
+          _fcDesired.copy(ship.pos).addScaledVector(_fcFwd,-dist).addScaledVector(_fcUp,3.0);
+          if(!_flyCamPos) _flyCamPos=_fcDesired.clone();
+          if(!_flyCamUp)  _flyCamUp=_fcUp.clone();
+          _flyCamPos.lerp(_fcDesired, 1-Math.exp(-12*dt));
+          _flyCamUp.lerp(_fcUp, 1-Math.exp(-10*dt)).normalize();
+          camera.position.copy(_flyCamPos);
+          camera.up.copy(_flyCamUp);
+          _fcLook.copy(ship.pos).addScaledVector(_fcFwd,6).addScaledVector(_fcUp,0.6);
+          camera.lookAt(_fcLook);
         }
 
         function _pickWanderTarget(cr){
@@ -7705,6 +7890,8 @@ ${waveConsts}
             updateClouds(dt);
             updateWater(dt);
             elapsed += dt;
+            if(flying){ updateFlight(dt); }
+            else {
             // --- movement intent in camera space ---
             let ix=0,iz=0;
             if(keys.KeyW||keys.ArrowUp) iz-=1;
@@ -7811,6 +7998,7 @@ ${waveConsts}
                     targetNameEl.textContent = '';
                 }
             }
+            }  // end on-foot update (skipped while piloting a ship)
             stepParts(dt);
             stepShotVfx(dt);
             updateCritters(dt);
@@ -7857,6 +8045,7 @@ ${waveConsts}
         function updateCamera(dt) {
             dt = dt || 1 / 60;
             if (!camera) return;
+            if (flying) { updateFlightCamera(dt); return; }
             if (firstPerson) {
                 const fc = getFpCam();
                 orbit.phi = Math.max(fc.pitchMin, Math.min(fc.pitchMax, orbit.phi));
@@ -7971,7 +8160,11 @@ ${waveConsts}
                     if (n >= 1 && n <= HOTBAR_SLOTS) selectSlot(n - 1);
                 }
                 if (e.code === 'KeyV') {
-                    setFirstPerson(!firstPerson);
+                    if (!flying) setFirstPerson(!firstPerson);
+                }
+                if (e.code === 'KeyG' && !voxelPanelOpen()) {
+                    boardShip();
+                    return;
                 }
                 if (e.code === 'KeyB') {
                     jetBoost = !jetBoost;
@@ -8031,6 +8224,7 @@ ${waveConsts}
 
             function onCanvasPointerDown(e) {
                 if (voxelPanelOpen()) return;
+                if (flying) return;        // piloting: no mining / placing / firing
                 dragging = true;
                 moved = 0;
                 px = e.clientX;
@@ -8071,6 +8265,11 @@ ${waveConsts}
             }
 
             function onCanvasPointerMove(e) {
+                if (flying) {
+                    if (isViewPointerLocked()) applyFlightMouse(e.movementX || 0, e.movementY || 0);
+                    px = e.clientX; py = e.clientY;
+                    return;
+                }
                 if (isViewPointerLocked()) {
                     const mx = e.movementX || 0;
                     const my = e.movementY || 0;
@@ -8180,6 +8379,10 @@ ${waveConsts}
             disposeGearViewer();
             disposeThumbRenderer();
             clearCritters();
+            if (ship) { scene.remove(ship.group); ship.dispose(); ship = null; }
+            clearShipTrails();
+            flying = false; _flyCamPos = null; _flyCamUp = null;
+            if (camera) camera.up.set(0,1,0);
             hideFpTuner();
             hideTpTuner();
             hideAimTuner();

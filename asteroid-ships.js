@@ -40,6 +40,18 @@
   function cyl(m,cx,cy,cz,r,h,c){for(let x=Math.floor(cx-r);x<=Math.ceil(cx+r);x++)for(let z=Math.floor(cz-r);z<=Math.ceil(cz+r);z++){if((x-cx)**2+(z-cz)**2<=r*r)for(let y=Math.floor(cy-h/2);y<=Math.ceil(cy+h/2);y++)S(m,x,y,z,c);}}
   function torusXY(m,cx,cy,cz,R,r,c){for(let x=Math.floor(cx-R-r);x<=Math.ceil(cx+R+r);x++)for(let y=Math.floor(cy-R-r);y<=Math.ceil(cy+R+r);y++)for(let z=Math.floor(cz-r);z<=Math.ceil(cz+r);z++){const q=Math.hypot(x-cx,y-cy)-R;if(q*q+(z-cz)**2<=r*r)S(m,x,y,z,c);}}
   function octa(m,cx,cy,cz,r,c){for(let x=Math.floor(cx-r);x<=Math.ceil(cx+r);x++)for(let y=Math.floor(cy-r);y<=Math.ceil(cy+r);y++)for(let z=Math.floor(cz-r);z<=Math.ceil(cz+r);z++){if(Math.abs(x-cx)+Math.abs(y-cy)+Math.abs(z-cz)<=r)S(m,x,y,z,c);}}
+  function curvedWing(m,dir,root,span,o){
+    const chord=o.chord==null?4:o.chord, taper=o.taper==null?0.5:o.taper, sweep=o.sweep==null?1:o.sweep,
+          rise=o.rise==null?0.4:o.rise, c=o.c||'hull', edge=o.edge||'accent';
+    for(let s=0;s<=span;s++){
+      const x=root.x+dir*s;
+      const back=Math.round(root.z - sweep*s*s/span);
+      const cch=Math.max(1,Math.round(chord*(1-taper*s/span)));
+      const yy=Math.round(root.y + rise*(s*s)/span);
+      for(let z=back-cch+1;z<=back;z++) S(m,x,yy,z,c);
+      S(m,x,yy,back,edge);
+    }
+  }
 
   // ---------- faction palettes (the brief's colour grammar) ----------
   const FACTIONS={
@@ -61,9 +73,23 @@
     return {m,ec:0x37e6ff,tilt:0.15,hum:130,spinFast:true,streak:false,engines:[],
       lights:[{x:2.8,y:0,z:0,c:0x37e6ff,rate:2},{x:-2.8,y:0,z:0,c:0xff3db0,rate:2.3}]};
   }
+  // Starter Hero ship — the pilotable craft for flight (nose at +z).
+  function Interceptor(){
+    const m=new Map();
+    box(m,-1,1,0,1,2,9,'hull'); box(m,-1,1,-1,-1,2,9,'hull2');
+    ellipsoid(m,0,0,8,2.4,2.0,2.4,'panel',0.7);   // canopy frame
+    dome(m,0,0,8,2.0,'glass');                      // round bubble cockpit
+    box(m,-1,1,0,1,10,11,'hull'); S(m,0,1,12,'accent');
+    for(const d of [1,-1]) curvedWing(m,d,{x:2*d,y:1,z:7},6,{chord:4,taper:0.5,sweep:1.0,rise:0.6});
+    box(m,-1,1,0,1,0,2,'panel'); box(m,-1,1,0,1,0,0,'engine');
+    return {m,ec:0x37e6ff,tilt:0.2,hum:80,streak:true,
+      engines:[{x:-0.6,y:1,z:0,flame:1},{x:0.6,y:1,z:0,flame:1}],
+      lights:[{x:8.5,y:1,z:7,c:0xff3344},{x:-8.5,y:1,z:7,c:0x33ff66},{x:0,y:2,z:12,c:0xffffff,st:1}]};
+  }
 
   const BUILDERS = {
-    'Drone': { build:Drone, faction:'hero' }
+    'Drone':       { build:Drone,       faction:'hero' },
+    'Interceptor': { build:Interceptor, faction:'hero' }
   };
 
   // ---------- renderer (one InstancedMesh per material) ----------
@@ -72,6 +98,16 @@
   const _off=[]; for(let i=0;i<SUB;i++) _off.push(-0.5+(i+0.5)/SUB);
   const _dummy=new THREE.Object3D();
   const KIND={hull:'l',hull2:'l',panel:'l',accent:'l',glass:'g',engine:'e'};
+  let _flameTex=null;
+  function flameTexture(){
+    if(_flameTex) return _flameTex;
+    const cv=document.createElement('canvas'); cv.width=cv.height=64;
+    const c=cv.getContext('2d'), g=c.createRadialGradient(32,32,0,32,32,32);
+    g.addColorStop(0,'rgba(255,244,214,0.96)'); g.addColorStop(0.42,'rgba(120,210,255,0.55)');
+    g.addColorStop(1,'rgba(40,120,255,0)');
+    c.fillStyle=g; c.fillRect(0,0,64,64);
+    _flameTex=new THREE.CanvasTexture(cv); return _flameTex;
+  }
 
   // Build a ship as an Actor. opts.scale resizes the whole rig.
   function build(name, opts){
@@ -113,8 +149,9 @@
       if(k!=='l') emissives.push({mat, base:k==='g'?0.4:1});
     }
 
-    // engine glow shells + flames (skipped for the drone; engines:[] empty)
+    // engine glow shells + thrust flames (skipped for the drone; engines:[] empty)
     function vpos(x,y,z){ return new THREE.Vector3((x-cx)*VS,(y-cy)*VS,(z-cz)*VS); }
+    const flames=[];
     for(const e of (spec.engines||[])){
       const p=vpos(e.x,e.y,e.z), sc=e.big?1.6:0.9;
       [[sc,0.26],[sc*1.7,0.12]].forEach(([s,op])=>{
@@ -122,6 +159,13 @@
           new THREE.MeshBasicMaterial({color:PAL.engine,transparent:true,opacity:op,blending:THREE.AdditiveBlending,depthWrite:false}));
         me.position.copy(p); inner.add(me); glowShells.push({mat:me.material,base:op});
       });
+      if(e.flame){
+        const fs=new THREE.Sprite(new THREE.SpriteMaterial({map:flameTexture(),color:PAL.engine,
+          blending:THREE.AdditiveBlending,depthWrite:false,transparent:true,opacity:0}));
+        fs.position.set(p.x, p.y, p.z - (e.big?0.7:0.5));   // trail out the back (-z)
+        inner.add(fs);
+        flames.push({s:fs, w:(e.big?1.1:0.7), h:(e.big?2.6:1.7)});
+      }
     }
 
     // nav lights (small emissive cubes that blink/strobe)
@@ -132,7 +176,7 @@
       navLights.push({m:me, st:l.st, rate:l.rate||1.4, phase:(l.x*0.7+l.z*1.3)%6});
     }
 
-    inner.rotation.x = spec.tilt||0;
+    inner.rotation.x = (opts.tilt!=null ? opts.tilt : (spec.tilt||0));  // vehicles pass tilt:0 (they own pitch)
     const s = opts.scale!=null?opts.scale:1;
     group.scale.setScalar(s);
 
@@ -152,9 +196,15 @@
           nl.m.material.emissiveIntensity=0.2+f*(1.8+st.alert*2);
           if(st.alert>0.5){ nl.m.material.color.setHex(PINK); nl.m.material.emissive.setHex(PINK); }
         }
-        // gentle eye-forward wobble (no full spin so the eye keeps facing ahead)
-        inner.rotation.z = Math.sin(t*1.3)*0.05;
-        inner.position.y = Math.sin(t*2.2)*0.04;
+        // thrust flames grow + brighten with throttle (st.alert)
+        for(const f of flames){ const fl=0.7+Math.sin(t*32+f.h)*0.3;
+          f.s.scale.set(f.w*(0.55+st.alert*0.6), f.h*(0.35+st.alert*1.1)*fl, 1);
+          f.s.material.opacity=Math.min(1, st.alert*1.15*fl);
+        }
+        // gentle idle shimmer — fades out under thrust so it doesn't fight banking
+        const idle=(1-st.alert);
+        inner.rotation.z = Math.sin(t*1.3)*0.05*idle;
+        inner.position.y = Math.sin(t*2.2)*0.04*idle;
       },
       dispose(){
         inner.traverse(o=>{ if(o.isInstancedMesh){ o.material.dispose(); }
