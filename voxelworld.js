@@ -675,7 +675,7 @@
         // ---- Asteroid player settings (device-global, Settings tab in the drawer) ----
         const VX_SETTINGS_KEY = 'pjboy.voxelSettings.v1';
         const VIEW_DIST_R = { low: 10, med: 14, high: 18 };
-        const vxSettings = { sens: 1.0, invertY: false, view: 'first', sound: 0.6, peaceful: false, dist: 'med' };
+        const vxSettings = { sens: 1.0, view: 'first', sound: 0.6, muted: false, peaceful: false, dist: 'med' };
         function loadSettings() {
             try { const r = localStorage.getItem(VX_SETTINGS_KEY); if (r) Object.assign(vxSettings, JSON.parse(r)); } catch (_) {}
             if (!VIEW_DIST_R[vxSettings.dist]) vxSettings.dist = 'med';
@@ -684,9 +684,16 @@
         function saveSettings() { try { localStorage.setItem(VX_SETTINGS_KEY, JSON.stringify(vxSettings)); } catch (_) {} }
         function applyViewDistance(restream) {
             VIEW_R = VIEW_DIST_R[vxSettings.dist] || 14; KEEP_R = VIEW_R + 2; UNLOAD_R = VIEW_R + 4;
+            // scale the haze to the new draw distance so the change is actually visible
+            FOG_FAR = VIEW_R * CH * 0.92; FOG_NEAR = FOG_FAR * 0.26;
+            if (g.scene && g.scene.fog) { g.scene.fog.near = FOG_NEAR; g.scene.fog.far = FOG_FAR; }
             if (restream && _active && typeof resetStreaming === 'function') { resetStreaming(); streamInit(); }
         }
-        function applySound() { if (g.audio && g.audio.setVolume) g.audio.setVolume(vxSettings.sound); }
+        function applySound() {
+            if (!g.audio) return;
+            if (g.audio.setVolume) g.audio.setVolume(vxSettings.sound);
+            if (g.audio.setEnabled) g.audio.setEnabled(!vxSettings.muted);
+        }
         function applySettings() { applySound(); applyViewDistance(false); }
         // Sea level sits at world y=0; a voxel (x,y,z) renders at (x, y-SEA_LEVEL, z).
         const WORLD_OFFSET = new THREE.Vector3(0, -SEA_LEVEL, 0);
@@ -924,7 +931,7 @@
             }
           }
         };
-        const FOG_NEAR = 48, FOG_FAR = 200;     // < VIEW_R*CH (=224) so the streamed edge stays hidden behind haze
+        let FOG_NEAR = 48, FOG_FAR = 200;       // scaled to VIEW_R so View distance is visible (haze hides the streamed edge)
 
         function _hex(n){ return '#' + (n & 0xffffff).toString(16).padStart(6, '0'); }
         function _mixHex(a, b, t){
@@ -2789,25 +2796,25 @@ ${waveConsts}
 
         function applyFpMouseLook(dx, dy) {
             if (!firstPerson || voxelPanelOpen()) return;
-            const fc = getFpCam(), s = vxSettings.sens, iy = vxSettings.invertY ? -1 : 1;
+            const fc = getFpCam(), s = vxSettings.sens;
             orbit.theta -= dx * fc.aimSens * s;
-            orbit.phi = Math.max(fc.pitchMin, Math.min(fc.pitchMax, orbit.phi - dy * fc.aimSens * s * iy));
+            orbit.phi = Math.max(fc.pitchMin, Math.min(fc.pitchMax, orbit.phi - dy * fc.aimSens * s));
             player.yaw = orbit.theta + Math.PI;
         }
 
         function applyTpMouseOrbit(dx, dy) {
             if (firstPerson || voxelPanelOpen() || (!dx && !dy)) return;
-            const tc = getTpCam(), s = vxSettings.sens, iy = vxSettings.invertY ? -1 : 1;
+            const tc = getTpCam(), s = vxSettings.sens;
             orbit.theta -= dx * tc.orbitSens * s;
-            orbit.phi = Math.max(tc.pitchMin, Math.min(tc.pitchMax, orbit.phi - dy * tc.orbitSens * s * iy));
+            orbit.phi = Math.max(tc.pitchMin, Math.min(tc.pitchMax, orbit.phi - dy * tc.orbitSens * s));
         }
 
         // Mouse-fly: horizontal steers the ship, vertical sets nose attitude (up = climb).
         function applyFlightMouse(mx, my) {
             if (!ship) return;
-            const s = vxSettings.sens, iy = vxSettings.invertY ? -1 : 1;
+            const s = vxSettings.sens;
             ship.yaw -= mx * 0.0024 * s;
-            ship.climbCmd = THREE.MathUtils.clamp((ship.climbCmd || 0) - my * 0.006 * s * iy, -1, 1);
+            ship.climbCmd = THREE.MathUtils.clamp((ship.climbCmd || 0) - my * 0.006 * s, -1, 1);
         }
 
         function isViewPointerLocked() {
@@ -6900,14 +6907,20 @@ ${waveConsts}
 
             _settingsRow(body, 'Mouse sensitivity', 'How fast looking + flying turns',
                 _sliderControl(0.25, 2.5, 0.05, vxSettings.sens, (v) => { vxSettings.sens = v; saveSettings(); }));
-            _settingsRow(body, 'Invert look (Y)', 'Flip up/down for mouse + flight',
-                _toggleControl(vxSettings.invertY, (v) => { vxSettings.invertY = v; saveSettings(); renderDrawer(); }));
             _settingsRow(body, 'Default camera', 'Which view you start in',
                 _segControl([{ label: 'First', val: 'first' }, { label: 'Third', val: 'third' }], vxSettings.view,
                     (v) => { vxSettings.view = v; saveSettings(); setFirstPerson(v === 'first'); renderDrawer(); }));
-            _settingsRow(body, 'Sound', 'Music + effects volume',
-                _sliderControl(0, 1, 0.05, vxSettings.sound, (v) => { vxSettings.sound = v; applySound(); saveSettings(); }));
-            _settingsRow(body, 'Peaceful mode', 'No monsters — explore in calm',
+            // Sound: volume slider + a Mute toggle
+            const soundWrap = document.createElement('div'); soundWrap.style.cssText = 'display:flex;align-items:center;gap:8px;';
+            soundWrap.appendChild(_sliderControl(0, 1, 0.05, vxSettings.sound, (v) => { vxSettings.sound = v; if (!vxSettings.muted) applySound(); saveSettings(); }));
+            const muteBtn = document.createElement('button'); muteBtn.type = 'button';
+            muteBtn.className = 'vx-btn' + (vxSettings.muted ? ' vx-btn-on' : '');
+            muteBtn.textContent = vxSettings.muted ? '🔇 Muted' : '🔊 Mute';
+            muteBtn.style.cssText = 'padding:5px 9px;font-size:12px;';
+            muteBtn.addEventListener('click', () => { vxSettings.muted = !vxSettings.muted; applySound(); saveSettings(); renderDrawer(); });
+            soundWrap.appendChild(muteBtn);
+            _settingsRow(body, 'Sound', 'Music + effects volume', soundWrap);
+            _settingsRow(body, 'Peaceful mode', 'No monsters or attacks — wildlife stays',
                 _toggleControl(vxSettings.peaceful, (v) => { vxSettings.peaceful = v; saveSettings(); if (v) despawnHostiles(); renderDrawer(); }));
             _settingsRow(body, 'View distance', 'Lower = smoother on slow devices',
                 _segControl([{ label: 'Low', val: 'low' }, { label: 'Med', val: 'med' }, { label: 'High', val: 'high' }], vxSettings.dist,
@@ -6917,7 +6930,7 @@ ${waveConsts}
             resetBtn.type = 'button'; resetBtn.className = 'vx-btn'; resetBtn.textContent = 'Reset to defaults';
             resetBtn.style.cssText = 'margin-top:6px;';
             resetBtn.addEventListener('click', () => {
-                Object.assign(vxSettings, { sens: 1.0, invertY: false, view: 'first', sound: 0.6, peaceful: false, dist: 'med' });
+                Object.assign(vxSettings, { sens: 1.0, view: 'first', sound: 0.6, muted: false, peaceful: false, dist: 'med' });
                 saveSettings(); applySettings(); setFirstPerson(true); applyViewDistance(true); renderDrawer();
                 if (g.showMessage) g.showMessage('Settings reset', 1400);
             });
@@ -8190,7 +8203,7 @@ ${waveConsts}
           const dy = player.pos.y - cr.pos.y;                   // vertical gap (fly up to escape)
           if(distP < aggro){                                    // aggroed: hunt the player
             cr.face=Math.atan2(-dxp,-dzp);                      // look at player
-            if(distP <= atkR && Math.abs(dy) < 2.6){            // in reach AND on the same level: strike
+            if(distP <= atkR && Math.abs(dy) < 2.6 && !vxSettings.peaceful){   // in reach + same level: strike (never in Peaceful)
               if(cr.atkCd<=0){
                 const inv=1/(distP||1);
                 applyPlayerDamage(sp.dmg||10, -dxp*inv, -dzp*inv);
