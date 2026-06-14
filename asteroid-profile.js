@@ -196,6 +196,21 @@
         return { classIdx: 0, body: 0, deco: 1, hair: 2, gear: 0, skin: 0, weapon: 0 };
     }
 
+    // Every new profile starts with at least a mining tool + a plasma pistol.
+    // Resolved by name (robust to weapon-index changes); falls back to known indices.
+    function starterWeapons() {
+        const out = [];
+        const add = (name, fb) => {
+            let i = -1;
+            try { if (typeof VoxelCharacter !== 'undefined' && VoxelCharacter.weaponIdx) i = VoxelCharacter.weaponIdx(name); } catch (_) {}
+            if (i < 0) i = fb;
+            if (i >= 0 && out.indexOf(i) < 0) out.push(i);
+        };
+        add('pickaxe', 0);   // mining tool
+        add('plasma', 6);    // plasma pistol
+        return out;
+    }
+
     function defaultProfile() {
         return {
             version: PROFILE_VERSION,
@@ -216,7 +231,7 @@
             inventory: {
                 backpack: {},
                 hotbar: Array(9).fill(null),
-                ownedWeapons: [],
+                ownedWeapons: starterWeapons(),
                 weaponTier: {},     // { weaponId: 1..3 } — crafted upgrades (Mk I/II/III)
                 droneTier: 1        // companion Drone upgrade level (1..3)
             },
