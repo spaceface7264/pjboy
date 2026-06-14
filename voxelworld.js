@@ -2661,7 +2661,11 @@ ${waveConsts}
           pos:new THREE.Vector3(), vel:new THREE.Vector3(),
           half:{x:.32,z:.32}, height:1.85,
           grounded:false, yaw:0, state:'idle',
+          // combat (forgiving by design — see the kid-first audience note)
+          health:100, maxHealth:100, invuln:0, hurtFlash:0, _noHitT:0,
+          knock:new THREE.Vector3(),   // decaying horizontal knockback impulse
         };
+        const _spawnPos = new THREE.Vector3();   // remembered respawn point
         function solidAt(wx,wy,wz){       // world-space (render) coords -> voxel solid?
           const b = getBlock(Math.floor(wx-WORLD_OFFSET.x), Math.floor(wy-WORLD_OFFSET.y),
                              Math.floor(wz-WORLD_OFFSET.z));
@@ -4781,6 +4785,13 @@ ${waveConsts}
             const t = pickTarget();
             const hasBlock = !!(t && getBlock(t.x, t.y, t.z));
             triggerCombatAnim();
+            // damage a creature under the crosshair within weapon reach (floored so melee connects)
+            const cre = pickCombatCreature(Math.max(currentAimReach(), 3.2));
+            if (cre) {
+                const ddx = cre.pos.x - player.pos.x, ddz = cre.pos.z - player.pos.z;
+                const inv = 1 / (Math.hypot(ddx, ddz) || 1);
+                damageCreature(cre, weaponDamage(), ddx * inv, ddz * inv);
+            }
             if (isSwordEquipped()) playSfx('swordSwing');
             else if (isLaserRifle()) playSfx('laserFire');
             else if (weaponDef && weaponDef.ranged) playSfx('shoot');
@@ -7186,6 +7197,8 @@ ${waveConsts}
             const place = (cx, cz, y) => {
                 player.pos.set(cx + 0.5 + WORLD_OFFSET.x, y + 1 + WORLD_OFFSET.y + 0.01, cz + 0.5 + WORLD_OFFSET.z);
                 player.vel.set(0, 0, 0);
+                _spawnPos.copy(player.pos);
+                player.health = player.maxHealth; player.invuln = 0; player.hurtFlash = 0;
             };
             for (let r = 0; r < 600; r += 2) {
                 for (let a = 0; a < (r ? 8 : 1); a++) {
@@ -7311,7 +7324,9 @@ ${waveConsts}
           const cr = { sp, actor, group:actor.group,
             pos:new THREE.Vector3(vx+0.5, baseY+flyH, vz+0.5),
             target:null, state:'idle', timer:0.5+Math.random()*2, phase:Math.random()*6,
-            face:Math.random()*Math.PI*2, flyH, alert:0 };
+            face:Math.random()*Math.PI*2, flyH, alert:0,
+            hostile:(sp.temp==='Hostile'), hp:(sp.hp||6), maxHp:(sp.hp||6),
+            hurtT:0, atkCd:0 };
           actor.group.userData.critter = cr;
           actor.group.position.copy(cr.pos);
           actor.group.rotation.y = cr.face;
@@ -7348,7 +7363,12 @@ ${waveConsts}
         function despawnCritter(i){
           const cr=critters[i];
           scene.remove(cr.group);
-          cr.group.traverse(o=>{ if(o.geometry) o.geometry.dispose(); if(o.material) o.material.dispose(); });
+          // dispose per-instance geometry/materials, but NOT the shared outline
+          // material (asteroid-creatures reuses one OUTLINE across every creature).
+          cr.group.traverse(o=>{
+            if(o.geometry) o.geometry.dispose();
+            if(o.material && !o.userData.isOutline) o.material.dispose();
+          });
           const gi=creatureGroups.indexOf(cr.group); if(gi>=0) creatureGroups.splice(gi,1);
           critters.splice(i,1);
         }
@@ -7410,6 +7430,167 @@ ${waveConsts}
           cr.target=null;                                           // boxed in → idle
         }
 
+        /* ===================== COMBAT ===================== *
+         * Forgiving by design (kid-first): generous HP, slow regen, a
+         * gentle respawn instead of a harsh loss. Wonder over war —
+         * hostiles are rare and telegraphed by colour + alert pose.   */
+
+        // Damage the player's weapon does, derived from its power stat.
+        function weaponDamage(){
+          if(!weaponDef) return 3;
+          const gp = weaponGameplayFor(weaponDef.id);
+          return Math.max(2, Math.round((gp.power||0.4)*14));
+        }
+
+        // Raycast for a creature under the crosshair within `maxDist`.
+        // Reach is measured from the PLAYER (not the camera) so it matches the
+        // mining aim and works in third-person, where the camera sits well back.
+        function pickCombatCreature(maxDist){
+          if(!creatureGroups.length) return null;
+          ray.setFromCamera({x:0,y:0}, camera);
+          const hits=ray.intersectObjects(creatureGroups, true);
+          for(const h of hits){
+            if(h.point.distanceTo(player.pos) > maxDist) continue;
+            let o=h.object; while(o){ if(o.userData && o.userData.critter) return o.userData.critter; o=o.parent; }
+          }
+          return null;
+        }
+
+        function killCreature(cr){
+          const i=critters.indexOf(cr); if(i<0) return;
+          if(_AC){ const p=cr.group.position;
+            for(let k=0;k<14;k++) _AC.spark(
+              new THREE.Vector3(p.x+(Math.random()-.5),p.y+0.4+(Math.random()-.3),p.z+(Math.random()-.5)),
+              cr.hostile?0xff7a2c:0xbfe07a,
+              new THREE.Vector3((Math.random()-.5)*2.5,Math.random()*2.5,(Math.random()-.5)*2.5),0.7,0.12); }
+          playSfx('wallBreak');
+          despawnCritter(i);
+        }
+
+        // Player hits a creature. Peaceful ones bolt; all flash + can die.
+        function damageCreature(cr, amt, dirx, dirz){
+          cr.hp -= amt; cr.hurtT = 0.18;
+          if(_AC){ const p=cr.group.position;
+            for(let k=0;k<5;k++) _AC.spark(
+              new THREE.Vector3(p.x,p.y+0.5,p.z),
+              0xffd0a0, new THREE.Vector3((Math.random()-.5)*2,Math.random()*2,(Math.random()-.5)*2),0.4,0.08); }
+          playSfx('wallChip');
+          // knock back a touch + react
+          cr.pos.x += dirx*0.35; cr.pos.z += dirz*0.35;
+          cr.alert = 1;
+          if(!cr.hostile){                                     // prey flees the hit
+            cr.target=new THREE.Vector3(cr.pos.x+dirx*9, 0, cr.pos.z+dirz*9);
+            cr.state='walk'; cr.timer=1.2;
+          }
+          if(cr.hp<=0) killCreature(cr);
+        }
+
+        // Player takes a hit. Knockback + i-frames + red flash; gentle respawn at 0.
+        function applyPlayerDamage(amt, dirx, dirz){
+          if(player.invuln>0 || player.health<=0) return;
+          player.health = Math.max(0, player.health - amt);
+          player.invuln = 0.9; player.hurtFlash = 1; player._noHitT = 0;
+          player.knock.set(dirx*8, 0, dirz*8); player.vel.y += 2.5;
+          playSfx('wallBreak');
+          if(player.health<=0) respawnPlayer();
+        }
+
+        function respawnPlayer(){
+          player.pos.copy(_spawnPos); player.vel.set(0,0,0);
+          player.health = player.maxHealth; player.invuln = 1.4; player.hurtFlash = 0;
+          if(g.showMessage) g.showMessage('Phew! Back to safe ground.', 2000);
+        }
+
+        function updatePlayerCombat(dt){
+          if(player.invuln>0) player.invuln=Math.max(0,player.invuln-dt);
+          if(player.hurtFlash>0) player.hurtFlash=Math.max(0,player.hurtFlash-dt*2.2);
+          // slow regen once you've been safe for a few seconds
+          player._noHitT += dt;
+          if(player._noHitT>4 && player.health<player.maxHealth)
+            player.health = Math.min(player.maxHealth, player.health + dt*6);
+          updateHealthHud();
+        }
+
+        let _heartsCache=-1, _heartsEl=null, _flashEl=null;
+        function updateHealthHud(){
+          if(!_heartsEl) _heartsEl=document.getElementById('voxel-hearts');
+          if(!_flashEl) _flashEl=document.getElementById('voxel-hurt-flash');
+          if(_heartsEl){
+            const totalHalf=Math.round(player.health / (player.maxHealth/10));  // 5 hearts, half-steps
+            if(totalHalf!==_heartsCache){
+              _heartsCache=totalHalf;
+              let html='';
+              for(let i=0;i<5;i++){ const left=totalHalf-i*2;
+                html+='<span class="vx-heart '+(left>=2?'full':(left===1?'half':'empty'))+'"></span>'; }
+              _heartsEl.innerHTML=html;
+            }
+          }
+          if(_flashEl) _flashEl.style.opacity=(player.hurtFlash*0.7).toFixed(3);
+        }
+
+        // Run the wander/approach/attack FSM for one hostile. Returns {moving,speed}.
+        function updateHostile(cr, dt, dxp, dzp, distP){
+          const sp=cr.sp, aggro=sp.aggro||16, atkR=sp.atkRange||2.2;
+          cr.atkCd=Math.max(0,(cr.atkCd||0)-dt);
+          let moving=false, speed=sp.speed||3.2;
+          const dy = player.pos.y - cr.pos.y;                   // vertical gap (fly up to escape)
+          if(distP < aggro){                                    // aggroed: hunt the player
+            cr.face=Math.atan2(-dxp,-dzp);                      // look at player
+            if(distP <= atkR && Math.abs(dy) < 2.6){            // in reach AND on the same level: strike
+              if(cr.atkCd<=0){
+                const inv=1/(distP||1);
+                applyPlayerDamage(sp.dmg||10, -dxp*inv, -dzp*inv);
+                cr.atkCd=sp.atkCd||1.3;
+                playSfx('swordSwing');
+              }
+            } else {                                            // close the distance (ground)
+              const inv=1/(distP||1), step=speed*dt;
+              const nx=cr.pos.x - dxp*inv*step, nz=cr.pos.z - dzp*inv*step;
+              const top=surfaceTopVox(Math.floor(nx),Math.floor(nz));
+              if(top!==null){ cr.pos.x=nx; cr.pos.z=nz; cr.pos.y=top+1+WORLD_OFFSET.y; moving=true; }
+            }
+          } else {                                              // out of range: wander like prey
+            if(cr.state==='idle'){ cr.timer-=dt;
+              if(cr.timer<=0){ cr.state='walk'; cr.timer=1.5+Math.random()*3; _pickWanderTarget(cr); }
+            } else { cr.timer-=dt; if(!cr.target||cr.timer<=0){ cr.state='idle'; cr.timer=1+Math.random()*2; cr.target=null; } }
+            if(cr.target){
+              const dx=cr.target.x-cr.pos.x, dz=cr.target.z-cr.pos.z, d=Math.hypot(dx,dz);
+              if(d<0.25){ cr.target=null; }
+              else { const inv=1/d, st=Math.min(d,speed*0.6*dt);
+                const nx=cr.pos.x+dx*inv*st, nz=cr.pos.z+dz*inv*st;
+                const top=surfaceTopVox(Math.floor(nx),Math.floor(nz));
+                if(top===null) cr.target=null;
+                else { cr.pos.x=nx; cr.pos.z=nz; cr.pos.y=top+1+WORLD_OFFSET.y; cr.face=Math.atan2(dx,dz); moving=true; } }
+            }
+          }
+          return {moving, speed, aggroed:(distP<aggro)};
+        }
+
+        // Rare "prowling" hostile spawner — danger is special, not constant.
+        let _hostileTimer = 18;
+        function countHostiles(){ let n=0; for(const c of critters) if(c.hostile) n++; return n; }
+        function maybeSpawnHostile(dt){
+          if(!_AC) return;
+          _hostileTimer-=dt;
+          if(_hostileTimer>0) return;
+          _hostileTimer = 14 + Math.random()*16;
+          if(countHostiles()>=1) return;          // at most one prowler at a time
+          if(Math.random()>0.55) return;          // ...and only sometimes
+          const prowlers=_AC.DEFS.filter(d=>d.prowl);
+          if(!prowlers.length) return;
+          const sp=prowlers[(Math.random()*prowlers.length)|0];
+          const px=Math.floor(player.pos.x), pz=Math.floor(player.pos.z);
+          for(let tryN=0; tryN<8; tryN++){
+            const ang=Math.random()*Math.PI*2, r=CRIT_MIN+Math.random()*(CRIT_VIEW-CRIT_MIN);
+            const vx=px+Math.round(Math.cos(ang)*r), vz=pz+Math.round(Math.sin(ang)*r);
+            const top=surfaceTopVox(vx,vz);
+            if(top===null) continue;
+            placeCritter(sp, vx, vz, top);
+            if(g.showMessage) g.showMessage('Something is prowling nearby…', 1800);
+            return;
+          }
+        }
+
         function updateCritters(dt){
           if(!CRITTERS_ENABLED){ if(critters.length) clearCritters(); return; }
           // maintain population
@@ -7418,6 +7599,7 @@ ${waveConsts}
             _critTimer=0.6;
             if(critters.length<CRIT_CAP) spawnOneCritter();
           }
+          maybeSpawnHostile(dt);
           // occasional ambient call from a nearby calm critter
           _chirpTimer-=dt;
           if(_chirpTimer<=0){
@@ -7434,49 +7616,56 @@ ${waveConsts}
             const distP=Math.hypot(dxp,dzp);
             if(distP>CRIT_DESPAWN){ despawnCritter(i); continue; }
             let moving=false, speed=fly?CRIT_SPEED*2.2:CRIT_SPEED;
-            // alert when the player is close; shy critters also flee
-            const startled = distP < CRIT_FLEE;
-            cr.alert += ((startled ? 1 : 0) - cr.alert) * (1 - Math.exp(-9*dt));
-            if(cr.sp.shy && startled){
-              const inv=1/(distP||1);
-              cr.target=new THREE.Vector3(cr.pos.x+dxp*inv*8, 0, cr.pos.z+dzp*inv*8);
-              cr.state='walk'; speed=CRIT_SPEED*1.8; cr.timer=0.6;
-            }
-            if(cr.state==='idle'){
-              cr.timer-=dt;
-              if(cr.timer<=0){ cr.state='walk'; cr.timer=1.5+Math.random()*3;
-                if(fly){ const a=Math.random()*Math.PI*2, d=8+Math.random()*16; cr.target=new THREE.Vector3(cr.pos.x+Math.cos(a)*d,0,cr.pos.z+Math.sin(a)*d); }
-                else _pickWanderTarget(cr); }
+            if(cr.hurtT>0) cr.hurtT-=dt;
+            if(cr.hostile){
+              const r=updateHostile(cr,dt,dxp,dzp,distP);
+              moving=r.moving;
+              cr.alert += ((r.aggroed ? 1 : 0) - cr.alert) * (1 - Math.exp(-9*dt));
             } else {
-              cr.timer-=dt;
-              if(!cr.target || cr.timer<=0){ cr.state='idle'; cr.timer=1+Math.random()*2.5; cr.target=null; }
-            }
-            if(cr.target){
-              const dx=cr.target.x-cr.pos.x, dz=cr.target.z-cr.pos.z;
-              const d=Math.hypot(dx,dz);
-              if(d<0.25){ cr.target=null; cr.state='idle'; cr.timer=1+Math.random()*2; }
-              else {
-                const step=Math.min(d, speed*dt), inv=1/d;
-                const nx=cr.pos.x+dx*inv*step, nz=cr.pos.z+dz*inv*step;
-                if(fly){                                            // flyers drift over anything
-                  const t=surfaceTopVox(Math.floor(nx),Math.floor(nz));
-                  const groundY=(t!==null? t+1 : SEA_LEVEL+1)+WORLD_OFFSET.y;
-                  cr.pos.x=nx; cr.pos.z=nz;
-                  cr.pos.y += (groundY+cr.flyH+Math.sin(elapsed*1.5+cr.phase)*0.6 - cr.pos.y)*Math.min(1,3*dt);
-                  cr.face=Math.atan2(dx,dz); moving=true;
-                } else {
-                  const top=surfaceTopVox(Math.floor(nx),Math.floor(nz));
-                  if(top===null){ cr.target=null; }                 // hit water — stop
-                  else { cr.pos.x=nx; cr.pos.z=nz; cr.pos.y=top+1+WORLD_OFFSET.y; cr.face=Math.atan2(dx,dz); moving=true; }
+              // alert when the player is close; shy critters also flee
+              const startled = distP < CRIT_FLEE;
+              cr.alert += ((startled ? 1 : 0) - cr.alert) * (1 - Math.exp(-9*dt));
+              if(cr.sp.shy && startled){
+                const inv=1/(distP||1);
+                cr.target=new THREE.Vector3(cr.pos.x+dxp*inv*8, 0, cr.pos.z+dzp*inv*8);
+                cr.state='walk'; speed=CRIT_SPEED*1.8; cr.timer=0.6;
+              }
+              if(cr.state==='idle'){
+                cr.timer-=dt;
+                if(cr.timer<=0){ cr.state='walk'; cr.timer=1.5+Math.random()*3;
+                  if(fly){ const a=Math.random()*Math.PI*2, d=8+Math.random()*16; cr.target=new THREE.Vector3(cr.pos.x+Math.cos(a)*d,0,cr.pos.z+Math.sin(a)*d); }
+                  else _pickWanderTarget(cr); }
+              } else {
+                cr.timer-=dt;
+                if(!cr.target || cr.timer<=0){ cr.state='idle'; cr.timer=1+Math.random()*2.5; cr.target=null; }
+              }
+              if(cr.target){
+                const dx=cr.target.x-cr.pos.x, dz=cr.target.z-cr.pos.z;
+                const d=Math.hypot(dx,dz);
+                if(d<0.25){ cr.target=null; cr.state='idle'; cr.timer=1+Math.random()*2; }
+                else {
+                  const step=Math.min(d, speed*dt), inv=1/d;
+                  const nx=cr.pos.x+dx*inv*step, nz=cr.pos.z+dz*inv*step;
+                  if(fly){                                            // flyers drift over anything
+                    const t=surfaceTopVox(Math.floor(nx),Math.floor(nz));
+                    const groundY=(t!==null? t+1 : SEA_LEVEL+1)+WORLD_OFFSET.y;
+                    cr.pos.x=nx; cr.pos.z=nz;
+                    cr.pos.y += (groundY+cr.flyH+Math.sin(elapsed*1.5+cr.phase)*0.6 - cr.pos.y)*Math.min(1,3*dt);
+                    cr.face=Math.atan2(dx,dz); moving=true;
+                  } else {
+                    const top=surfaceTopVox(Math.floor(nx),Math.floor(nz));
+                    if(top===null){ cr.target=null; }                 // hit water — stop
+                    else { cr.pos.x=nx; cr.pos.z=nz; cr.pos.y=top+1+WORLD_OFFSET.y; cr.face=Math.atan2(dx,dz); moving=true; }
+                  }
                 }
               }
             }
-            // drive the Actor: smooth face toward heading, set state, animate
+            // drive the Actor: smooth face toward heading (+per-species mesh offset), set state, animate
             cr.group.position.copy(cr.pos);
-            let d=cr.face-cr.group.rotation.y;
+            let d=(cr.face+(cr.sp.faceYaw||0))-cr.group.rotation.y;
             while(d>Math.PI)d-=Math.PI*2; while(d<-Math.PI)d+=Math.PI*2;
             cr.group.rotation.y += d*(1-Math.exp(-10*dt));
-            const actorState = cr.alert>0.5 ? 'alert' : (moving ? 'move' : 'idle');
+            const actorState = (cr.alert>0.5 || cr.hurtT>0) ? 'alert' : (moving ? 'move' : 'idle');
             cr.actor.anim(elapsed, actorState, dt);
           }
         }
@@ -7564,7 +7753,9 @@ ${waveConsts}
                 player.vel.y = Math.max(player.vel.y, -28*_gravMul);
                 if(jetBoost && !player.grounded){ mvx*=1.7; mvz*=1.7; }   // faster horizontal flight too
             }
-            const hv=new THREE.Vector3(mvx,0,mvz);
+            const hv=new THREE.Vector3(mvx+player.knock.x,0,mvz+player.knock.z);
+            player.knock.x -= player.knock.x*Math.min(1,6*dt);   // decay knockback shove
+            player.knock.z -= player.knock.z*Math.min(1,6*dt);
             moveAxis('x', hv.x*dt);
             moveAxis('z', hv.z*dt);
             moveAxis('y', player.vel.y*dt);
@@ -7624,6 +7815,7 @@ ${waveConsts}
             stepShotVfx(dt);
             updateCritters(dt);
             updateDrone(dt);          // Hero companion trails the player
+            updatePlayerCombat(dt);   // health regen / i-frames / hurt flash + hearts HUD
             if(_AC) _AC.stepFx(dt);   // creature breath / spore / ember particles
             updateHUD();
             updateCamera(dt);
