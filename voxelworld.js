@@ -3600,8 +3600,10 @@ ${waveConsts}
             'Metal': 'Metal', 'Alloy': 'Legering', 'Glass': 'Glas', 'Circuit': 'Kredsløb',
             'Lamp': 'Lampe', 'Hull': 'Skrog', 'Energy': 'Energi',
             'Lava': 'Lava', 'Acid': 'Syre', 'Water': 'Vand',
-            'Meadowhopper': 'Engehopper', 'Woolback': 'Uldryg', 'Dunefin': 'Klitøgle',
-            'Frostfox': 'Frostræv', 'Sporeling': 'Sporeyngel', 'Glidewing': 'Svæveving'
+            'Mosshorn': 'Moshorn', 'Frostmane': 'Frostmanke', 'Driftjelly': 'Drivgople',
+            'Sporeling': 'Sporeyngel', 'Skate': 'Svæverokke', 'Glowmoth': 'Lysmøl',
+            'Sentinel': 'Vagtdrone', 'Curator': 'Kurator', 'Warden': 'Vogter',
+            'Cinderhound': 'Glødehund', 'Razorpede': 'Klingekryb', 'Dustwurm': 'Støvorm'
         };
 
         function fillScanPanelContent(b, id, cracking, expanded) {
@@ -7036,6 +7038,7 @@ ${waveConsts}
 
         function _setupScene() {
             scene = g.scene;
+            if(_AC) _AC.setScene(scene);   // route creature breath/spore/ember fx into this scene
             camera = g.camera;
             camera.fov = firstPerson ? getFpCam().fov : getTpCam().fov;
             camera.near = 0.1;
@@ -7268,36 +7271,18 @@ ${waveConsts}
            scannable for a bilingual name + a real science fact (educational).
            Creatures are dynamic/ephemeral — NOT part of the deterministic
            terrain. They are not minable; only the scanner interacts with them. */
-        const CREATURES = [
-          { id:'meadowhopper', name:'Meadowhopper', cat:'Creature', on:[1,15], shy:true,  scale:0.8,
-            body:0x9b6b43, belly:0xd8c0a0, scanOn:1,
-            desc:'A skittish long-eared grazer of open meadows. Bolts if you step too close.',
-            sci:{ formula:'herbivore', kingdom:'Animal', fact:'Big ears do two jobs: catch faint sounds, and shed heat through their blood vessels to stay cool.' } },
-          { id:'woolback', name:'Woolback', cat:'Creature', on:[1,20], shy:false, scale:1.05,
-            body:0xe6dcc0, belly:0xcabfa0, scanOn:1,
-            desc:'A calm, woolly four-legged plodder. Lets you walk right up to it.',
-            sci:{ formula:'herbivore', kingdom:'Animal', fact:'Wool is made of keratin — the same protein as your hair and fingernails — and traps air to keep heat in.' } },
-          { id:'dunefin', name:'Dunefin', cat:'Creature', on:[4], shy:false, scale:0.7,
-            body:0xc89a5a, belly:0xe2cca0, scanOn:4,
-            desc:'A flat, sun-loving desert lizard. Basks on warm sand.',
-            sci:{ formula:'reptile', kingdom:'Animal', fact:'Reptiles are cold-blooded: they bask in sunlight to warm up because their bodies make almost no heat of their own.' } },
-          { id:'frostfox', name:'Frostfox', cat:'Creature', on:[20,8], shy:true, scale:0.8,
-            body:0xeef3fa, belly:0xffffff, scanOn:20,
-            desc:'A pale, shy hunter of the snow. Vanishes when startled.',
-            sci:{ formula:'omnivore', kingdom:'Animal', fact:'White winter fur is camouflage in snow — and its hollow hairs trap air like a tiny duvet.' } },
-          { id:'sporeling', name:'Sporeling', cat:'Creature', on:[13,36,12], shy:false, scale:0.7,
-            body:0xc46ae8, belly:0xf0c2ff, glow:true, scanOn:36,
-            desc:'A gentle glowing critter of the fungal worlds. Pulses with soft light.',
-            sci:{ formula:'alien biolum.', kingdom:'Xenofauna', fact:'Glowing without heat is real: bioluminescence mixes a chemical (luciferin) with oxygen to make cold light.' } },
-          { id:'glidewing', name:'Glidewing', cat:'Creature', on:[1,15,4,20,12,13,36], shy:false, scale:0.7,
-            body:0x6a8fc4, belly:0xd6e6f4, fly:true, scanOn:1,
-            desc:'A wide-winged glider that drifts on the wind, high over the land.',
-            sci:{ formula:'avifauna', kingdom:'Animal', fact:'A wing is an airfoil: air rushes faster over its curved top, lowering the pressure there, so the wing is pushed upward — that is lift.' } }
-        ];
-        const _creatureById = {}; CREATURES.forEach(c => _creatureById[c.id] = c);
+        // Bestiary is a shared, data-driven content registry (asteroid-creatures.js).
+        // Each def is the universal Actor: build() -> {group, st, anim(t,state,dt)}.
+        // CREATURES here is the spawnable subset (peaceful Living wildlife);
+        // hostiles / bosses / NPCs are registered but gated until later milestones.
+        const _AC = window.AsteroidCreatures;
+        const _AS = window.AsteroidShips;   // voxel fleet registry (Drone companion)
+        let droneCompanion = null;          // Hero-faction follower that scouts beside the player
+        const CREATURES = (_AC ? _AC.DEFS.filter(d => d.spawn) : []);
+        const _creatureById = {}; (_AC ? _AC.DEFS : CREATURES).forEach(c => _creatureById[c.id] = c);
 
-        const CRITTERS_ENABLED = false;  // master switch — flip to true to bring wildlife back
-        const CRIT_CAP = 14;             // max active critters
+        const CRITTERS_ENABLED = !!_AC; // wildlife on when the bestiary registry is present
+        const CRIT_CAP = 8;              // max active critters (richer box-rigs than before — keep it cozy)
         const CRIT_MIN = 26;            // never spawn closer than this to the player
         const CRIT_VIEW = 46;            // spawn out to this many blocks
         const CRIT_DESPAWN = 60;         // despawn beyond this
@@ -7307,71 +7292,31 @@ ${waveConsts}
         const creatureGroups = [];       // groups for the scan raycast
         let _critTimer = 0, _chirpTimer = 3;
 
-        // Multiply a hex colour by a factor (per-individual tint) and clamp.
-        function _tintHex(hex,f){
-          const r=Math.min(255,Math.round(((hex>>16)&255)*f)), g2=Math.min(255,Math.round(((hex>>8)&255)*f)), b=Math.min(255,Math.round((hex&255)*f));
-          return (r<<16)|(g2<<8)|b;
-        }
-        function _critMat(hex){ return new THREE.MeshLambertMaterial({ color: hex }); }
-        function _pbox(w,h,d,mat,x,y,z){ const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),mat); m.position.set(x,y,z); return m; }
-
-        // Build a procedural box creature; `tint` lightly varies its colour per
-        // individual. Returns {group, legs[], wings[]} for animation.
-        function buildCreatureMesh(sp, tint){
-          tint = tint || 1;
-          const g0 = new THREE.Group();
-          const bodyMat = _critMat(_tintHex(sp.body,tint)), bellyMat = _critMat(_tintHex(sp.belly||sp.body,tint));
-          const legs = [], wings = [];
-          if(sp.fly){
-            const body = _pbox(0.4,0.34,0.7, bodyMat, 0,0,0);
-            const head = _pbox(0.3,0.3,0.3, bodyMat, 0,0.06,0.45);
-            const beak = _pbox(0.12,0.1,0.18, bellyMat, 0,0.02,0.62);
-            const tail = _pbox(0.24,0.06,0.34, bellyMat, 0,0,-0.5);
-            g0.add(body,head,beak,tail);
-            [-1,1].forEach(s=>{ const w=_pbox(0.9,0.06,0.5, bellyMat, s*0.62,0.04,0); w.userData.side=s; g0.add(w); wings.push(w); });
-          } else {
-            const body = _pbox(0.7,0.5,1.0, bodyMat, 0, 0.55, 0);
-            const belly = _pbox(0.62,0.18,0.92, bellyMat, 0, 0.4, 0);
-            const head = _pbox(0.5,0.46,0.46, bodyMat, 0, 0.7, 0.62);
-            const snout = _pbox(0.26,0.22,0.2, bellyMat, 0, 0.62, 0.86);
-            g0.add(body, belly, head, snout);
-            if(sp.id==='meadowhopper' || sp.id==='frostfox'){             // ears
-              g0.add(_pbox(0.1,0.34,0.08, bodyMat, -0.14,1.02,0.6));
-              g0.add(_pbox(0.1,0.34,0.08, bodyMat,  0.14,1.02,0.6));
-            }
-            g0.add(_pbox(0.16,0.16,0.4, bodyMat, 0,0.6,-0.62));            // tail stub
-            [[-0.24,0.42],[0.24,0.42],[-0.24,-0.42],[0.24,-0.42]].forEach(([lx,lz])=>{
-              const leg = _pbox(0.16,0.5,0.16, bellyMat, lx,0.25,lz);
-              leg.userData.lz = lz;
-              g0.add(leg); legs.push(leg);
-            });
-            if(sp.glow){ body.material = new THREE.MeshBasicMaterial({color:_tintHex(sp.body,tint)}); }  // self-lit alien
-          }
-          g0.scale.setScalar(sp.scale||1);
-          return { group:g0, legs, wings };
-        }
-
         // World height to stand on at a voxel column: top non-water solid, or null.
         function surfaceTopVox(vx,vz){
           for(let y=H-1;y>0;y--){ const b=getBlock(vx,y,vz); if(b){ return b===WATER ? null : y; } }
           return null;
         }
 
-        // Instantiate one critter with per-individual scale + colour variation.
+        // Instantiate one critter from the bestiary registry via the Actor
+        // contract: build() -> {group, st, anim}. Per-individual scale variation.
         function placeCritter(sp, vx, vz, top){
-          const tint = 0.86 + Math.random()*0.28;
-          const built = buildCreatureMesh(sp, tint);
-          built.group.scale.multiplyScalar(0.85 + Math.random()*0.3);
+          const actor = _AC.build(sp.id);
+          if(!actor) return null;
+          const s = (sp.scale || 1) * (0.88 + Math.random()*0.24);
+          actor.group.scale.setScalar(s);
           const baseY = top+1+WORLD_OFFSET.y;
-          const flyH = 7 + Math.random()*5;
-          const cr = { sp, group:built.group, legs:built.legs, wings:built.wings,
-            pos:new THREE.Vector3(vx+0.5, sp.fly ? baseY+flyH : baseY, vz+0.5),
+          // flyers hover above the surface; low flyers (jellies, moths) stay near the player's eyeline
+          const flyH = sp.fly ? (sp.flyLow ? 2.0 + Math.random()*1.6 : 4.0 + Math.random()*3) : 0;
+          const cr = { sp, actor, group:actor.group,
+            pos:new THREE.Vector3(vx+0.5, baseY+flyH, vz+0.5),
             target:null, state:'idle', timer:0.5+Math.random()*2, phase:Math.random()*6,
-            face:Math.random()*Math.PI*2, flyH };
-          built.group.userData.critter = cr;
-          built.group.position.copy(cr.pos);
-          scene.add(built.group);
-          critters.push(cr); creatureGroups.push(built.group);
+            face:Math.random()*Math.PI*2, flyH, alert:0 };
+          actor.group.userData.critter = cr;
+          actor.group.position.copy(cr.pos);
+          actor.group.rotation.y = cr.face;
+          scene.add(actor.group);
+          critters.push(cr); creatureGroups.push(actor.group);
           return cr;
         }
 
@@ -7411,6 +7356,44 @@ ${waveConsts}
         function clearCritters(){
           for(let i=critters.length-1;i>=0;i--) despawnCritter(i);
           critters.length=0; creatureGroups.length=0; _critTimer=0;
+          if(_AC) _AC.clearFx();
+          clearDrone();
+        }
+
+        // ---- Drone companion: a small Hero ship that hovers and scouts beside you ----
+        function ensureDrone(){
+          if(droneCompanion || !_AS || !_AS.has('Drone')) return;
+          droneCompanion = _AS.build('Drone', { scale:0.5 });
+          if(!droneCompanion) return;
+          droneCompanion._yaw = player.yaw;
+          droneCompanion.group.position.copy(player.pos).add(new THREE.Vector3(0, 1.7, 0));
+          scene.add(droneCompanion.group);
+        }
+        function clearDrone(){
+          if(!droneCompanion) return;
+          scene.remove(droneCompanion.group);
+          droneCompanion.dispose();
+          droneCompanion = null;
+        }
+        function updateDrone(dt){
+          ensureDrone();
+          const d = droneCompanion; if(!d) return;
+          // hover point: up and to the player's right-rear, with a slow vertical drift
+          const yaw=player.yaw, fx=Math.sin(yaw), fz=Math.cos(yaw), rx=Math.cos(yaw), rz=-Math.sin(yaw);
+          const tx = player.pos.x - fx*1.0 + rx*0.9;
+          const ty = player.pos.y + 1.75 + Math.sin(elapsed*1.4)*0.14;
+          const tz = player.pos.z - fz*1.0 + rz*0.9;
+          // smooth chase (snaps in if it falls badly behind, e.g. after a teleport)
+          const gp=d.group.position;
+          if(Math.hypot(tx-gp.x, ty-gp.y, tz-gp.z) > 24){ gp.set(tx,ty,tz); }
+          const k=1-Math.exp(-6*dt);
+          gp.x+=(tx-gp.x)*k; gp.y+=(ty-gp.y)*k; gp.z+=(tz-gp.z)*k;
+          // face the way it's drifting, else look ahead with the player
+          const dx=tx-gp.x, dz=tz-gp.z;
+          const tgtYaw=(Math.hypot(dx,dz)>0.04)?Math.atan2(dx,dz):yaw;
+          let dy=tgtYaw-d._yaw; while(dy>Math.PI)dy-=Math.PI*2; while(dy<-Math.PI)dy+=Math.PI*2;
+          d._yaw+=dy*(1-Math.exp(-8*dt)); d.group.rotation.y=d._yaw;
+          d.anim(elapsed, 'idle', dt);
         }
 
         function _pickWanderTarget(cr){
@@ -7451,8 +7434,10 @@ ${waveConsts}
             const distP=Math.hypot(dxp,dzp);
             if(distP>CRIT_DESPAWN){ despawnCritter(i); continue; }
             let moving=false, speed=fly?CRIT_SPEED*2.2:CRIT_SPEED;
-            // shy: flee the player
-            if(cr.sp.shy && distP<CRIT_FLEE){
+            // alert when the player is close; shy critters also flee
+            const startled = distP < CRIT_FLEE;
+            cr.alert += ((startled ? 1 : 0) - cr.alert) * (1 - Math.exp(-9*dt));
+            if(cr.sp.shy && startled){
               const inv=1/(distP||1);
               cr.target=new THREE.Vector3(cr.pos.x+dxp*inv*8, 0, cr.pos.z+dzp*inv*8);
               cr.state='walk'; speed=CRIT_SPEED*1.8; cr.timer=0.6;
@@ -7486,17 +7471,13 @@ ${waveConsts}
                 }
               }
             }
-            // animate
+            // drive the Actor: smooth face toward heading, set state, animate
             cr.group.position.copy(cr.pos);
-            cr.group.rotation.y=cr.face;
-            if(fly){
-              cr.phase+=dt*9; const flap=Math.sin(cr.phase)*0.7;
-              cr.wings.forEach(w=>{ w.rotation.z = w.userData.side*flap; });
-            } else if(moving){
-              cr.phase+=dt*speed*3; const sw=Math.sin(cr.phase)*0.5;
-              cr.legs.forEach((leg,k)=>{ leg.rotation.x=(leg.userData.lz>0? sw : -sw)*(k%2?1:-1); });
-            } else cr.legs.forEach(leg=>{ leg.rotation.x*=0.8; });
-            if(cr.sp.glow){ const p=0.6+0.4*Math.sin(elapsed*3+cr.phase); cr.group.children[0].material.color.setRGB((0xc4/255)*p,(0x6a/255)*p,(0xe8/255)*p); }
+            let d=cr.face-cr.group.rotation.y;
+            while(d>Math.PI)d-=Math.PI*2; while(d<-Math.PI)d+=Math.PI*2;
+            cr.group.rotation.y += d*(1-Math.exp(-10*dt));
+            const actorState = cr.alert>0.5 ? 'alert' : (moving ? 'move' : 'idle');
+            cr.actor.anim(elapsed, actorState, dt);
           }
         }
 
@@ -7642,6 +7623,8 @@ ${waveConsts}
             stepParts(dt);
             stepShotVfx(dt);
             updateCritters(dt);
+            updateDrone(dt);          // Hero companion trails the player
+            if(_AC) _AC.stepFx(dt);   // creature breath / spore / ember particles
             updateHUD();
             updateCamera(dt);
             setUnderwaterTint(eyeInWater());
