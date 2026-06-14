@@ -414,6 +414,7 @@
                 profile: document.getElementById('meta-profile'),
                 character: document.getElementById('meta-character'),
                 asteroidHome: document.getElementById('meta-asteroid-home'),
+                profiles: document.getElementById('meta-profiles'),
                 modeSelect: document.getElementById('meta-mode-select'),
                 pause: document.getElementById('meta-pause'),
                 results: document.getElementById('meta-results'),
@@ -473,6 +474,18 @@
             document.getElementById('meta-asteroid-back-btn')?.addEventListener('click', () => {
                 this.audio && this.audio.play('uiClick');
                 this.setAppPhase('modeSelect');
+            });
+            document.getElementById('meta-asteroid-profiles-btn')?.addEventListener('click', () => {
+                this.audio && this.audio.play('uiClick');
+                this._showProfiles();
+            });
+            document.getElementById('meta-profiles-new')?.addEventListener('click', () => {
+                this.audio && this.audio.play('uiClick');
+                this._newProfile();
+            });
+            document.getElementById('meta-profiles-back')?.addEventListener('click', () => {
+                this.audio && this.audio.play('uiClick');
+                this._showAsteroidHome();
             });
             document.getElementById('meta-back-title')?.addEventListener('click', () => {
                 this.audio && this.audio.play('uiClick');
@@ -862,10 +875,88 @@
             }
         },
 
+        _showProfiles() {
+            this._renderProfiles();
+            this.setAppPhase('profiles');
+        },
+
+        _renderProfiles() {
+            const AP = getAsteroidProfileApi();
+            const wrap = document.getElementById('meta-profiles-list');
+            if (!AP || !wrap) return;
+            wrap.innerHTML = '';
+            AP.listProfiles().forEach((s) => {
+                const row = document.createElement('div');
+                row.className = 'meta-profile-slot' + (s.active ? ' active' : '');
+                const info = document.createElement('div');
+                info.className = 'mp-info';
+                const nm = document.createElement('div');
+                nm.className = 'mp-name';
+                nm.textContent = s.name;
+                if (s.active) { const b = document.createElement('span'); b.className = 'mp-badge'; b.textContent = 'ACTIVE'; nm.appendChild(b); }
+                const sub = document.createElement('div');
+                sub.className = 'mp-sub';
+                sub.textContent = s.cataloged + ' types cataloged';
+                info.appendChild(nm); info.appendChild(sub);
+                row.appendChild(info);
+                const acts = document.createElement('div');
+                acts.className = 'mp-acts';
+                const mkBtn = (label, ghost, fn) => {
+                    const b = document.createElement('button');
+                    b.type = 'button'; b.className = 'meta-btn' + (ghost ? ' meta-btn-ghost' : '');
+                    b.textContent = label; b.addEventListener('click', fn); return b;
+                };
+                if (!s.active) acts.appendChild(mkBtn('Play', false, () => this._selectProfile(s.id)));
+                acts.appendChild(mkBtn('Rename', true, () => this._renameProfile(s.id, s.name)));
+                acts.appendChild(mkBtn('Delete', true, () => this._deleteProfile(s.id)));
+                row.appendChild(acts);
+                wrap.appendChild(row);
+            });
+        },
+
+        _selectProfile(id) {
+            const AP = getAsteroidProfileApi();
+            if (AP && AP.switchProfile(id)) {
+                this.audio && this.audio.play('uiClick');
+                this._loadPlayerProfile();
+                this._showAsteroidHome();
+            }
+        },
+
+        _newProfile() {
+            const AP = getAsteroidProfileApi();
+            if (!AP) return;
+            const name = (window.prompt('Name your new profile:', 'Explorer') || '').trim();
+            if (!name) return;
+            AP.createProfile(name);
+            this._loadPlayerProfile();
+            this._showAsteroidHome();
+        },
+
+        _renameProfile(id, current) {
+            const AP = getAsteroidProfileApi();
+            if (!AP) return;
+            const name = (window.prompt('Rename profile:', current || 'Explorer') || '').trim();
+            if (!name) return;
+            AP.renameProfile(id, name);
+            if (AP.activeProfileId() === id && this._playerProfile) this._playerProfile.displayName = name.slice(0, 16);
+            this._renderProfiles();
+            this._refreshMetaProfileDisplay();
+        },
+
+        _deleteProfile(id) {
+            const AP = getAsteroidProfileApi();
+            if (!AP) return;
+            if (!window.confirm('Delete this profile and its progress? This cannot be undone.')) return;
+            if (!AP.deleteProfile(id)) { window.alert('You need at least one profile.'); return; }
+            this._loadPlayerProfile();
+            this._renderProfiles();
+        },
+
         setAppPhase(phase) {
             this.appPhase = phase;
             this.simPaused = (phase === 'title' || phase === 'profile' || phase === 'character'
-                || phase === 'modeSelect' || phase === 'asteroidHome' || phase === 'paused' || phase === 'results');
+                || phase === 'modeSelect' || phase === 'asteroidHome' || phase === 'profiles' || phase === 'paused' || phase === 'results');
             const e = this._metaEls;
             if (!e.overlay) return;
             e.overlay.hidden = false;
@@ -878,6 +969,7 @@
                 this._stopMetaCharPreview();
             }
             e.asteroidHome && (e.asteroidHome.hidden = phase !== 'asteroidHome');
+            e.profiles && (e.profiles.hidden = phase !== 'profiles');
             e.modeSelect && (e.modeSelect.hidden = phase !== 'modeSelect');
             e.campaignResume && (e.campaignResume.hidden = true);
             e.pause && (e.pause.hidden = phase !== 'paused');

@@ -309,11 +309,38 @@
         return profile;
     }
 
+    // ---- Multi-profile slots: named save files, each at slotKey(id). ----
+    // An index document tracks the slot list + which is active. The legacy
+    // single PROFILE_KEY save is migrated into the first slot on first run.
+    const PROFILES_KEY = 'pjboy.profiles.v1';
+    let _activeId = null;
+    function slotKey(id) { return 'pjboy.profile.v2.' + id; }
+    function readJSON(k) { try { const r = localStorage.getItem(k); return r ? JSON.parse(r) : null; } catch (_) { return null; } }
+    function writeJSON(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (_) {} }
+
+    function ensureIndex() {
+        let idx = readJSON(PROFILES_KEY);
+        if (idx && Array.isArray(idx.list) && idx.list.length && idx.active) { _activeId = idx.active; return idx; }
+        // bootstrap — migrate the legacy single profile into slot 'p1' if present
+        const legacy = readJSON(PROFILE_KEY);
+        if (legacy) {
+            const name = ((legacy.displayName || 'Explorer') + '').slice(0, 16);
+            writeJSON(slotKey('p1'), legacy);
+            idx = { active: 'p1', list: [{ id: 'p1', name }] };
+            try { localStorage.removeItem(PROFILE_KEY); } catch (_) {}
+        } else {
+            idx = { active: 'p1', list: [{ id: 'p1', name: 'Explorer' }] };
+        }
+        writeJSON(PROFILES_KEY, idx);
+        _activeId = idx.active;
+        return idx;
+    }
+    function activeProfileId() { return _activeId || ensureIndex().active; }
+
     function load() {
-        try {
-            const raw = localStorage.getItem(PROFILE_KEY);
-            if (raw) return normalizeProfile(JSON.parse(raw));
-        } catch (_) {}
+        const id = activeProfileId();
+        const raw = readJSON(slotKey(id));
+        if (raw) return normalizeProfile(raw);
         return migrateLegacy(normalizeProfile(null));
     }
 
@@ -321,11 +348,63 @@
         const p = normalizeProfile(profile);
         evaluateGrants(p);
         p.lastPlayed = Date.now();
-        try {
-            localStorage.setItem(PROFILE_KEY, JSON.stringify(p));
-        } catch (_) {}
+        const idx = ensureIndex();
+        writeJSON(slotKey(idx.active), p);
+        const e = idx.list.find((s) => s.id === idx.active);
+        if (e) { e.name = ((p.displayName || e.name || 'Explorer') + '').slice(0, 16); e.lastPlayed = p.lastPlayed; writeJSON(PROFILES_KEY, idx); }
         syncLegacyKeys(p);
         return p;
+    }
+
+    // Slot management — used by the Profiles screen.
+    function listProfiles() {
+        const idx = ensureIndex();
+        return idx.list.map((s) => {
+            const data = readJSON(slotKey(s.id));
+            return {
+                id: s.id,
+                name: s.name || 'Explorer',
+                active: s.id === idx.active,
+                lastPlayed: s.lastPlayed || 0,
+                cataloged: data ? journalUniqueCount(normalizeProfile(data)) : 0
+            };
+        });
+    }
+    function newSlotId(idx) { let n = 1; while (idx.list.some((s) => s.id === 'p' + n)) n++; return 'p' + n; }
+    function createProfile(name) {
+        const idx = ensureIndex();
+        const id = newSlotId(idx);
+        const nm = ((name || 'Explorer') + '').slice(0, 16) || 'Explorer';
+        idx.list.push({ id, name: nm });
+        idx.active = id; _activeId = id;
+        writeJSON(PROFILES_KEY, idx);
+        const p = normalizeProfile(null); p.displayName = nm;
+        writeJSON(slotKey(id), p);
+        return id;
+    }
+    function switchProfile(id) {
+        const idx = ensureIndex();
+        if (!idx.list.some((s) => s.id === id)) return false;
+        idx.active = id; _activeId = id; writeJSON(PROFILES_KEY, idx);
+        return true;
+    }
+    function deleteProfile(id) {
+        const idx = ensureIndex();
+        if (idx.list.length <= 1) return false;     // always keep at least one
+        idx.list = idx.list.filter((s) => s.id !== id);
+        try { localStorage.removeItem(slotKey(id)); } catch (_) {}
+        if (idx.active === id) { idx.active = idx.list[0].id; _activeId = idx.active; }
+        writeJSON(PROFILES_KEY, idx);
+        return true;
+    }
+    function renameProfile(id, name) {
+        const idx = ensureIndex();
+        const e = idx.list.find((s) => s.id === id); if (!e) return false;
+        e.name = ((name || 'Explorer') + '').slice(0, 16) || 'Explorer';
+        writeJSON(PROFILES_KEY, idx);
+        const data = readJSON(slotKey(id));
+        if (data) { data.displayName = e.name; writeJSON(slotKey(id), data); }
+        return true;
     }
 
     function syncLegacyKeys(profile) {
@@ -562,6 +641,12 @@
         HOME_PLANET_ID,
         recipeById,
         craftAvailability,
+        listProfiles,
+        activeProfileId,
+        createProfile,
+        switchProfile,
+        deleteProfile,
+        renameProfile,
         weaponTier,
         setWeaponTier,
         droneTier,

@@ -858,3 +858,51 @@ body.meta-settings-open #settings-modal.settings-over-meta {
     font-size: 0.82rem;
     color: #a8e8f0;
 }
+
+/* ===== Profiles screen (named save slots) ===== */
+.meta-profiles-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    margin-bottom: 1rem;
+    max-height: 46vh;
+    overflow-y: auto;
+}
+.meta-profile-slot {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.7rem 0.9rem;
+    border-radius: 10px;
+    background: rgba(0, 0, 0, 0.32);
+    border: 2px solid rgba(255, 179, 71, 0.3);
+}
+.meta-profile-slot.active {
+    border-color: #ffb347;
+    box-shadow: 0 0 12px rgba(255, 179, 71, 0.25);
+}
+.meta-profile-slot .mp-info { flex: 1 1 auto; min-width: 0; text-align: left; }
+.meta-profile-slot .mp-name {
+    font-weight: 700;
+    color: #ffe7c2;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+.meta-profile-slot .mp-badge {
+    font: 700 9px/1 ui-monospace, Menlo, monospace;
+    color: #1a1004;
+    background: #ffb347;
+    border-radius: 4px;
+    padding: 2px 5px;
+}
+.meta-profile-slot .mp-sub { font-size: 0.75rem; opacity: 0.7; margin-top: 2px; }
+.meta-profile-slot .mp-acts { display: flex; gap: 0.4rem; flex: 0 0 auto; }
+.meta-profile-slot .mp-acts .meta-btn {
+    width: auto;
+    min-width: 0;
+    max-width: none;
+    margin: 0;
+    padding: 0.35rem 0.6rem;
+    font-size: 0.72rem;
+}

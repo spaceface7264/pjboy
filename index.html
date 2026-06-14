@@ -11,7 +11,7 @@
     <meta http-equiv="Expires" content="0">
     <title>3D Second-Person Game - 128-bit Style</title>
     <link rel="stylesheet" href="style.css?v=64">
-    <link rel="stylesheet" href="style-meta.css?v=13">
+    <link rel="stylesheet" href="style-meta.css?v=14">
 </head>
 <body>
     <div id="gameContainer">
@@ -324,7 +324,15 @@
                 <div id="meta-claim-stats" class="meta-claim-stats"></div>
                 <div id="meta-mission-card" class="meta-mission-card"></div>
                 <button type="button" class="meta-btn meta-btn-primary" id="meta-asteroid-play-btn">Continue expedition</button>
+                <button type="button" class="meta-btn meta-btn-ghost" id="meta-asteroid-profiles-btn">Switch profile</button>
                 <button type="button" class="meta-btn meta-btn-ghost" id="meta-asteroid-back-btn">Back to modes</button>
+            </div>
+            <div id="meta-profiles" class="meta-panel meta-panel-wide" hidden>
+                <h2 class="meta-heading">Profiles</h2>
+                <p class="meta-tagline">Each profile keeps its own progress, claim and edits.</p>
+                <div id="meta-profiles-list" class="meta-profiles-list"></div>
+                <button type="button" class="meta-btn meta-btn-primary" id="meta-profiles-new">+ New profile</button>
+                <button type="button" class="meta-btn meta-btn-ghost" id="meta-profiles-back">Back</button>
             </div>
             <div id="meta-mode-select" class="meta-panel" hidden>
                 <div class="meta-profile-strip">
@@ -550,12 +558,12 @@
     <script src="planet.js?v=173"></script>
     <script src="voxel-character.js?v=36"></script>
     <script src="meta-char-preview.js?v=3"></script>
-    <script src="asteroid-profile.js?v=8"></script>
+    <script src="asteroid-profile.js?v=9"></script>
     <script src="asteroid-creatures.js?v=2"></script>
     <script src="asteroid-ships.js?v=6"></script>
     <script src="voxelworld.js?v=175"></script>
     <script src="modes.js?v=9"></script>
     <script src="game.js?v=153"></script>
-    <script src="game-modes-impl.js?v=40"></script>
+    <script src="game-modes-impl.js?v=41"></script>
 </body>
 </html>
