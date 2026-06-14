@@ -16,7 +16,7 @@ structure/landmark added here must:
   (`BLOCK_DA` in `voxelworld.js`), and a real-science `sci:` fact. A volcano teaches
   *why lava is hot*; a ruin teaches *who might have built it*. Education is the point.
 - Have **short, simple on-screen text** and a clear "you found something" moment.
-- Bias toward **science and animals** (e.g. a fossil dig, a geyser field, a nesting site).
+- Bias toward **science and space** (e.g. a fossil dig, a geyser field, a nesting site).
 
 ---
 

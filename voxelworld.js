@@ -7032,6 +7032,8 @@ ${waveConsts}
             _settingsRow(body, 'Sound', 'Music + effects volume', soundWrap);
             _settingsRow(body, 'Peaceful mode', 'No monsters or attacks — wildlife stays',
                 _toggleControl(vxSettings.peaceful, (v) => { vxSettings.peaceful = v; saveSettings(); if (v) despawnHostiles(); renderDrawer(); }));
+            _settingsRow(body, 'Training field', 'Range markers + dummies to test gear',
+                _toggleControl(!!trainingField, (v) => { if (v) buildTrainingField(); else clearTrainingField(); renderDrawer(); }));
             _settingsRow(body, 'View distance', 'Lower = smoother · Max is very heavy',
                 _segControl([{ label: 'Low', val: 'low' }, { label: 'Med', val: 'med' }, { label: 'High', val: 'high' }, { label: 'Ultra', val: 'ultra' }, { label: 'Max', val: 'max' }], vxSettings.dist,
                     (v) => { vxSettings.dist = v; saveSettings(); applyViewDistance(true); renderDrawer(); }));
@@ -8234,6 +8236,64 @@ ${waveConsts}
           cr.face = cr.heading;
         }
 
+        /* ===================== TRAINING FIELD ===================== *
+         * A toggleable test range (Settings → Training field): a distance
+         * ruler ahead + pinned creature dummies for trying weapon range,
+         * scan-lock and damage. Plus a live readout of the equipped tool's
+         * REAL numbers, so we can verify the gear-card stats match.        */
+        let trainingField = null;
+        function makeTrainLabel(text){
+          const cv=document.createElement('canvas'); cv.width=128; cv.height=64;
+          const c=cv.getContext('2d'); c.textAlign='center'; c.shadowColor='rgba(0,0,0,0.8)'; c.shadowBlur=5;
+          c.font='bold 30px ui-monospace,Menlo,monospace'; c.fillStyle='#ffd45c'; c.fillText(text,64,40);
+          const tex=new THREE.CanvasTexture(cv);
+          const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:tex,transparent:true,depthTest:false,depthWrite:false}));
+          sp.scale.set(2.4,1.2,1); return sp;
+        }
+        function buildTrainingField(){
+          clearTrainingField();
+          const grp=new THREE.Group(); scene.add(grp);
+          const yaw=player.yaw, fx=Math.sin(yaw), fz=Math.cos(yaw), rx=Math.cos(yaw), rz=-Math.sin(yaw);
+          const ox=player.pos.x, oz=player.pos.z;
+          const postGeo=new THREE.BoxGeometry(0.14,2.4,0.14);
+          const postMat=new THREE.MeshStandardMaterial({color:0xffd45c,emissive:0x6a4a08,emissiveIntensity:0.6});
+          [2,4,6,8,10,12,16,20].forEach(d=>{
+            const px=ox+fx*d, pz=oz+fz*d, gy=shipGroundY(px,pz);
+            const post=new THREE.Mesh(postGeo, postMat); post.position.set(px, gy+1.2, pz); grp.add(post);
+            const lbl=makeTrainLabel(d+' m'); lbl.position.set(px, gy+2.9, pz); grp.add(lbl);
+          });
+          trainingField={ grp };
+          // pinned dummies (off to one side) for scan + combat range tests
+          const ids=['mosshorn','frostmane','glowmoth'];
+          [4,8,12].forEach((d,i)=>{
+            const px=Math.round(ox+fx*d+rx*3), pz=Math.round(oz+fz*d+rz*3);
+            const top=surfaceTopVox(px,pz); if(top===null) return;
+            const def=_AC && _AC.get(ids[i%ids.length]); if(!def) return;
+            const cr=placeCritter(def, px, pz, top);
+            if(cr){ cr.training=true; cr.hp=99999; cr.maxHp=99999; }
+          });
+          if(g.showMessage) g.showMessage('Training field placed ahead — markers + dummies', 2400);
+        }
+        function clearTrainingField(){
+          for(let i=critters.length-1;i>=0;i--) if(critters[i].training) despawnCritter(i);
+          if(!trainingField) return;
+          scene.remove(trainingField.grp);
+          trainingField.grp.traverse(o=>{ if(o.geometry)o.geometry.dispose();
+            if(o.material){ if(o.material.map)o.material.map.dispose(); o.material.dispose(); } });
+          trainingField=null;
+        }
+        function updateTrainHud(){
+          const el=document.getElementById('voxel-train-hud'); if(!el) return;
+          if(!trainingField || !weaponDef){ el.hidden=true; return; }
+          const gp=weaponGameplayFor(weaponDef.id);
+          const mineR=currentAimReach().toFixed(1);
+          const combR=Math.max(currentAimReach(),3.2).toFixed(1);
+          el.hidden=false;
+          el.innerHTML='<b>🎯 TRAINING</b> · '+weaponDef.name+' '+TIER_NAME[weaponTierOf(weaponDef.id)]
+            +'<br>combat reach <b>'+combR+'m</b> · mine reach <b>'+mineR+'m</b>'
+            +'<br>damage <b>'+weaponDamage()+'</b> · power '+(gp.power).toFixed(2)+' · range '+(gp.range).toFixed(2);
+        }
+
         /* ===================== COMBAT ===================== *
          * Forgiving by design (kid-first): generous HP, slow regen, a
          * gentle respawn instead of a harsh loss. Wonder over war —
@@ -8416,6 +8476,15 @@ ${waveConsts}
           }
           for(let i=critters.length-1;i>=0;i--){
             const cr=critters[i];
+            if(cr.training){                          // pinned test dummy: stay put, face player, no AI/despawn
+              cr.group.position.copy(cr.pos);
+              const fyaw=Math.atan2(player.pos.x-cr.pos.x, player.pos.z-cr.pos.z)+(cr.sp.faceYaw||0);
+              let dd=fyaw-cr.group.rotation.y; while(dd>Math.PI)dd-=Math.PI*2; while(dd<-Math.PI)dd+=Math.PI*2;
+              cr.group.rotation.y+=dd*(1-Math.exp(-8*dt));
+              if(cr.hurtT>0) cr.hurtT-=dt;
+              cr.actor.anim(elapsed, cr.hurtT>0?'alert':'idle', dt);
+              continue;
+            }
             const fly=cr.sp.fly;
             const dxp=cr.pos.x-player.pos.x, dzp=cr.pos.z-player.pos.z;
             const distP=Math.hypot(dxp,dzp);
@@ -8637,6 +8706,7 @@ ${waveConsts}
             updateDrone(dt);          // Hero companion trails the player
             updateStarGate(dt);       // Ancient gate glow + proximity hint
             updatePlayerCombat(dt);   // health regen / i-frames / hurt flash + hearts HUD
+            updateTrainHud();         // training-field live weapon readout
             if(_AC) _AC.stepFx(dt);   // creature breath / spore / ember particles
             updateHUD();
             updateCamera(dt);
@@ -9026,7 +9096,7 @@ ${waveConsts}
             clearCritters();
             if (ship) { scene.remove(ship.group); ship.dispose(); ship = null; }
             clearShipTrails(); clearSpace();
-            clearStarGate();
+            clearStarGate(); clearTrainingField();
             flying = false; _flyCamPos = null; _flyCamUp = null;
             if (camera) camera.up.set(0,1,0);
             hideFpTuner();
