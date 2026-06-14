@@ -442,7 +442,7 @@
             });
             document.getElementById('meta-profile-change-btn')?.addEventListener('click', () => {
                 this.audio && this.audio.play('uiClick');
-                this.setAppPhase('profile');
+                this._showProfiles('modeSelect');
             });
             document.getElementById('meta-character-edit-btn')?.addEventListener('click', () => {
                 this.audio && this.audio.play('uiClick');
@@ -481,7 +481,7 @@
             });
             document.getElementById('meta-asteroid-profiles-btn')?.addEventListener('click', () => {
                 this.audio && this.audio.play('uiClick');
-                this._showProfiles();
+                this._showProfiles('asteroidHome');
             });
             document.getElementById('meta-profiles-new')?.addEventListener('click', () => {
                 this.audio && this.audio.play('uiClick');
@@ -489,7 +489,7 @@
             });
             document.getElementById('meta-profiles-back')?.addEventListener('click', () => {
                 this.audio && this.audio.play('uiClick');
-                this._showAsteroidHome();
+                this._exitProfiles();
             });
             document.getElementById('meta-back-title')?.addEventListener('click', () => {
                 this.audio && this.audio.play('uiClick');
@@ -893,9 +893,15 @@
             }
         },
 
-        _showProfiles() {
+        _showProfiles(returnPhase) {
+            this._profilesReturn = returnPhase || 'asteroidHome';
             this._renderProfiles();
             this.setAppPhase('profiles');
+        },
+
+        _exitProfiles() {
+            if (this._profilesReturn === 'modeSelect') this.setAppPhase('modeSelect');
+            else this._showAsteroidHome();
         },
 
         _renderProfiles() {
@@ -924,7 +930,11 @@
                     b.type = 'button'; b.className = 'meta-btn' + (ghost ? ' meta-btn-ghost' : '');
                     b.textContent = label; b.addEventListener('click', fn); return b;
                 };
-                if (!s.active) acts.appendChild(mkBtn('Play', false, () => this._selectProfile(s.id)));
+                if (!s.active) {
+                    acts.appendChild(mkBtn('Switch', false, () => this._selectProfile(s.id)));
+                    row.style.cursor = 'pointer';
+                    row.addEventListener('click', (ev) => { if (!ev.target.closest('button')) this._selectProfile(s.id); });
+                }
                 acts.appendChild(mkBtn('Rename', true, () => this._renameProfile(s.id, s.name)));
                 acts.appendChild(mkBtn('Delete', true, () => this._deleteProfile(s.id)));
                 row.appendChild(acts);
@@ -937,7 +947,7 @@
             if (AP && AP.switchProfile(id)) {
                 this.audio && this.audio.play('uiClick');
                 this._loadPlayerProfile();
-                this._showAsteroidHome();
+                this._exitProfiles();
             }
         },
 
