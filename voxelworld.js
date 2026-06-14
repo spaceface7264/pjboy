@@ -7462,11 +7462,15 @@ ${waveConsts}
           const t=surfaceTopVox(Math.floor(x),Math.floor(z));
           return (t!==null? t+1 : SEA_LEVEL+1) + WORLD_OFFSET.y;
         }
+        const FLEET = (_AS && _AS.PILOTABLE) ? _AS.PILOTABLE : [{name:'Interceptor',scale:0.8,speed:1,turn:1}];
+        let shipSel = 0;                          // which Hero ship you'll launch / are flying
         function boardShip(){
           if(flying){ landShip(); return; }
-          if(!_AS || !_AS.has('Interceptor')){ if(g.showMessage) g.showMessage('No ship available yet.',1600); return; }
-          ship = _AS.build('Interceptor', { scale:0.8, tilt:0 });
+          const sel=FLEET[shipSel];
+          if(!_AS || !_AS.has(sel.name)){ if(g.showMessage) g.showMessage('No ship available yet.',1600); return; }
+          ship = _AS.build(sel.name, { scale:sel.scale, tilt:0 });
           if(!ship){ return; }
+          ship.name=sel.name; ship.speedMul=sel.speed; ship.turnMul=sel.turn;
           ship.pos = player.pos.clone(); ship.pos.y += 1.4;
           ship.vel = new THREE.Vector3();
           ship.yaw = player.yaw; ship.pitch = 0; ship.roll = 0;
@@ -7480,7 +7484,27 @@ ${waveConsts}
           if(av && av.group) av.group.visible = false;
           if(fpPivot) fpPivot.visible = false;
           playSfx('jetpack');
-          if(g.showMessage) g.showMessage('🚀 Liftoff! Mouse + WASD to fly · W thrust · Space up · G to land', 3600);
+          if(g.showMessage) g.showMessage('🚀 Liftoff! '+sel.name+' · WASD+mouse fly · Space up · C swap ship · G land', 3600);
+        }
+        // Swap which Hero ship you fly (C). On the ground it just selects; in flight
+        // it hot-swaps the hull, carrying your position/velocity onto the new ship.
+        function cycleShip(){
+          shipSel = (shipSel+1) % FLEET.length;
+          const sel=FLEET[shipSel];
+          if(!flying){ if(g.showMessage) g.showMessage('Ship: '+sel.name+' — G to launch',2000); return; }
+          if(!_AS || !_AS.has(sel.name)) return;
+          const old=ship;
+          const next=_AS.build(sel.name, { scale:sel.scale, tilt:0 });
+          if(!next) return;
+          next.name=sel.name; next.speedMul=sel.speed; next.turnMul=sel.turn;
+          next.pos=old.pos; next.vel=old.vel; next.yaw=old.yaw; next.pitch=old.pitch; next.roll=old.roll;
+          next.climbCmd=old.climbCmd||0; next._prevYaw=old._prevYaw!=null?old._prevYaw:old.yaw;
+          next._speed=old._speed||0; next._boost=0;
+          next.group.position.copy(old.group.position); next.group.rotation.copy(old.group.rotation);
+          scene.add(next.group);
+          scene.remove(old.group); old.dispose();
+          ship=next;
+          if(g.showMessage) g.showMessage('Swapped to '+sel.name, 1500);
         }
         function landShip(){
           if(!flying) return;
@@ -7554,10 +7578,10 @@ ${waveConsts}
           const thr=(k.KeyW||k.ArrowUp?1:0)-(k.KeyS||k.ArrowDown?1:0);
           const upIn=(k.Space?1:0)-((k.ShiftLeft||k.ShiftRight)?1:0);
           // heading: keyboard yaw (mouse yaw is applied live in applyFlightMouse)
-          ship.yaw += yawIn*SHIP_TURN*dt;
+          ship.yaw += yawIn*SHIP_TURN*(ship.turnMul||1)*dt;
           const boosting = (thr>0 && k.Space);             // afterburner: Space + W
           const inSpace = ship.pos.y > SPACE_ENTER_Y;      // open space — worlds are far apart
-          const spd = SHIP_MAX*(boosting?SHIP_BOOST:1)*(inSpace?1.7:1);
+          const spd = SHIP_MAX*(ship.speedMul||1)*(boosting?SHIP_BOOST:1)*(inSpace?1.7:1);
           _shipFwd.set(Math.sin(ship.yaw),0,Math.cos(ship.yaw));
           // vertical command: Space/Shift + a decaying mouse climb nudge
           const climb = THREE.MathUtils.clamp(upIn + (ship.climbCmd||0), -1, 1);
@@ -8364,6 +8388,10 @@ ${waveConsts}
                 }
                 if (e.code === 'KeyG' && !voxelPanelOpen()) {
                     boardShip();
+                    return;
+                }
+                if (e.code === 'KeyC' && !voxelPanelOpen()) {
+                    cycleShip();
                     return;
                 }
                 if (e.code === 'KeyB') {
