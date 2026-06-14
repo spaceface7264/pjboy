@@ -864,6 +864,13 @@
             if (tag) {
                 tag.textContent = (p.displayName || 'Explorer') + ' — progress saves on this device until cloud accounts ship.';
             }
+            // fresh profile (no in-world progress yet) → "Start", otherwise "Continue"
+            const playBtn = document.getElementById('meta-asteroid-play-btn');
+            if (playBtn) {
+                const done = (p.missions && Array.isArray(p.missions.completed)) ? p.missions.completed.length : 0;
+                const fresh = (summary.cataloged | 0) === 0 && (summary.edits | 0) === 0 && done === 0;
+                playBtn.textContent = fresh ? 'Start expedition' : 'Continue expedition';
+            }
             statsEl.innerHTML = `
                 <div class="meta-claim-stat"><b>${summary.name}</b>Claim</div>
                 <div class="meta-claim-stat"><b>0x${summary.seedHex}</b>Seed</div>
