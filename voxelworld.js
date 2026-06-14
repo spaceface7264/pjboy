@@ -3625,6 +3625,7 @@ ${waveConsts}
         let scanExpanded = false;
         let _scanSticky = null;
         const _scanWorld = new THREE.Vector3();
+        const _scanWorld2 = new THREE.Vector3(), _scanRight = new THREE.Vector3();
 
         function isScanCompactActive(t) {
             return !voxelPanelOpen() && canScanBlocks() && focusAimBlend > 0.08
@@ -4152,6 +4153,7 @@ ${waveConsts}
             }
             if (link) link.hidden = true;
             if (marker) marker.hidden = true;
+            hideScanFrame();
             formulaViewer.active = false;
             _scanBlockId = -1;
             resizeFormulaCanvas(false);
@@ -4163,7 +4165,29 @@ ${waveConsts}
             return `M ${x1} ${y1} L ${elbowX} ${y1} L ${elbowX} ${y2} L ${x2} ${y2}`;
         }
 
-        function updateScanConnector(t, alpha) {
+        // Corner-bracket reticle around a scanned creature (screen-space).
+        function updateScanFrame(cr, alpha) {
+            const frame = document.getElementById('voxel-scan-frame');
+            if (!frame || !camera) return;
+            const sc = (cr.actor && cr.actor.group && cr.actor.group.scale.x) || 1;
+            const cy = cr.pos.y + 0.6 * sc;
+            const w = window.innerWidth, h = window.innerHeight;
+            _scanWorld.set(cr.pos.x, cy, cr.pos.z).project(camera);
+            if (_scanWorld.z > 1) { frame.hidden = true; return; }
+            const cx = (_scanWorld.x * 0.5 + 0.5) * w, cyp = (-_scanWorld.y * 0.5 + 0.5) * h;
+            _scanRight.setFromMatrixColumn(camera.matrixWorld, 0);   // world-space camera right
+            const R = 0.7 * sc + 0.55;
+            _scanWorld2.set(cr.pos.x + _scanRight.x * R, cy + _scanRight.y * R, cr.pos.z + _scanRight.z * R).project(camera);
+            const ex = (_scanWorld2.x * 0.5 + 0.5) * w, ey = (-_scanWorld2.y * 0.5 + 0.5) * h;
+            const r = Math.max(24, Math.min(160, Math.hypot(ex - cx, ey - cyp)));
+            frame.style.left = cx + 'px'; frame.style.top = cyp + 'px';
+            frame.style.width = (r * 2) + 'px'; frame.style.height = (r * 2) + 'px';
+            frame.style.opacity = String(alpha);
+            frame.hidden = false;
+        }
+        function hideScanFrame() { const f = document.getElementById('voxel-scan-frame'); if (f) f.hidden = true; }
+
+        function updateScanConnector(t, alpha, screen, hideMarker) {
             const link = document.getElementById('voxel-scan-link');
             const pathGlow = document.getElementById('voxel-scan-path-glow');
             const pathCore = document.getElementById('voxel-scan-path');
@@ -4177,8 +4201,8 @@ ${waveConsts}
             if (!link || !pathGlow || !pathCore || !pathPulse || !anchorBlock || !anchorPanel
                 || !marker || !panel || !camera) return;
 
-            const screen = getScanBlockScreen(t);
-            const { bx, by, inFrustum, w, h } = screen;
+            const scr = screen || getScanBlockScreen(t);
+            const { bx, by, inFrustum, w, h } = scr;
             link.setAttribute('viewBox', `0 0 ${w} ${h}`);
 
             if (!inFrustum) {
@@ -4222,31 +4246,32 @@ ${waveConsts}
             anchorPanel.style.opacity = String(alpha);
             link.hidden = false;
 
-            marker.style.left = `${bx}px`;
-            marker.style.top = `${by}px`;
-            marker.style.opacity = String(alpha);
-            marker.hidden = false;
+            if (hideMarker) {
+                marker.hidden = true;
+            } else {
+                marker.style.left = `${bx}px`;
+                marker.style.top = `${by}px`;
+                marker.style.opacity = String(alpha);
+                marker.hidden = false;
+            }
         }
 
         const SCAN_PAD = 12;
         const SCAN_BLOCK_GAP = 26;
         const SCAN_BOTTOM_RESERVE = 108;
 
-        function getScanBlockScreen(t) {
-            const w = window.innerWidth;
-            const h = window.innerHeight;
-            _scanWorld.set(
-                WORLD_OFFSET.x + t.x + 0.5,
-                WORLD_OFFSET.y + t.y + 0.5,
-                WORLD_OFFSET.z + t.z + 0.5
-            );
-            _scanWorld.project(camera);
+        function projectScan(wx, wy, wz) {
+            const w = window.innerWidth, h = window.innerHeight;
+            _scanWorld.set(wx, wy, wz).project(camera);
             let bx = (_scanWorld.x * 0.5 + 0.5) * w;
             let by = (-_scanWorld.y * 0.5 + 0.5) * h;
             const inFrustum = _scanWorld.z <= 1;
             bx = Math.max(SCAN_PAD, Math.min(w - SCAN_PAD, bx));
             by = Math.max(SCAN_PAD, Math.min(h - SCAN_PAD, by));
             return { bx, by, inFrustum, w, h };
+        }
+        function getScanBlockScreen(t) {
+            return projectScan(WORLD_OFFSET.x + t.x + 0.5, WORLD_OFFSET.y + t.y + 0.5, WORLD_OFFSET.z + t.z + 0.5);
         }
 
         function scanPanelMaxHeight(h) {
@@ -4284,10 +4309,10 @@ ${waveConsts}
             return { left: x, top: y };
         }
 
-        function layoutScanPanel(t) {
+        function layoutScanPanel(t, screen) {
             const panel = document.getElementById('voxel-scan');
             if (!panel || !camera) return null;
-            const { bx, by, w, h } = getScanBlockScreen(t);
+            const { bx, by, w, h } = screen || getScanBlockScreen(t);
 
             panel.style.transform = 'none';
             panel.style.right = 'auto';
@@ -4373,17 +4398,32 @@ ${waveConsts}
             const cre = (focusAimBlend > 0.08 || scanExpanded) ? pickCreature() : null;
             if (cre) {
                 panel.hidden = false;
-                panel.style.opacity = String(scanExpanded ? 1 : (0.4 + focusAimBlend * 0.6));
+                const cAlpha = scanExpanded ? 1 : (0.4 + focusAimBlend * 0.6);
+                panel.style.opacity = String(cAlpha);
                 if (_scanCreatureId !== cre.sp.id) {
                     _scanCreatureId = cre.sp.id;
                     _scanBlockId = -1;
                     fillCreatureScanContent(cre.sp, scanExpanded);
                     recordCreatureScan(cre.sp);
                 }
-                if (scanExpanded) layoutScanExpanded();
+                if (scanExpanded) {
+                    layoutScanExpanded();
+                    const link = document.getElementById('voxel-scan-link');
+                    const marker = document.getElementById('voxel-scan-target');
+                    if (link) link.hidden = true;
+                    if (marker) marker.hidden = true;
+                    hideScanFrame();
+                } else {
+                    const sc = (cre.actor && cre.actor.group && cre.actor.group.scale.x) || 1;
+                    const screen = projectScan(cre.pos.x, cre.pos.y + 0.6 * sc, cre.pos.z);
+                    layoutScanPanel(null, screen);            // dynamic card position, like blocks
+                    updateScanConnector(null, cAlpha, screen, true);   // connector, hide the block marker
+                    updateScanFrame(cre, cAlpha);            // bracket reticle on the creature
+                }
                 return;
             }
             _scanCreatureId = null;
+            hideScanFrame();
 
             const compactActive = isScanCompactActive(t);
             if (compactActive) {
