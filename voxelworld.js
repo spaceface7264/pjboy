@@ -6336,16 +6336,18 @@ ${waveConsts}
             if (codexView) { renderCodexDetail(body); return; }
             const seg = document.createElement('div');
             seg.className = 'vx-codex-seg';
-            ['Blocks', 'Gear'].forEach((s) => {
+            const SEG_LABEL = { Blocks: '📖 Blocks', Life: '🐾 Life', Gear: '⚔️ Gear' };
+            ['Blocks', 'Life', 'Gear'].forEach((s) => {
                 const btn = document.createElement('button');
                 btn.type = 'button';
                 btn.className = 'vx-seg-btn' + (codexSection === s ? ' vx-seg-on' : '');
-                btn.textContent = s === 'Blocks' ? '📖 Blocks' : '⚔️ Gear';
+                btn.textContent = SEG_LABEL[s];
                 btn.addEventListener('click', () => { codexSection = s; renderDrawer(); });
                 seg.appendChild(btn);
             });
             body.appendChild(seg);
             if (codexSection === 'Gear') { renderCodexGearList(body); return; }
+            if (codexSection === 'Life') { renderCodexCreatureList(body); return; }
             const AP = getProfileApi();
             const scanned = (AP && AP.load().journal && AP.load().journal.scanned) || {};
             const all = BlockRegistry.filter((b) => !b.water);   // water isn't a collectible block
@@ -6442,7 +6444,63 @@ ${waveConsts}
             back.addEventListener('click', () => { codexView = null; renderDrawer(); });
             body.appendChild(back);
             if (codexView.kind === 'gear') renderGearDetail(body, weaponList()[codexView.idx], codexView.idx);
+            else if (codexView.kind === 'creature') renderCreatureDetail(body, _AC && _AC.get(codexView.id));
             else renderBlockDetail(body, blockById(codexView.id));
+        }
+
+        // Codex › Life: the bestiary — scan a creature to discover it.
+        const KINGDOM_ICON = { Animal: '🐾', Fungi: '🍄', Construct: '🤖', Projection: '✨' };
+        function renderCodexCreatureList(body) {
+            const AP = getProfileApi();
+            const defs = (_AC && _AC.DEFS) || [];
+            const caught = (AP && AP.load().journal && AP.load().journal.creatures) || {};
+            const disc = defs.filter((d) => caught[d.id]).length;
+            const pct = Math.round(disc / Math.max(1, defs.length) * 100);
+            const head = document.createElement('div');
+            head.className = 'vx-cat-head';
+            head.innerHTML = '<div class="vx-cat-label">Bestiary — <b>' + disc + ' / ' + defs.length + '</b> discovered</div>'
+                + '<div class="vx-quest-bar"><span style="width:' + pct + '%"></span><em>' + pct + '%</em></div>'
+                + '<div class="vx-page-intro" style="margin-top:6px;">Hold Shift and aim at an animal to scan it.</div>';
+            body.appendChild(head);
+            const grid = document.createElement('div');
+            grid.className = 'vx-cat-grid';
+            defs.forEach((d) => {
+                const found = !!caught[d.id];
+                const tile = document.createElement('div');
+                tile.className = 'vx-cat-tile' + (found ? '' : ' vx-cat-locked');
+                const icon = document.createElement('div');
+                icon.className = 'vx-cat-q';
+                icon.textContent = found ? (KINGDOM_ICON[d.sci && d.sci.kingdom] || '🐾') : '?';
+                tile.appendChild(icon);
+                const nm = document.createElement('div');
+                nm.className = 'vx-cat-name';
+                nm.textContent = found ? d.name : '???';
+                tile.appendChild(nm);
+                if (found) tile.addEventListener('click', () => { codexView = { kind: 'creature', id: d.id }; renderDrawer(); });
+                grid.appendChild(tile);
+            });
+            body.appendChild(grid);
+        }
+
+        function renderCreatureDetail(body, d) {
+            if (!d) return;
+            const da = (typeof BLOCK_DA !== 'undefined' && BLOCK_DA[d.name]) ? ' · ' + BLOCK_DA[d.name] : '';
+            const icon = KINGDOM_ICON[d.sci && d.sci.kingdom] || '🐾';
+            const page = document.createElement('div');
+            page.className = 'vx-codex';
+            let html = '<div class="vx-codex-head"><div class="vx-codex-headtext">'
+                + '<div class="vx-codex-name">' + d.name + '<span class="vx-codex-da">' + da + '</span></div>'
+                + '<div class="vx-codex-cat">' + icon + ' ' + (d.cat || 'Creature') + '</div></div></div>';
+            html += '<div class="vx-codex-row"><b>Home</b> ' + (d.biome || '—') + '</div>';
+            html += '<div class="vx-codex-row"><b>Temperament</b> ' + (d.temp || '—')
+                + (d.threat && d.threat !== 'None' ? ' · Threat ' + d.threat : '') + '</div>';
+            if (d.desc) html += '<div class="vx-codex-desc">' + d.desc + '</div>';
+            if (d.sci) {
+                html += '<div class="vx-codex-row"><b>Kingdom</b> ' + (d.sci.kingdom || '—') + '</div>';
+                if (d.sci.fact) html += '<div class="vx-codex-fact"><span class="vx-codex-fact-icon">🔬</span><span>' + d.sci.fact + '</span></div>';
+            }
+            page.innerHTML = html;
+            body.appendChild(page);
         }
 
         function renderBlockDetail(body, b) {
@@ -8366,15 +8424,28 @@ ${waveConsts}
         }
 
         // Scan raycast against creatures; returns the aimed critter or null.
+        // Soft-aim creature pick: instead of a pixel-perfect mesh ray, grab the
+        // creature nearest the crosshair LINE within a forgiving cone (widens with
+        // distance), so small / moving animals are easy to lock for scanning.
+        const _pcO=new THREE.Vector3(), _pcD=new THREE.Vector3(), _pcV=new THREE.Vector3();
         function pickCreature(){
-          if(!creatureGroups.length) return null;
+          if(!critters.length) return null;
           ray.setFromCamera({x:0,y:0}, camera);
-          const hits=ray.intersectObjects(creatureGroups, true);
-          for(const h of hits){
-            if(h.distance>14) break;
-            let o=h.object; while(o){ if(o.userData && o.userData.critter) return o.userData.critter; o=o.parent; }
+          _pcO.copy(ray.ray.origin); _pcD.copy(ray.ray.direction);
+          let best=null, bestScore=Infinity;
+          for(const cr of critters){
+            _pcV.set(cr.pos.x - _pcO.x, (cr.pos.y+0.6) - _pcO.y, cr.pos.z - _pcO.z);
+            const dist=_pcV.length();
+            if(dist>18) continue;
+            const t=_pcV.dot(_pcD);                 // projection along the aim ray
+            if(t<=0) continue;                       // behind the camera
+            const perp=Math.sqrt(Math.max(0, dist*dist - t*t));   // distance from ray to creature centre
+            const tol=1.3 + dist*0.07;               // generous, a touch wider far away
+            if(perp>tol) continue;
+            const score=perp + dist*0.04;            // prefer on-axis, then nearer
+            if(score<bestScore){ bestScore=score; best=cr; }
           }
-          return null;
+          return best;
         }
         let _scanCreatureId=null;
         function fillCreatureScanContent(sp, expanded){
