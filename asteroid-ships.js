@@ -380,13 +380,15 @@
     'Trident':       { build:Trident,      faction:'raider' }
   };
   // Player-pilotable ships (the Hero fleet), with per-ship flight feel.
+  // `wing` is the RIGHT wingtip in the ship's local (pre-scale) space — the owner
+  // multiplies it by `scale` and mirrors it for the left tip to anchor vapor trails.
   const PILOTABLE = [
-    { name:'Interceptor', scale:0.80, speed:1.00, turn:1.00 },
-    { name:'Racer',       scale:0.78, speed:1.35, turn:1.30 },
-    { name:'Explorer',    scale:0.70, speed:0.95, turn:0.85 },
-    { name:'Hauler',      scale:0.66, speed:0.82, turn:0.72 },
-    { name:'Carrier',     scale:0.58, speed:0.78, turn:0.62 },
-    { name:'Mothership',  scale:0.46, speed:0.66, turn:0.5  }
+    { name:'Interceptor', scale:0.80, speed:1.00, turn:1.00, wing:[ 2.4, 0.8, -1.5] },
+    { name:'Racer',       scale:0.78, speed:1.35, turn:1.30, wing:[ 1.2, 0.0, -1.0] },
+    { name:'Explorer',    scale:0.70, speed:0.95, turn:0.85, wing:[ 1.5, 0.6, -1.6] },
+    { name:'Hauler',      scale:0.66, speed:0.82, turn:0.72, wing:[ 1.5, 0.0,  0.0] },
+    { name:'Carrier',     scale:0.58, speed:0.78, turn:0.62, wing:[ 1.5, 0.0, -0.3] },
+    { name:'Mothership',  scale:0.46, speed:0.66, turn:0.5,  wing:[ 2.4, 0.0,  0.1] }
   ];
 
   // ---------- renderer (one InstancedMesh per material) ----------

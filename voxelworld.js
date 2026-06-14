@@ -7314,7 +7314,7 @@ ${waveConsts}
         let flying = false, ship = null;    // arcade flight: pilot a Hero ship (G to board/land)
         let _flyCamPos = null, _flyCamUp = null;
         let _shipTrails = null;             // wingtip vapor streaks at high speed
-        const _wingL = new THREE.Vector3(-1.9, 0.6, -1.2), _wingR = new THREE.Vector3(1.9, 0.6, -1.2);
+        const _wingL = new THREE.Vector3(), _wingR = new THREE.Vector3();  // set per-ship from ship.wing*scale
         const _tmpTip = new THREE.Vector3();
         let starGate = null;                // Ancient Star Gate near spawn (E to travel)
         const GATE_KEY_ID = 41;             // crafted item that powers a dormant gate
@@ -7470,7 +7470,7 @@ ${waveConsts}
           if(!_AS || !_AS.has(sel.name)){ if(g.showMessage) g.showMessage('No ship available yet.',1600); return; }
           ship = _AS.build(sel.name, { scale:sel.scale, tilt:0 });
           if(!ship){ return; }
-          ship.name=sel.name; ship.speedMul=sel.speed; ship.turnMul=sel.turn;
+          ship.name=sel.name; ship.speedMul=sel.speed; ship.turnMul=sel.turn; ship.scale=sel.scale; ship.wing=sel.wing;
           ship.pos = player.pos.clone(); ship.pos.y += 1.4;
           ship.vel = new THREE.Vector3();
           ship.yaw = player.yaw; ship.pitch = 0; ship.roll = 0;
@@ -7496,7 +7496,7 @@ ${waveConsts}
           const old=ship;
           const next=_AS.build(sel.name, { scale:sel.scale, tilt:0 });
           if(!next) return;
-          next.name=sel.name; next.speedMul=sel.speed; next.turnMul=sel.turn;
+          next.name=sel.name; next.speedMul=sel.speed; next.turnMul=sel.turn; next.scale=sel.scale; next.wing=sel.wing;
           next.pos=old.pos; next.vel=old.vel; next.yaw=old.yaw; next.pitch=old.pitch; next.roll=old.roll;
           next.climbCmd=old.climbCmd||0; next._prevYaw=old._prevYaw!=null?old._prevYaw:old.yaw;
           next._speed=old._speed||0; next._boost=0;
@@ -7551,6 +7551,10 @@ ${waveConsts}
           const q=ship.group.quaternion;
           const spd01=THREE.MathUtils.clamp(((ship._speed||0)-16)/(SHIP_MAX-16),0,1);
           const op=spd01*spd01*0.85;                       // ramps in only at speed
+          // anchor the trails at THIS ship's wingtips (local wing * scale, mirrored)
+          const w=ship.wing||[1.9,0.6,-1.2], sc=ship.scale||1;
+          _wingR.set(w[0]*sc, w[1]*sc, w[2]*sc);
+          _wingL.set(-w[0]*sc, w[1]*sc, w[2]*sc);
           const offs=[_wingL,_wingR];
           for(let i=0;i<2;i++){
             const tr=_shipTrails[i];
