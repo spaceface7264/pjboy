@@ -16,7 +16,7 @@
 const CLASSES = [
   { id:'miner',    icon:'⛏', name:'Miner',
     desc:'The miner has bonuses for mining speed and the chance to obtain more raw materials from all resources, both on planet and in space.',
-    accent:0xe8b33b, weapon:'pickaxe' },
+    accent:0xe8b33b, weapon:'minecutter' },
   { id:'soldier',  icon:'⚔', name:'Soldier',
     desc:'The soldier deals increased damage and takes less damage in combat. Starts with a standard-issue blaster rifle.',
     accent:0xd4453a, weapon:'blaster' },

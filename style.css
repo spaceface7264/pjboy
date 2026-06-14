@@ -2000,6 +2000,74 @@ body.mode-asteroid {
 .vx-dev-line { font-size: 9px; color: rgba(150, 134, 108, 0.5); letter-spacing: 0.3px; }
 .vx-dev-line b { color: rgba(180, 162, 130, 0.7); font-weight: normal; }
 
+/* Equipped-weapon readout — name, tier, and live stats (bottom-right) */
+#voxel-weapon-panel {
+    position: fixed;
+    right: 16px;
+    bottom: 16px;
+    width: 198px;
+    max-width: calc(100vw - 32px);
+    padding: 9px 11px 10px;
+    color: var(--hud-text);
+    background: var(--hud-bg);
+    border: 2px solid var(--hud-edge);
+    border-radius: 10px;
+    box-shadow: var(--hud-bevel);
+    font-family: 'Courier New', monospace;
+    pointer-events: none;
+    z-index: 7;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+.vx-wp-head {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 8px; margin-bottom: 7px;
+}
+.vx-wp-name {
+    font-size: 13px; font-weight: bold; letter-spacing: 0.3px;
+    color: var(--hud-text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.vx-wp-tier {
+    flex: 0 0 auto;
+    font-size: 10px; font-weight: bold; letter-spacing: 0.5px;
+    color: #2a2008;
+    background: linear-gradient(180deg, var(--hud-amber-lit), var(--hud-amber));
+    border-radius: 5px; padding: 1px 6px;
+}
+.vx-weapon-panel.vx-wp-empty .vx-wp-tier,
+.vx-weapon-panel.vx-wp-empty .vx-wp-pips,
+.vx-weapon-panel.vx-wp-empty .vx-wp-stats { display: none; }
+.vx-wp-pips { display: flex; gap: 4px; margin-bottom: 9px; }
+.vx-wp-pip {
+    flex: 1 1 0; height: 4px; border-radius: 2px;
+    background: var(--hud-ink); box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+.vx-wp-pip.on {
+    background: linear-gradient(90deg, var(--hud-amber), var(--hud-amber-lit));
+    box-shadow: 0 0 5px rgba(245, 183, 62, 0.55);
+}
+.vx-wp-stats { display: flex; flex-direction: column; gap: 5px; }
+.vx-wp-stat { display: flex; align-items: center; gap: 7px; }
+.vx-wp-stat.muted { opacity: 0.38; }
+.vx-wp-lbl { flex: 0 0 32px; font-size: 10px; letter-spacing: 0.5px; color: var(--hud-text-dim); }
+.vx-wp-track {
+    flex: 1 1 auto; height: 8px; border-radius: 4px;
+    background: var(--hud-ink); border: 1px solid rgba(0, 0, 0, 0.5);
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6); overflow: hidden;
+}
+.vx-wp-fill {
+    display: block; height: 100%; border-radius: 3px;
+    background: linear-gradient(180deg, var(--hud-amber-lit), var(--hud-amber));
+    transition: width 0.25s ease-out;
+}
+.vx-wp-stat.dmg .vx-wp-fill { background: linear-gradient(180deg, #ffb27a, #f5763e); }
+.vx-wp-stat.mine .vx-wp-fill { background: linear-gradient(180deg, #9ef0ff, #44d8ff); }
+.vx-wp-num { flex: 0 0 38px; text-align: right; font-size: 11px; font-weight: bold; color: var(--hud-text); }
+@media (max-width: 560px) {
+    #voxel-weapon-panel { width: 150px; padding: 7px 9px 8px; }
+    .vx-wp-name { font-size: 11px; }
+}
+
 /* mission / objective "quest" card */
 .vx-journal-hud {
     margin-top: 8px;

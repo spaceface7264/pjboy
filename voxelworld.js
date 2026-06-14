@@ -459,6 +459,34 @@
               x.strokeStyle='rgba(60,30,5,.6)'; x.lineWidth=1; x.strokeRect(cx-3,cy-2,7,6);
             }
           },
+          ash(x,R){
+            grain(x,0x4a4640,.18,R,2);
+            for(let i=0;i<10;i++){ x.fillStyle='rgba(18,16,14,.4)'; x.fillRect((R()*30)|0,(R()*30)|0,2,2); }
+            for(let i=0;i<5;i++){ x.fillStyle='rgba(255,120,40,.18)'; x.fillRect((R()*30)|0,(R()*30)|0,1,1); }   // faint embers
+          },
+          lavaflow(x,R,frame){
+            grain(x,0x6a1e08,.25,R,2);
+            x.fillStyle='rgba(255,110,28,.55)'; x.fillRect(0,0,32,32);             // molten body
+            const off=(frame*8)%32;
+            for(let i=0;i<5;i++){                                                  // streaks running downward
+              const sx=(i*7+((ihash(i,3,5)*4)|0))%32;
+              x.strokeStyle=i%2?'#ffd24a':'#ff7a1e'; x.lineWidth=3;
+              x.beginPath(); x.moveTo(sx,(off+i*3)%32); x.lineTo(sx+2,(off+i*3+11)%32); x.stroke();
+            }
+            for(let i=0;i<4;i++){ const bx=(ihash(i,9,2)*26)|0, by=((ihash(i,4,7)*32+frame*8)%32)|0;
+              x.fillStyle='rgba(255,244,180,.85)'; x.fillRect(bx,by,4,5); }         // hot blobs scrolling down
+          },
+          magma(x,R,frame){
+            grain(x,0x241008,.3,R,2);
+            x.fillStyle='rgba(16,9,7,.55)'; x.fillRect(0,0,32,32);                 // dark crust
+            const p=[.7,1,.85,1][frame];
+            for(let i=0;i<5;i++){                                                  // pulsing glowing cracks
+              x.strokeStyle=hx(shade(0xff5a1e,p)); x.lineWidth=2;
+              const sx=R()*30, sy=R()*30;
+              x.beginPath(); x.moveTo(sx,sy); x.lineTo(sx+5+R()*6,sy+4+R()*6); x.stroke();
+            }
+            x.fillStyle=hx(shade(0xffd24a,p)); for(let i=0;i<3;i++) x.fillRect((R()*28)|0,(R()*28)|0,2,2);
+          },
         };
         const NO_BORDER = new Set(['tall_grass','flower_red','flower_yellow','water',
           'deco_frond','deco_spore','deco_quill','deco_quill_glow','deco_plume','deco_shroom']);
@@ -614,6 +642,15 @@
           { id:40, cat:'Terrain', name:'Water',  tiles:{all:'water'},  hardness:1, tags:['natural','liquid'], transparent:true, water:true,
             desc:'Swimmable water. Fills the seas, lakes and rivers — dive in and explore.',
             sci:{formula:'H₂O', mineral:'Water', fact:'The only thing on a planet that is solid, liquid and gas at everyday temperatures — and life needs it.'} },
+          { id:42, cat:'Hazards', name:'Lava Flow', tiles:{all:'lavaflow'}, hardness:9, tags:['hazard','glows','liquid','unminable'], animated:true, glowColor:0xff5a14,
+            desc:'A living river of molten rock — you cannot mine it, only cross it if you dare.',
+            sci:{formula:'molten silicates 900–1200°C', mineral:'Lava', fact:'On a steep slope flowing lava can move faster than you can run. It freezes into black basalt.'} },
+          { id:43, cat:'Terrain', name:'Ash', tiles:{all:'ash'}, hardness:1, tags:['natural','volcanic','barren'],
+            desc:'Drifts of cooled volcanic ash, soft and grey across the burned plains.',
+            sci:{formula:'pulverised rock + glass', mineral:'Volcanic ash', fact:'Ash is tiny shards of rock and glass blasted from a volcano — wind can carry it right around a planet.'} },
+          { id:44, cat:'Terrain', name:'Magma Rock', tiles:{all:'magma'}, hardness:7, tags:['natural','volcanic','glows'], animated:true, glowColor:0xff6a1e,
+            desc:'Half-cooled crust with fire still glowing in its cracks. Hot underfoot.',
+            sci:{formula:'cooling basalt', mineral:'Magma crust', fact:'As lava hardens it grows a dark skin while molten orange rock still glows up through the cracks.'} },
         ];
         const blockById = id => BlockRegistry.find(b=>b.id===id);
         
@@ -927,10 +964,12 @@
               return top;
             }
           },
-          volcanic: { sky:0x6a4858, horizon:0xdcae9c, sun:0xffd6bc, ground:0x5a3632,
+          volcanic: { sky:0x4a0f08, horizon:0xff5a1e, sun:0xffc23a, ground:0x2a0c08,
+            // Ember surface is region-driven in volcanicSurface(); this remap is only a
+            // fallback for any path that still routes through the generic top logic.
             remap(top, ctx){
               if(top===8 || top===20) return 18;    // no ice
-              if(top===1 || (top>=12 && top<=15) || top===36) return ctx.h < 0.3 ? 18 : 16; // red rock / regolith
+              if(top===1 || (top>=12 && top<=15) || top===36) return ctx.h < 0.3 ? 44 : 17; // magma / basalt
               return top;
             }
           }
@@ -1307,6 +1346,26 @@
             lerp(lerp(c(0,0,1),c(1,0,1),tx), lerp(c(0,1,1),c(1,1,1),tx), ty), tz);
         }
 
+        // Ember macro fields — two slow, continuous noise fields that drive BOTH the
+        // terrain height and the region kind, so terrain and materials always agree.
+        //   rA: a single elevation gradient   basin(low) → flats → highland → peak(high)
+        //   rB: a plateau field that raises gentle ruin mesas in the mid elevations
+        // Because everything is a continuous function of rA/rB, zone borders are smooth
+        // ramps, not cliff walls — the world flows instead of jumping.
+        function volcField(x, z){
+          return { rA: pfbm2(x,z, 13000, 10, 2), rB: pfbm2(x,z, 17000, 11, 2) };  // ~300-block zones — close, frequent variety
+        }
+        // Region kind for surface/structure decisions — thresholds on the SAME rA/rB
+        // used by the height field, so a 'peak' really is the high ground, etc.
+        function volcRegion(x, z){
+          const f = volcField(x,z);
+          if(f.rA > 0.74) return { k:'peak',     e:(f.rA-0.74)/0.26 };  // volcano cores
+          if(f.rA > 0.58) return { k:'highland', e:(f.rA-0.58)/0.16 };  // rugged basalt approaches
+          if(f.rA < 0.32) return { k:'lake',     e:(0.32-f.rA)/0.32 };  // lava-pool basins
+          if(f.rB > 0.60) return { k:'ruin',     e:(f.rB-0.60)/0.40 };  // ruin mesas
+          return { k:'ash', e:0 };                                       // calm connective flats
+        }
+
         // Periodic terrain height for a column (continents + hills + ridged mountains).
         function columnHeight(x, z){
           const cont = pfbm2(x,z, 1000, 16, 3);                  // broad continents (~192-block)
@@ -1314,7 +1373,21 @@
           const ridge= 1-Math.abs(2*pfbm2(x,z, 5000, 32, 2)-1);  // mountain ridges (~96-block)
           // Centre terrain around sea level so basins dip BELOW it and fill with water
           // (coasts, lakes, oceans). landBias shifts a world wetter (−) or drier (+).
-          const hh = SEA_LEVEL + 4 + _landBias + (cont-0.5)*44 + (hill-0.5)*9 + ridge*ridge*ridge*26*_mtnMul;
+          let hh = SEA_LEVEL + 4 + _landBias + (cont-0.5)*44 + (hill-0.5)*9 + ridge*ridge*ridge*26*_mtnMul;
+          if(activeBiomeKey === 'volcanic'){
+            const { rA, rB } = volcField(x,z);
+            // continuous macro elevation: one smooth ramp basin → flats → highland
+            const base = (rA < 0.40)
+              ? lerp(SEA_LEVEL-14, SEA_LEVEL+4,  smooth(rA/0.40))
+              : lerp(SEA_LEVEL+4,  SEA_LEVEL+28, smooth((rA-0.40)/0.60));   // leave headroom for volcanoes
+            // relief at several scales so nothing is flat — rolling everywhere, rugged up high
+            const reliefAmp = lerp(6, 16, smooth(rA));
+            const rug = ridge*ridge * 20 * smooth(_cl01((rA-0.42)/0.34)) * _mtnMul;        // ridged highlands
+            const hum = (pfbm2(x,z, 9100, 30, 2)-0.5) * lerp(3, 9, smooth(rA));            // hummocks (~100-block)
+            // ruin mesas: smooth raised, flattened top, sloped sides (mid elevations)
+            const plateau = smooth(_cl01((rB-0.55)/0.12)) * smooth(_cl01((0.62-Math.abs(rA-0.46))/0.18));
+            hh = base + (hill-0.5)*reliefAmp*(1-0.7*plateau) + rug + hum*(1-0.6*plateau) + plateau*12;
+          }
           return Math.max(1, Math.min(H-4, Math.round(hh)));
         }
         // How many solid blocks to keep above a cave: thick on flat ground (no surprise
@@ -1328,10 +1401,38 @@
           return drop>=6 ? 2 : 5;     // ≥6-block cliff → cave mouths; otherwise solid roof
         }
 
+        // Local steepness of the surface (max neighbour height delta) — used to keep
+        // glow on the genuine cracks/cliffs, so magma reads as coherent seams in the
+        // rock rather than random speckle.
+        function surfaceSlope(x, z, height){
+          const e = 2;
+          return Math.max(
+            Math.abs(height-columnHeight(x+e,z)), Math.abs(height-columnHeight(x-e,z)),
+            Math.abs(height-columnHeight(x,z+e)), Math.abs(height-columnHeight(x,z-e)));
+        }
+        // Ember surface block — coherent material fields, not per-block speckle. Calm
+        // basalt dominates; magma glows only along steep "heat seams"; obsidian caps the
+        // high peaks; ash carpets the low flats. Lava seas are filled in genColumn.
+        function volcanicSurface(x, z, height){
+          const { rA, rB } = volcField(x,z);
+          const slope = surfaceSlope(x,z,height);
+          // a ridged field → continuous glowing cracks that follow the terrain
+          const seam = 1 - Math.abs(2*pfbm2(x,z, 21000, 22, 2) - 1);
+          if(rA < 0.30) return height >= SEA_LEVEL-2 ? 43 : 17;        // basin: ash shore over basalt (lava fills the core)
+          if(rA > 0.62){                                               // highlands & peaks
+            if(rA > 0.78 && height >= SEA_LEVEL+30 && slope >= 3) return 21;  // obsidian summit caps
+            if(seam > 0.84 && slope >= 2) return 44;                          // glowing magma seams in steep rock
+            return 17;                                                        // calm basalt (dominant)
+          }
+          if(rB > 0.60) return slope >= 3 ? 17 : 21;                  // ruin mesa: basalt sides, obsidian crown
+          return seam > 0.93 ? 44 : 43;                               // ash flats with rare magma fissures
+        }
+
         // Deterministic, periodic surface profile (height + surface block) for a column.
         function columnProfile(x, z){
           const SEA=SEA_LEVEL;
           const height = columnHeight(x,z);
+          if(activeBiomeKey === 'volcanic') return { height, top: volcanicSurface(x,z,height) };
           const temp  = pfbm2(x,z, 7000, 12, 2) + _tempBias;    // warmth (~256-block regions)
           const moist = pfbm2(x,z, 9000, 12, 2) + _moistBias;   // wetness
           let top = 1;                                           // grass
@@ -1410,8 +1511,15 @@
               else id = oreAt(x,y,z) || 3;
               buf[cIdx(lx,y,lz)] = id;
             }
-            if(p.height < SEA_LEVEL){ for(let y=p.height+1; y<=SEA_LEVEL; y++) buf[cIdx(lx,y,lz)] = WATER; }
-            const colTop = Math.max(p.height, p.height<SEA_LEVEL?SEA_LEVEL:0);
+            const _isVolc = activeBiomeKey === 'volcanic';
+            // Volcanic: only genuine basins (a few blocks below the lava line) pool with
+            // lava, so seas read as deliberate lakes — not a glow smeared over every dip.
+            const _fillTop = _isVolc ? (SEA_LEVEL-3) : SEA_LEVEL;
+            if(p.height < _fillTop){
+              const fluid = _isVolc ? 42 : WATER;                  // 42 = unminable Lava Flow
+              for(let y=p.height+1; y<=_fillTop; y++) buf[cIdx(lx,y,lz)] = fluid;
+            }
+            const colTop = Math.max(p.height, p.height<_fillTop?_fillTop:0);
             if(colTop>maxY) maxY=colTop;
           }
           // trees: consider roots in a 2-block margin so canopies overhang borders
@@ -1463,31 +1571,41 @@
             buf[cIdx(llx, wy, llz)] = id;
             if(id && wy > mY) mY = wy;
           };
-          const ctxFor = (ax, az, ground, seedInt) => {
+          const ctxFor = (ax, az, ground, seedInt, region) => {
             let s = seedInt >>> 0;
             const rng = () => { s = (Math.imul(s,1664525) + 1013904223) >>> 0; return s/4294967296; };
-            return { ground, SEA_LEVEL, H, rng,
+            return { ground, SEA_LEVEL, H, region: region||null, rng,
               set(dx,dy,dz,id){ setter(ax+dx, dy, az+dz, id); },
               heightAt(dx,dz){ return columnProfile(ax+dx, az+dz).height; } };
           };
           const biome = activeBiomeKey;
+          const isVolc = biome === 'volcanic';
 
-          // (1) scattered landmarks on a coarse site grid. Raw coords — period-correct
-          //     wrapping at WORLD_PERIOD is a later refinement; fine for play near spawn.
+          // (1) scattered landmarks on a coarse site grid. On Ember, a structure's
+          //     def.region gates it to the matching zone (volcanoes in highlands,
+          //     ruins on plateaus), so each region reads as its own place.
           const scatter = _AST.scatterFor(biome);
           if(scatter.length){
-            const MARG = 16;
-            const sx0 = Math.floor((x0 - MARG)/_STRUCT_SITE) - 1, sx1 = Math.floor((x0+CH-1+MARG)/_STRUCT_SITE);
-            const sz0 = Math.floor((z0 - MARG)/_STRUCT_SITE) - 1, sz1 = Math.floor((z0+CH-1+MARG)/_STRUCT_SITE);
+            // Ember uses a coarser grid so volcanoes stay well-separated — one grand
+            // peak per highland core rather than a cluster of small cones.
+            const SITE = isVolc ? 104 : _STRUCT_SITE;                    // closer-together Ember landmarks
+            const MARG = isVolc ? 30 : 24;                               // ≥ largest structure reach
+            const rollThresh = isVolc ? 0.6 : 0.16;                      // per qualifying (region-gated) cell
+            const sx0 = Math.floor((x0 - MARG)/SITE) - 1, sx1 = Math.floor((x0+CH-1+MARG)/SITE);
+            const sz0 = Math.floor((z0 - MARG)/SITE) - 1, sz1 = Math.floor((z0+CH-1+MARG)/SITE);
             for(let sx=sx0; sx<=sx1; sx++) for(let sz=sz0; sz<=sz1; sz++){
-              if(ihash(sx*2+1, 7001, sz*2+1) >= 0.16) continue;          // ~16% of cells
-              const ax = sx*_STRUCT_SITE + Math.floor(ihash(sx, 131, sz)*_STRUCT_SITE);
-              const az = sz*_STRUCT_SITE + Math.floor(ihash(sx, 262, sz)*_STRUCT_SITE);
+              if(ihash(sx*2+1, 7001, sz*2+1) >= rollThresh) continue;
+              const ax = sx*SITE + Math.floor(ihash(sx, 131, sz)*SITE);
+              const az = sz*SITE + Math.floor(ihash(sx, 262, sz)*SITE);
               const ground = columnProfile(ax, az).height;
-              if(ground < SEA_LEVEL) continue;                            // not underwater
-              const def = _AST.get(scatter[Math.floor(ihash(sx, 393, sz)*scatter.length)]);
+              if(ground < SEA_LEVEL-2) continue;                          // not in a fluid sea
+              const regionK = isVolc ? volcRegion(ax, az).k : null;
+              // only structures whose zone matches here (region-less defs go anywhere)
+              const eligible = scatter.filter(id => { const d = _AST.get(id); return !d.region || (regionK && d.region.indexOf(regionK) >= 0); });
+              if(!eligible.length) continue;
+              const def = _AST.get(eligible[Math.floor(ihash(sx, 393, sz)*eligible.length)]);
               if(!def) continue;
-              def.stamp(ctxFor(ax, az, ground, Math.floor(ihash(ax, 555, az)*4294967296)));
+              def.stamp(ctxFor(ax, az, ground, Math.floor(ihash(ax, 555, az)*4294967296), regionK));
             }
           }
 
@@ -1502,7 +1620,85 @@
           }
           return mY;
         }
-        
+
+        // ---------- Ember ambience: falling ash + rising embers (volcanic only) ----------
+        let _emberFx = null;
+        function initEmberFx(){
+          if(_emberFx || !g.scene || typeof THREE === 'undefined') return;
+          const N = 170;
+          const pos = new Float32Array(N*3), vel = new Float32Array(N*3), kind = new Float32Array(N), col = new Float32Array(N*3);
+          for(let i=0;i<N;i++){
+            const ember = ihash(i,17,3) < 0.28; kind[i] = ember ? 1 : 0;   // ash-dominant, embers as accent
+            pos[i*3]   = (ihash(i,2,9)*2-1)*55;
+            pos[i*3+1] = ember ? 2 + ihash(i,5,1)*8 : 40 + ihash(i,8,4)*14;
+            pos[i*3+2] = (ihash(i,4,6)*2-1)*55;
+            vel[i*3]   = (ihash(i,11,2)*2-1)*0.4;
+            vel[i*3+1] = ember ? (0.5 + ihash(i,9,7)*0.9) : -(0.9 + ihash(i,3,8)*1.3);
+            vel[i*3+2] = (ihash(i,13,5)*2-1)*0.4;
+            if(ember){ col[i*3]=1; col[i*3+1]=0.55; col[i*3+2]=0.16; } else { col[i*3]=0.34; col[i*3+1]=0.30; col[i*3+2]=0.27; }
+          }
+          const geo = new THREE.BufferGeometry();
+          geo.setAttribute('position', new THREE.BufferAttribute(pos,3));
+          geo.setAttribute('color', new THREE.BufferAttribute(col,3));
+          const mat = new THREE.PointsMaterial({ size:0.42, vertexColors:true, transparent:true, opacity:0.7, depthWrite:false, blending:THREE.AdditiveBlending });
+          const pts = new THREE.Points(geo, mat); pts.frustumCulled = false; pts.renderOrder = 5;
+          g.scene.add(pts);
+          _emberFx = { pts, geo, mat, pos, vel, kind, N };
+        }
+        function stepEmberFx(dt){
+          if(activeBiomeKey !== 'volcanic'){ if(_emberFx) _emberFx.pts.visible = false; return; }
+          if(!_emberFx) initEmberFx();
+          if(!_emberFx) return;
+          _emberFx.pts.visible = true;
+          const { pos, vel, kind, N, geo } = _emberFx;
+          const cx = player.pos.x, cz = player.pos.z;
+          const step = Math.min(dt, 0.05) * 9;
+          for(let i=0;i<N;i++){
+            pos[i*3]   += vel[i*3]*step;
+            pos[i*3+1] += vel[i*3+1]*step;
+            pos[i*3+2] += vel[i*3+2]*step;
+            const rx = pos[i*3]-cx, rz = pos[i*3+2]-cz;
+            if(pos[i*3+1] < 1 || pos[i*3+1] > 62 || rx*rx+rz*rz > 64*64){
+              const salt = ((elapsed*7)|0);
+              pos[i*3]   = cx + (ihash((i*7+salt)&1023, 21, 4)*2-1)*52;
+              pos[i*3+2] = cz + (ihash((i*5+salt)&1023, 31, 6)*2-1)*52;
+              pos[i*3+1] = kind[i] ? 2 + ihash(i,5,1)*6 : 46 + ihash(i,8,4)*12;
+            }
+          }
+          geo.attributes.position.needsUpdate = true;
+        }
+        function disposeEmberFx(){ if(!_emberFx) return; if(g.scene) g.scene.remove(_emberFx.pts); _emberFx.geo.dispose(); _emberFx.mat.dispose(); _emberFx = null; }
+
+        // Ember is hostile: lava-flow / lava contact burns (forgiving, with its own
+        // cooldown so it doesn't fight combat i-frames), and standing right beside it
+        // radiates heat. Volcanic worlds only.
+        let _lavaBurnT = 0, _heatStingT = 0;
+        function updateVolcanicHazard(dt){
+          if(activeBiomeKey !== 'volcanic' || flying || player.health <= 0) return;
+          const vx = Math.floor(player.pos.x - WORLD_OFFSET.x);
+          const vy = Math.floor(player.pos.y - WORLD_OFFSET.y);
+          const vz = Math.floor(player.pos.z - WORLD_OFFSET.z);
+          const hot = (id)=> id === 38 || id === 42;   // Lava or Lava Flow
+          const inLava = hot(getBlock(vx,vy,vz)) || hot(getBlock(vx,vy+1,vz)) || hot(getBlock(vx,vy-1,vz));
+          if(inLava){
+            _lavaBurnT += dt; player.hurtFlash = Math.max(player.hurtFlash, 0.7); player._noHitT = 0;
+            if(_lavaBurnT >= 0.4){
+              _lavaBurnT = 0;
+              player.health = Math.max(0, player.health - 6);
+              updateHealthHud();
+              if(player.health <= 0) respawnPlayer();
+            }
+            return;
+          }
+          _lavaBurnT = 0;
+          // heat radiating from nearby lava → slow chip damage
+          let near = false;
+          for(let dx=-1; dx<=1 && !near; dx++) for(let dy=-1; dy<=1 && !near; dy++) for(let dz=-1; dz<=1 && !near; dz++)
+            if(hot(getBlock(vx+dx, vy+dy, vz+dz))) near = true;
+          if(near){ _heatStingT += dt; if(_heatStingT >= 1.2){ _heatStingT = 0; player.health = Math.max(0, player.health-2); player.hurtFlash = Math.max(player.hurtFlash, 0.35); updateHealthHud(); } }
+          else _heatStingT = 0;
+        }
+
         // ---------- chunk meshing: merged geometry, face culling, vertex AO ----------
         // face table (CCW from outside) from the canonical voxel approach
         const FACES = [
@@ -2255,11 +2451,17 @@ ${waveConsts}
 
         function weaponCycleList() {
             const defs = weaponList();
-            const owned = defs.map((_, i) => i).filter((i) => ownedWeapons.has(i));
+            const owned = defs.map((_, i) => i).filter((i) => ownedWeapons.has(i) && defs[i] && defs[i].id !== 'pickaxe');
             return [-1, ...owned];
         }
 
         function setWeaponIndex(idx, quiet) {
+            // Pickaxe is retired — redirect any attempt to equip it to the Laser Handgun.
+            const _defs = weaponList();
+            if (idx >= 0 && _defs[idx] && _defs[idx].id === 'pickaxe') {
+                const mc = _defs.findIndex((w) => w.id === 'minecutter');
+                idx = mc >= 0 ? mc : -1;
+            }
             const cfg = saveCharCfg({ weapon: idx | 0 });
             weaponIndex = cfg.weapon;
             if (weaponIndex >= 0) ownedWeapons.add(weaponIndex);
@@ -2284,11 +2486,8 @@ ${waveConsts}
         }
 
         function isMineLaser() {
-            return !!(weaponDef && (weaponDef.id === 'laser' || weaponDef.id === 'minecutter'));
-        }
-
-        function isPickaxe() {
-            return !!(weaponDef && weaponDef.id === 'pickaxe');
+            // Laser Handgun (minecutter) is the SOLE mining tool. The Laser Rifle is combat-only now.
+            return !!(weaponDef && weaponDef.id === 'minecutter');
         }
 
         function isSwordEquipped() {
@@ -2462,7 +2661,7 @@ ${waveConsts}
         }
 
         function isMiningTool() {
-            return isPickaxe() || isMineLaser();
+            return isMineLaser();
         }
 
         function canScanBlocks() {
@@ -2470,13 +2669,11 @@ ${waveConsts}
         }
 
         function mineLaserInterval() {
-            return (weaponDef && weaponDef.id === 'minecutter') ? MINECUTTER_FIRE_INTERVAL : LASER_FIRE_INTERVAL;
+            return MINECUTTER_FIRE_INTERVAL;   // only the minecutter mines
         }
 
         let mineProgress = 0;
         let mineTarget = null;
-        let mineRepeatCooldown = 0;
-        const MINE_SWING_INTERVAL = 0.42;
         let placeGhost = null;
         let lastToolMsg = 0;
 
@@ -2491,7 +2688,6 @@ ${waveConsts}
         function resetMining() {
             mineProgress = 0;
             mineTarget = null;
-            mineRepeatCooldown = 0;
         }
 
         function weaponFireFactor() {
@@ -2536,10 +2732,59 @@ ${waveConsts}
 
         function updateWeaponLabel() {
             const el = document.getElementById('voxel-weapon-label');
-            if (!el) return;
-            if (!weaponDef) { el.textContent = 'Empty hands'; return; }
-            const t = weaponTierOf(weaponDef.id);
-            el.textContent = weaponDef.name + (t > 1 ? ' · ' + TIER_NAME[t] : '');
+            if (el) {
+                if (!weaponDef) { el.textContent = 'Empty hands'; }
+                else {
+                    const t = weaponTierOf(weaponDef.id);
+                    el.textContent = weaponDef.name + (t > 1 ? ' · ' + TIER_NAME[t] : '');
+                }
+            }
+            updateWeaponPanel();
+        }
+
+        // Bottom-right HUD: equipped weapon name, tier (Mk I–V), level pips, and live stats.
+        // Mining tools dim the Damage row; combat weapons dim the Mining row.
+        function updateWeaponPanel() {
+            const panel = document.getElementById('voxel-weapon-panel');
+            if (!panel) return;
+            const nameEl = document.getElementById('voxel-wp-name');
+            const tierEl = document.getElementById('voxel-wp-tier');
+            const pipsEl = document.getElementById('voxel-wp-pips');
+            const statsEl = document.getElementById('voxel-wp-stats');
+            if (!weaponDef) {
+                panel.classList.add('vx-wp-empty');
+                if (nameEl) nameEl.textContent = 'Empty hands';
+                if (tierEl) tierEl.textContent = '';
+                if (pipsEl) pipsEl.innerHTML = '';
+                if (statsEl) statsEl.innerHTML = '';
+                return;
+            }
+            panel.classList.remove('vx-wp-empty');
+            const lvl = weaponTierOf(weaponDef.id);
+            const gp = weaponGameplayFor(weaponDef.id);
+            const isMine = gp.role === 'mining';
+            if (nameEl) nameEl.textContent = weaponDef.name;
+            if (tierEl) tierEl.textContent = TIER_NAME[lvl];
+            if (pipsEl) {
+                let pips = '';
+                for (let i = 1; i <= 5; i++) pips += '<span class="vx-wp-pip' + (i <= lvl ? ' on' : '') + '"></span>';
+                pipsEl.innerHTML = pips;
+            }
+            if (statsEl) {
+                const dmg = weaponDamage();
+                const mine = Math.round((gp.mining || 0) * 10) / 10;
+                const reach = Math.round(currentAimReach());
+                const bar = (cls, label, v, max, unit, muted) =>
+                    '<div class="vx-wp-stat ' + cls + (muted ? ' muted' : '') + '">'
+                    + '<span class="vx-wp-lbl">' + label + '</span>'
+                    + '<span class="vx-wp-track"><span class="vx-wp-fill" style="width:'
+                    + Math.max(0, Math.min(100, v / max * 100)) + '%"></span></span>'
+                    + '<span class="vx-wp-num">' + v + (unit || '') + '</span></div>';
+                statsEl.innerHTML =
+                    bar('dmg', 'DMG', dmg, 35, '', isMine)
+                    + bar('mine', 'MINE', mine, 17, '/s', !isMine)
+                    + bar('rng', 'RNG', reach, 13, 'm', false);
+            }
         }
 
         function mapVcState(state) {
@@ -2967,17 +3212,78 @@ ${waveConsts}
             return out;
         }
 
-        // ---- Upgrade tiers (Mk I/II/III): the real progression, crafted at the Refinery ----
-        // Absolute multipliers on a weapon's base power/range/fire-rate, by tier.
-        const TIER_MULT = { 1:{power:1,range:1,fire:1}, 2:{power:1.4,range:1.2,fire:1.25}, 3:{power:1.85,range:1.45,fire:1.5} };
-        const TIER_NAME = { 1:'Mk I', 2:'Mk II', 3:'Mk III' };
+        // ---- Weapon & tool tiers (5 levels each): the real progression, crafted at the Refinery ----
+        // Per-weapon, per-level stats (keyed by in-game weapon id). The Laser Handgun
+        // (minecutter) is the SOLE mining tool and deals NO combat damage; every other
+        // weapon is combat-only (mining 0). Pickaxe is retired.
+        //   power  — swing/fire interval factor (lower = snappier)
+        //   speed  — fire/swing rate (display)
+        //   dmg    — combat damage per hit
+        //   mining — blocks/s at hardness 1 (minecutter only)
+        const WEAPON_TIERS = {
+            minecutter: { role: 'mining', tiers: [   // Laser Handgun — mining tool, 0 dmg
+                { power: 0.18, speed: 8,  dmg: 0, mining: 6.3  },
+                { power: 0.16, speed: 8,  dmg: 0, mining: 8.2  },
+                { power: 0.14, speed: 9,  dmg: 0, mining: 10.5 },
+                { power: 0.12, speed: 9,  dmg: 0, mining: 13.4 },
+                { power: 0.10, speed: 10, dmg: 0, mining: 16.5 },
+            ] },
+            laser: { role: 'combat', tiers: [        // Laser Rifle
+                { power: 0.55, speed: 8,  dmg: 8,  mining: 0 },
+                { power: 0.50, speed: 8,  dmg: 10, mining: 0 },
+                { power: 0.46, speed: 9,  dmg: 13, mining: 0 },
+                { power: 0.42, speed: 9,  dmg: 16, mining: 0 },
+                { power: 0.38, speed: 10, dmg: 20, mining: 0 },
+            ] },
+            wrench: { role: 'combat', tiers: [
+                { power: 0.30, speed: 6, dmg: 4,  mining: 0 },
+                { power: 0.28, speed: 6, dmg: 5,  mining: 0 },
+                { power: 0.26, speed: 7, dmg: 7,  mining: 0 },
+                { power: 0.24, speed: 7, dmg: 8,  mining: 0 },
+                { power: 0.22, speed: 8, dmg: 10, mining: 0 },
+            ] },
+            sword: { role: 'combat', tiers: [        // Energy Sword
+                { power: 0.80, speed: 7, dmg: 11, mining: 0 },
+                { power: 0.74, speed: 7, dmg: 14, mining: 0 },
+                { power: 0.68, speed: 8, dmg: 17, mining: 0 },
+                { power: 0.62, speed: 8, dmg: 21, mining: 0 },
+                { power: 0.56, speed: 9, dmg: 25, mining: 0 },
+            ] },
+            blaster: { role: 'combat', tiers: [      // Blaster Rifle
+                { power: 0.50, speed: 6, dmg: 7,  mining: 0 },
+                { power: 0.46, speed: 6, dmg: 9,  mining: 0 },
+                { power: 0.42, speed: 7, dmg: 11, mining: 0 },
+                { power: 0.38, speed: 7, dmg: 13, mining: 0 },
+                { power: 0.34, speed: 8, dmg: 16, mining: 0 },
+            ] },
+            plasma: { role: 'combat', tiers: [       // Plasma Pistol
+                { power: 0.40, speed: 7, dmg: 6,  mining: 0 },
+                { power: 0.37, speed: 7, dmg: 8,  mining: 0 },
+                { power: 0.34, speed: 8, dmg: 10, mining: 0 },
+                { power: 0.31, speed: 8, dmg: 12, mining: 0 },
+                { power: 0.28, speed: 9, dmg: 15, mining: 0 },
+            ] },
+            railgun: { role: 'combat', tiers: [      // slow, heavy hitter
+                { power: 1.00, speed: 2, dmg: 14, mining: 0 },
+                { power: 0.92, speed: 2, dmg: 18, mining: 0 },
+                { power: 0.84, speed: 3, dmg: 22, mining: 0 },
+                { power: 0.76, speed: 3, dmg: 27, mining: 0 },
+                { power: 0.68, speed: 4, dmg: 33, mining: 0 },
+            ] },
+        };
+        const TIER_NAME = { 1:'Mk I', 2:'Mk II', 3:'Mk III', 4:'Mk IV', 5:'Mk V' };
         // Materials to reach each tier (from the previous one). ids: 7 Metal, 10 Crystal, 30 Void Crystal, 33 Circuit.
-        const UPGRADE_COST = { 2:[{id:7,count:4},{id:10,count:2}], 3:[{id:7,count:6},{id:10,count:4},{id:30,count:1}] };
+        const UPGRADE_COST = {
+            2:[{id:7,count:4},{id:10,count:2}],
+            3:[{id:7,count:6},{id:10,count:4},{id:33,count:1}],
+            4:[{id:7,count:9},{id:10,count:6},{id:33,count:2}],
+            5:[{id:7,count:12},{id:10,count:9},{id:30,count:1},{id:33,count:3}],
+        };
         const DRONE_COST   = { 2:[{id:7,count:3},{id:10,count:2}], 3:[{id:7,count:5},{id:10,count:3},{id:33,count:1}] };
         // Scanner range: tier 1..5 → 10..50 m, +10 m per upgrade.
         const SCANNER_COST = { 2:[{id:10,count:2},{id:7,count:1}], 3:[{id:10,count:3},{id:7,count:2}],
                                4:[{id:10,count:4},{id:7,count:2},{id:33,count:1}], 5:[{id:10,count:6},{id:7,count:3},{id:30,count:1}] };
-        let _weaponTierCache = {};            // {id: 1..3}, mirrors profile (avoids per-frame localStorage)
+        let _weaponTierCache = {};            // {id: 1..5}, mirrors profile (avoids per-frame localStorage)
         let _droneTierCache = 1, _scannerTierCache = 1;
         function refreshTierCache() {
             const AP = getProfileApi();
@@ -2987,9 +3293,20 @@ ${waveConsts}
             _droneTierCache = Math.max(1, Math.min(3, (inv.droneTier | 0) || 1));
             _scannerTierCache = Math.max(1, Math.min(5, (inv.scannerTier | 0) || 1));
         }
-        function weaponTierOf(id) { return Math.max(1, Math.min(3, (_weaponTierCache[id] | 0) || 1)); }
-        function weaponTierMult(id) { return TIER_MULT[weaponTierOf(id)] || TIER_MULT[1]; }
+        function weaponTierOf(id) { return Math.max(1, Math.min(5, (_weaponTierCache[id] | 0) || 1)); }
         function scannerRange() { return _scannerTierCache * 10; }   // metres
+
+        // Resolve a weapon's stats for its current crafted tier. Weapons absent from the
+        // table (none ship today) get a neutral combat fallback.
+        function weaponStatsFor(id) {
+            const w = WEAPON_TIERS[id];
+            const lvl = weaponTierOf(id);
+            if (!w || !w.tiers || !w.tiers.length) {
+                return { lvl, power: 0.5, speed: 5, dmg: 5, mining: 0, role: 'combat' };
+            }
+            const row = w.tiers[Math.max(0, Math.min(w.tiers.length - 1, lvl - 1))];
+            return { lvl, power: row.power, speed: row.speed, dmg: row.dmg, mining: row.mining, role: w.role };
+        }
 
         function weaponGameplayFor(id) {
             if (!fpTune) fpTune = loadFpTune();
@@ -2998,8 +3315,10 @@ ${waveConsts}
             if (!fpTune.weaponStats[id]) {
                 fpTune.weaponStats[id] = Object.assign({}, defs[id] || { power: 0.5, range: 0.5 });
             }
-            const base = fpTune.weaponStats[id], t = weaponTierMult(id);
-            return { power: base.power * t.power, range: Math.min(1, base.range * t.range), fire: t.fire };
+            const st = weaponStatsFor(id);
+            // Reach stays a per-weapon base (tier-independent; not part of the tier table).
+            const range = Math.min(1, fpTune.weaponStats[id].range);
+            return { power: st.power, speed: st.speed, dmg: st.dmg, mining: st.mining, range, role: st.role, lvl: st.lvl };
         }
 
         function currentAimReach() {
@@ -3741,6 +4060,8 @@ ${waveConsts}
             'Metal': 'Metal', 'Alloy': 'Legering', 'Glass': 'Glas', 'Circuit': 'Kredsløb',
             'Lamp': 'Lampe', 'Hull': 'Skrog', 'Energy': 'Energi', 'Gate Key': 'Portnøgle',
             'Lava': 'Lava', 'Acid': 'Syre', 'Water': 'Vand',
+            'Lava Flow': 'Lavastrøm', 'Ash': 'Aske', 'Magma Rock': 'Magmasten', 'Ancient Ruins': 'Oldtidsruiner',
+            'Volcano': 'Vulkan', 'Fire Cave': 'Ildhule',
             'Mosshorn': 'Moshorn', 'Frostmane': 'Frostmanke', 'Driftjelly': 'Drivgople',
             'Sporeling': 'Sporeyngel', 'Skate': 'Svæverokke', 'Glowmoth': 'Lysmøl',
             'Sentinel': 'Vagtdrone', 'Curator': 'Kurator', 'Warden': 'Vogter',
@@ -4904,7 +5225,9 @@ ${waveConsts}
             }
         }
 
+        function _isUnminable(id){ const b = blockById(id); return !!(b && b.tags && b.tags.indexOf('unminable') >= 0); }
         function completeMine(t, id) {
+            if(_isUnminable(id)){ resetMining(); disposeAimEdgeHighlight(); return; }   // lava flow can't be broken
             mineBreakSfx(id);
             burst(
                 t.x + 0.5 + WORLD_OFFSET.x,
@@ -4920,54 +5243,15 @@ ${waveConsts}
             disposeAimEdgeHighlight();
         }
 
-        function mineProgressGain(block) {
-            const g = weaponDef ? weaponGameplayFor(weaponDef.id) : { power: 0.5 };
-            const speed = (weaponDef && weaponDef.stats && weaponDef.stats.Speed) || 5;
-            const hardness = (block && block.hardness) || 1;
-            return g.power * speed / (hardness * 1.75);
-        }
-
         function laserMineGain(block) {
+            if(block && block.tags && block.tags.indexOf('unminable') >= 0) return 0;
             const g = weaponGameplayFor(weaponDef.id);
-            const speed = (weaponDef.stats && weaponDef.stats.Speed) || 5;
             const hardness = (block && block.hardness) || 1;
-            return g.power * speed / (hardness * 3.2);
+            // g.mining = blocks/s at hardness 1; one mine tick fires every MINECUTTER_FIRE_INTERVAL,
+            // so progress/tick = mining * interval / hardness keeps the effective rate at mining/hardness.
+            return (g.mining || 0) * MINECUTTER_FIRE_INTERVAL / hardness;
         }
 
-        function tryMineSwing() {
-            if (!isPickaxe()) {
-                showToolMsg('Equip pickaxe to mine (Q/E)');
-                return false;
-            }
-            triggerMineAnim();
-            const t = pickTarget();
-            if (!t || !getBlock(t.x, t.y, t.z)) {
-                resetMining();
-                return false;
-            }
-            const id = getBlock(t.x, t.y, t.z);
-            const block = blockById(id);
-            if (!block) return false;
-            if (mineTarget && (mineTarget.x !== t.x || mineTarget.y !== t.y || mineTarget.z !== t.z)) {
-                mineProgress = 0;
-            }
-            mineTarget = { x: t.x, y: t.y, z: t.z };
-            mineProgress += mineProgressGain(block);
-            playSfx('wallChip');
-            if (mineProgress >= 1) {
-                completeMine(t, id);
-                return true;
-            }
-            return false;
-        }
-
-        function updateMiningHold(dt) {
-            if (!fireHeld || !isPickaxe() || voxelPanelOpen()) return;
-            mineRepeatCooldown -= dt;
-            if (mineRepeatCooldown > 0) return;
-            tryMineSwing();
-            mineRepeatCooldown = MINE_SWING_INTERVAL;
-        }
 
         function fireCombat() {
             if (flying) return;
@@ -4995,7 +5279,7 @@ ${waveConsts}
         function tryLaserMine() {
             if (!isMineLaser()) return false;
             const t = pickTarget();
-            playSfx(weaponDef && weaponDef.id === 'laser' ? 'laserFire' : 'laserCut');
+            playSfx('laserCut');
             triggerMineAnim({ laserPulse: true });
             if (!t || !getBlock(t.x, t.y, t.z)) {
                 resetMining();
@@ -5951,7 +6235,7 @@ ${waveConsts}
         }
 
         function mineBlock() {
-            return tryMineSwing();
+            return tryLaserMine();
         }
         function placeBlock() {
             if (!isMiningTool()) {
@@ -6104,6 +6388,9 @@ ${waveConsts}
             }
             ownedWeapons.add(start);
             ownedWeapons.add(cfg.weapon | 0);
+            // Pickaxe is retired in Asteroid mode — never keep it owned.
+            const px = defs.findIndex((w) => w.id === 'pickaxe');
+            if (px >= 0) ownedWeapons.delete(px);
             saveOwnedWeapons();
         }
         function saveOwnedWeapons() {
@@ -6393,9 +6680,10 @@ ${waveConsts}
             grid.className = 'vx-grid';
             grid.appendChild(createEmptyHandsInvItem());
             const defs = weaponList();
-            const visible = ownedOnly
+            const visible = (ownedOnly
                 ? defs.map((d, i) => ({ def: d, i })).filter((x) => ownedWeapons.has(x.i))
-                : defs.map((d, i) => ({ def: d, i }));
+                : defs.map((d, i) => ({ def: d, i })))
+                .filter((x) => x.def.id !== 'pickaxe');   // pickaxe retired in Asteroid mode
             if (!visible.length) {
                 const empty = document.createElement('div');
                 empty.className = 'vx-inv-empty';
@@ -6673,22 +6961,22 @@ ${waveConsts}
             const tier = weaponTierOf(def.id);
             // effective (tiered) gameplay numbers
             const g = weaponGameplayFor(def.id);
-            const effDmg = Math.max(2, Math.round((g.power || 0.4) * 14));
+            const effDmg = Math.round(g.dmg || 0);
             const effReach = Math.round(AIM_REACH * THREE.MathUtils.clamp(g.range, 0.12, 1));
             let stats = '<div class="vx-codex-block"><div class="vx-codex-h">Stats · ' + TIER_NAME[tier] + '</div>';
             const effBar = (label, v, max) => { const w = Math.max(0, Math.min(100, (v / max) * 100));
                 return '<div class="vx-statbar"><span class="vx-statbar-label">' + label + '</span>'
                     + '<span class="vx-statbar-track"><span class="vx-statbar-fill" style="width:' + w + '%"></span></span>'
                     + '<span class="vx-statbar-num">' + v + '</span></div>'; };
-            stats += effBar('Damage', effDmg, 20);
+            stats += effBar('Damage', effDmg, 35);
             stats += effBar('Reach', effReach, 13);
-            const mineV = Math.round((g.power || 0.4) * 10);
-            stats += effBar('Mining', mineV, 12);
+            const mineV = Math.round((g.mining || 0) * 10) / 10;   // blocks/s (minecutter only)
+            stats += effBar('Mining', mineV, 17);
             stats += '</div>';
-            // upgrade row (owned + below Mk III) — upgrade right here, mirrors the Refinery
+            // upgrade row (owned + below Mk V) — upgrade right here, mirrors the Refinery
             let upRow = '';
             if (owned) {
-                if (tier >= 3) upRow = '<div class="vx-codex-fact"><span class="vx-codex-fact-icon">⬆</span><span>Fully upgraded (Mk III).</span></div>';
+                if (tier >= 5) upRow = '<div class="vx-codex-fact"><span class="vx-codex-fact-icon">⬆</span><span>Fully upgraded (Mk V).</span></div>';
                 else {
                     const cost = UPGRADE_COST[tier + 1] || [];
                     const can = canAfford(cost);
@@ -6985,7 +7273,7 @@ ${waveConsts}
         function spendCost(cost) { for (const c of cost) spendFromInventory(c.id, c.count); flushProfileState(); }
         function upgradeWeapon(id) {
             const AP = getProfileApi(); if (!AP) return;
-            const cur = weaponTierOf(id); if (cur >= 3) return;
+            const cur = weaponTierOf(id); if (cur >= 5) return;
             const next = cur + 1, cost = UPGRADE_COST[next] || [];
             if (!canAfford(cost)) { if (g.showMessage) g.showMessage('Not enough materials to upgrade', 2000); return; }
             spendCost(cost);
@@ -7057,9 +7345,9 @@ ${waveConsts}
             body.appendChild(head);
             // owned weapons/tools
             [...ownedWeapons].sort((a, b) => a - b).forEach((idx) => {
-                const w = weaponList()[idx]; if (!w) return;
+                const w = weaponList()[idx]; if (!w || w.id === 'pickaxe') return;
                 const cur = weaponTierOf(w.id);
-                appendUpgradeCard(body, w.name, cur, UPGRADE_COST[cur + 1] || [], () => upgradeWeapon(w.id));
+                appendUpgradeCard(body, w.name, cur, UPGRADE_COST[cur + 1] || [], () => upgradeWeapon(w.id), { max: 5 });
             });
             // the Drone companion
             appendUpgradeCard(body, 'Drone companion', _droneTierCache, DRONE_COST[_droneTierCache + 1] || [], upgradeDrone);
@@ -7530,6 +7818,7 @@ ${waveConsts}
         function _restoreScene() {
             if (!_saved) return;
             disposeClouds();
+            disposeEmberFx();
             disposeSkyDome();
             disposePlanetBody();
             if(g.camera){ g.camera.far = 700; g.camera.updateProjectionMatrix(); }   // undo space far-plane
@@ -8383,7 +8672,7 @@ ${waveConsts}
           el.hidden=false;
           el.innerHTML='<b>🎯 TRAINING</b> · '+weaponDef.name+' '+TIER_NAME[weaponTierOf(weaponDef.id)]
             +'<br>combat reach <b>'+combR+'m</b> · mine reach <b>'+mineR+'m</b>'
-            +'<br>damage <b>'+weaponDamage()+'</b> · power '+(gp.power).toFixed(2)+' · range '+(gp.range).toFixed(2)
+            +'<br>damage <b>'+weaponDamage()+'</b> · mining <b>'+(gp.mining||0).toFixed(1)+'</b>/s · range '+(gp.range).toFixed(2)
             +'<br>scan range <b>'+scannerRange()+'m</b>';
         }
 
@@ -8396,7 +8685,7 @@ ${waveConsts}
         function weaponDamage(){
           if(!weaponDef) return 3;
           const gp = weaponGameplayFor(weaponDef.id);
-          return Math.max(2, Math.round((gp.power||0.4)*14));
+          return Math.max(0, Math.round(gp.dmg || 0));   // minecutter = 0 (mining tool)
         }
 
         // Raycast for a creature under the crosshair within `maxDist`.
@@ -8765,7 +9054,6 @@ ${waveConsts}
             updateFpViewmodel(dt, sp);
             tickSwordSwingLock(dt);
             updateLaserHoldFire(dt);
-            updateMiningHold(dt);
             updateWeaponFx();
             if(matAnim){
                 matAnim.map.offset.x=(((elapsed*5)|0)%4)*0.25;
@@ -8800,8 +9088,10 @@ ${waveConsts}
             updateDrone(dt);          // Hero companion trails the player
             updateStarGate(dt);       // Ancient gate glow + proximity hint
             updatePlayerCombat(dt);   // health regen / i-frames / hurt flash + hearts HUD
+            updateVolcanicHazard(dt);  // Ember: lava burns + radiant heat
             updateTrainHud();         // training-field live weapon readout
             if(_AC) _AC.stepFx(dt);   // creature breath / spore / ember particles
+            stepEmberFx(dt);          // Ember: falling ash + rising embers
             updateHUD();
             updateCamera(dt);
             setUnderwaterTint(eyeInWater());
@@ -8905,6 +9195,15 @@ ${waveConsts}
             applySettings();                       // sound + view distance (VIEW_R) before streaming
             setFirstPerson(vxSettings.view === 'first');   // default camera
             weaponIndex = loadCharCfg().weapon;
+            // Migrate a legacy pickaxe loadout to the Laser Handgun (sole mining tool).
+            {
+                const _defs = weaponList();
+                if (weaponIndex >= 0 && _defs[weaponIndex] && _defs[weaponIndex].id === 'pickaxe') {
+                    const mc = _defs.findIndex((w) => w.id === 'minecutter');
+                    weaponIndex = mc >= 0 ? mc : -1;
+                    saveCharCfg({ weapon: weaponIndex });
+                }
+            }
             if (weaponIndex >= 0) ownedWeapons.add(weaponIndex);
             updateWeaponLabel();
             on(window, 'keydown', e => {
@@ -9046,12 +9345,7 @@ ${waveConsts}
                 if (e.button === 0) {
                     fireHeld = true;
                     laserCooldown = 0;
-                    mineRepeatCooldown = 0;
                     if (isMineLaser()) tryLaserMine();
-                    else if (isPickaxe()) {
-                        tryMineSwing();
-                        mineRepeatCooldown = MINE_SWING_INTERVAL;
-                    }
                 }
             }
 
@@ -9069,7 +9363,7 @@ ${waveConsts}
                 if (btn === 2) {
                     placeBlock();
                     if (firstPerson || wasLockedOnDown) restoreViewPointerLock();
-                } else if (btn === 0 && !isMineLaser() && !isPickaxe()) fireCombat();
+                } else if (btn === 0 && !isMineLaser()) fireCombat();
             }
 
             function onCanvasPointerMove(e) {

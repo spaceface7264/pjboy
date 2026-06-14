@@ -206,8 +206,8 @@
             if (i < 0) i = fb;
             if (i >= 0 && out.indexOf(i) < 0) out.push(i);
         };
-        add('pickaxe', 0);   // mining tool
-        add('plasma', 6);    // plasma pistol
+        add('minecutter', 5);   // Laser Handgun — sole mining tool
+        add('plasma', 6);       // plasma pistol
         return out;
     }
 
@@ -269,6 +269,12 @@
         p.inventory.hotbar = Array.isArray(p.inventory.hotbar) ? p.inventory.hotbar.slice(0, 9) : Array(9).fill(null);
         while (p.inventory.hotbar.length < 9) p.inventory.hotbar.push(null);
         p.inventory.ownedWeapons = Array.isArray(p.inventory.ownedWeapons) ? p.inventory.ownedWeapons.map((i) => i | 0) : [];
+        // Pickaxe is retired in Asteroid mode (Laser Handgun is the sole mining tool):
+        // drop its registry index from legacy saves so it never re-appears as owned.
+        try {
+            const px = (typeof VoxelCharacter !== 'undefined' && VoxelCharacter.weaponIdx) ? VoxelCharacter.weaponIdx('pickaxe') : 0;
+            if (px >= 0) p.inventory.ownedWeapons = p.inventory.ownedWeapons.filter((i) => i !== px);
+        } catch (_) {}
         p.inventory.weaponTier = (p.inventory.weaponTier && typeof p.inventory.weaponTier === 'object') ? p.inventory.weaponTier : {};
         p.inventory.droneTier = Math.max(1, Math.min(3, (p.inventory.droneTier | 0) || 1));
         p.inventory.scannerTier = Math.max(1, Math.min(5, (p.inventory.scannerTier | 0) || 1));
@@ -621,14 +627,14 @@
         return CRAFT_RECIPES.find((r) => r.id === id) || null;
     }
 
-    // ---- Upgrade tiers (Mk I/II/III) — crafted progression for gear + Drone ----
+    // ---- Upgrade tiers — crafted progression for gear (Mk I..V) + Drone (Mk I..III) ----
     function weaponTier(profile, id) {
         const t = profile && profile.inventory && profile.inventory.weaponTier ? (profile.inventory.weaponTier[id] | 0) : 0;
-        return Math.max(1, Math.min(3, t || 1));
+        return Math.max(1, Math.min(5, t || 1));
     }
     function setWeaponTier(profile, id, tier) {
         if (!profile.inventory.weaponTier) profile.inventory.weaponTier = {};
-        profile.inventory.weaponTier[id] = Math.max(1, Math.min(3, tier | 0));
+        profile.inventory.weaponTier[id] = Math.max(1, Math.min(5, tier | 0));
         save(profile);
         return profile.inventory.weaponTier[id];
     }
