@@ -6093,6 +6093,13 @@ ${waveConsts}
             name.title = def.name;
             name.textContent = def.name;
             item.appendChild(name);
+            const tier = weaponTierOf(def.id);
+            if (owned && tier > 1) {
+                const badge = document.createElement('div');
+                badge.className = 'vx-tier-badge';
+                badge.textContent = TIER_NAME[tier];
+                item.appendChild(badge);
+            }
             if (owned || !ownedOnly) {
                 item.addEventListener('click', () => {
                     ownedWeapons.add(index);
@@ -6446,33 +6453,55 @@ ${waveConsts}
             page.className = 'vx-codex';
             const type = (def.ranged ? 'Ranged' : 'Melee') + ' · ' + (def.twoHanded ? 'Two-handed' : 'One-handed');
             const equipped = (weaponIndex === idx);
-            let stats = '';
-            if (def.stats) {
-                stats += '<div class="vx-codex-block"><div class="vx-codex-h">Stats</div>';
-                Object.entries(def.stats).forEach(([k, v]) => {
-                    const w = Math.max(0, Math.min(100, (v / 10) * 100));
-                    stats += '<div class="vx-statbar"><span class="vx-statbar-label">' + k + '</span>'
-                        + '<span class="vx-statbar-track"><span class="vx-statbar-fill" style="width:' + w + '%"></span></span>'
-                        + '<span class="vx-statbar-num">' + v + '</span></div>';
-                });
-                stats += '</div>';
+            const owned = ownedWeapons.has(idx);
+            const tier = weaponTierOf(def.id);
+            // effective (tiered) gameplay numbers
+            const g = weaponGameplayFor(def.id);
+            const effDmg = Math.max(2, Math.round((g.power || 0.4) * 14));
+            const effReach = Math.round(AIM_REACH * THREE.MathUtils.clamp(g.range, 0.12, 1));
+            let stats = '<div class="vx-codex-block"><div class="vx-codex-h">Stats · ' + TIER_NAME[tier] + '</div>';
+            const effBar = (label, v, max) => { const w = Math.max(0, Math.min(100, (v / max) * 100));
+                return '<div class="vx-statbar"><span class="vx-statbar-label">' + label + '</span>'
+                    + '<span class="vx-statbar-track"><span class="vx-statbar-fill" style="width:' + w + '%"></span></span>'
+                    + '<span class="vx-statbar-num">' + v + '</span></div>'; };
+            stats += effBar('Damage', effDmg, 20);
+            stats += effBar('Reach', effReach, 13);
+            const mineV = Math.round((g.power || 0.4) * 10);
+            stats += effBar('Mining', mineV, 12);
+            stats += '</div>';
+            // upgrade row (owned + below Mk III) — upgrade right here, mirrors the Refinery
+            let upRow = '';
+            if (owned) {
+                if (tier >= 3) upRow = '<div class="vx-codex-fact"><span class="vx-codex-fact-icon">⬆</span><span>Fully upgraded (Mk III).</span></div>';
+                else {
+                    const cost = UPGRADE_COST[tier + 1] || [];
+                    const can = canAfford(cost);
+                    const costStr = cost.map((c) => { const have = getBackpackCount(c.id), col = have >= c.count ? '#9be89b' : '#ff9b9b';
+                        return '<span style="color:' + col + '">' + refineryMatName(c.id) + ' ' + have + '/' + c.count + '</span>'; }).join(' · ');
+                    upRow = '<div class="vx-codex-block"><div class="vx-codex-h">Upgrade → ' + TIER_NAME[tier + 1] + '</div>'
+                        + '<div style="font-size:12px;margin-bottom:8px;">' + costStr + '</div>'
+                        + '<button type="button" class="vx-equip-btn' + (can ? ' vx-equip-on' : '') + '" data-upgrade' + (can ? '' : ' disabled') + '>'
+                        + '⬆ Upgrade</button></div>';
+                }
             }
             const desc = def.desc ? '<div class="vx-codex-fact"><span class="vx-codex-fact-icon">📖</span><span>' + def.desc + '</span></div>' : '';
             page.innerHTML = '<div class="vx-gear-detail">'
                 + '<div class="vx-gear-stage"><canvas class="vx-gear-canvas" aria-label="' + def.name + '"></canvas></div>'
                 + '<div class="vx-gear-headrow"><div>'
-                + '<div class="vx-codex-name">' + def.name + '</div>'
+                + '<div class="vx-codex-name">' + def.name + (tier > 1 ? ' <span class="vx-tier-chip">' + TIER_NAME[tier] + '</span>' : '') + '</div>'
                 + '<div class="vx-codex-cat">⚔️ ' + type + '</div></div>'
                 + '<button type="button" class="vx-equip-btn' + (equipped ? ' vx-equip-on' : '') + '" data-equip' + (equipped ? ' disabled' : '') + '>'
                 + (equipped ? '✓ Equipped' : 'Equip') + '</button>'
                 + '</div>'
-                + stats + desc
+                + stats + upRow + desc
                 + '</div>';
             body.appendChild(page);
             const eb = page.querySelector('[data-equip]');
             if (eb && !equipped) eb.addEventListener('click', () => {
                 ownedWeapons.add(idx); saveOwnedWeapons(); setWeaponIndex(idx); renderDrawer();
             });
+            const ub = page.querySelector('[data-upgrade]');
+            if (ub && !ub.disabled) ub.addEventListener('click', () => { upgradeWeapon(def.id); renderDrawer(); });
             startGearViewer(page.querySelector('.vx-gear-canvas'), idx);
         }
 

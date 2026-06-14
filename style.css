@@ -1906,6 +1906,31 @@ body.mode-asteroid #lava-vignette {
     color: #c0b3ff;
     font-size: 1.05em;
 }
+/* Gear upgrade tier badge (grid card) + chip (detail header) */
+.vx-tier-badge {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    z-index: 2;
+    font: 700 9px/1 ui-monospace, Menlo, monospace;
+    letter-spacing: 0.04em;
+    color: #2a1a08;
+    background: linear-gradient(180deg, #ffd45c, #e8b33b);
+    border-radius: 5px;
+    padding: 2px 4px;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
+    pointer-events: none;
+}
+.vx-tier-chip {
+    display: inline-block;
+    vertical-align: middle;
+    margin-left: 6px;
+    font: 700 10px/1 ui-monospace, Menlo, monospace;
+    color: #2a1a08;
+    background: linear-gradient(180deg, #ffd45c, #e8b33b);
+    border-radius: 5px;
+    padding: 2px 6px;
+}
 /* ===== Asteroid HUD — warm PS1/N64 retro language (shared tokens) ===== */
 body.mode-asteroid {
     --hud-bg: rgba(40, 32, 23, 0.93);          /* warm slate panel */
@@ -2951,6 +2976,7 @@ body.mode-asteroid {
     padding: 8px 4px;
 }
 .vx-item {
+    position: relative;
     border: 1px solid var(--vx-tint-border, rgba(58, 168, 196, 0.3));
     border-radius: 10px;
     background: linear-gradient(180deg, var(--vx-tint-bg, rgba(16, 22, 40, 0.9)), rgba(8, 12, 22, 0.92));
