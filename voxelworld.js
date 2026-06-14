@@ -597,6 +597,9 @@
           { id:35, cat:'Crafted', name:'Hull',    tiles:{all:'hull'},    hardness:10, tags:['crafted','structural'],
             desc:'Ship-grade armor plating. If it can hold vacuum, it can hold anything.',
             sci:{formula:'Ti alloy', mineral:'Titanium plate', fact:'Spacecraft hulls must hold one atmosphere of pressure against pure vacuum.'} },
+          { id:41, cat:'Crafted', name:'Gate Key', tiles:{all:'crystal'}, hardness:6, tags:['crafted','glows','key'], glowColor:0x4a2a78,
+            desc:'A crystal key humming with Ancient power. Bring it to a dormant Star Gate to wake it.',
+            sci:{formula:'resonant crystal', mineral:'Tuned crystal', fact:'Crystals can store and release energy at exact frequencies — that is how quartz watches keep time.'} },
         
           // ---- Hazards ----
           { id:11, cat:'Hazards', name:'Energy', tiles:{all:'energy'}, hardness:9, tags:['hazard','glows'], animated:true, glowColor:0x6a2a08,
@@ -1053,6 +1056,7 @@
         }
         // Per-frame: follow the camera, advance twinkle, and blend atmosphere->space by altitude.
         const SPACE_Y0=72, SPACE_Y1=148;          // world-Y where space transition starts / completes
+        let _mapFade=0;                            // 0..1 star-map presence (crossfades the pinned globe out)
         function updateSky(dt){
           if(!_skyMat) return;
           const u=_skyMat.uniforms; u.uTime.value=elapsed;
@@ -1068,9 +1072,10 @@
             g.scene.fog.color.setHex(_baseFogHex).lerp(_SPACE_COL, sf);
           }
           // curved planet globe below: fade in with altitude, sit under the player, face the sun.
+          // The star map crossfades it out (the discrete planet body takes over) via _mapFade.
           if(_planetMat){
             const pu=_planetMat.uniforms;
-            pu.uOpacity.value = _cl01((sf-0.04)/0.46);          // fully present by mid-ascent
+            pu.uOpacity.value = _cl01((sf-0.04)/0.46) * (1-_mapFade); // fades as the star map rises
             if(_planetBody) _planetBody.position.set(camera.position.x, PLANET_SURFACE_Y - PLANET_R, camera.position.z);
             if(Ls&&Ls[1]) pu.uSunDir.value.copy(Ls[1].position).normalize();
             const th=activeBiome||BIOME_THEMES.verdant;
@@ -3609,7 +3614,7 @@ ${waveConsts}
             'Uranium Ore': 'Uranmalm', 'Aether Ore': 'Ætermalm',
             'Crystal': 'Krystal', 'Emerald Crystal': 'Smaragdkrystal', 'Void Crystal': 'Tomrumskrystal',
             'Metal': 'Metal', 'Alloy': 'Legering', 'Glass': 'Glas', 'Circuit': 'Kredsløb',
-            'Lamp': 'Lampe', 'Hull': 'Skrog', 'Energy': 'Energi',
+            'Lamp': 'Lampe', 'Hull': 'Skrog', 'Energy': 'Energi', 'Gate Key': 'Portnøgle',
             'Lava': 'Lava', 'Acid': 'Syre', 'Water': 'Vand',
             'Mosshorn': 'Moshorn', 'Frostmane': 'Frostmanke', 'Driftjelly': 'Drivgople',
             'Sporeling': 'Sporeyngel', 'Skate': 'Svæverokke', 'Glowmoth': 'Lysmøl',
@@ -7238,9 +7243,16 @@ ${waveConsts}
                 clearCritters();
                 spawnPlayerAtCenter();
                 streamInit();
+                spawnStarGate();
+                // if you flew here, arrive in the upper sky still piloting — descend to explore
+                if (flying && ship) {
+                    ship.pos.set(player.pos.x, SPACE_ARRIVE_Y, player.pos.z);
+                    ship.vel.set(0,0,0); ship.pitch=0; ship.roll=0; ship.climbCmd=0;
+                    player.pos.copy(ship.pos); player.yaw = ship.yaw;
+                }
                 flushProfileState();
                 hideVoxelLoading();
-                if (def && g.showMessage) g.showMessage('Arrived at ' + def.name + ' · ' + def.nameDa, 2600);
+                if (def && g.showMessage) g.showMessage((flying?'Descending toward ':'Arrived at ') + def.name + ' · ' + def.nameDa, 2600);
                 if (typeof updateJournalHud === 'function') updateJournalHud();
             });
             return true;
@@ -7304,6 +7316,8 @@ ${waveConsts}
         let _shipTrails = null;             // wingtip vapor streaks at high speed
         const _wingL = new THREE.Vector3(-1.9, 0.6, -1.2), _wingR = new THREE.Vector3(1.9, 0.6, -1.2);
         const _tmpTip = new THREE.Vector3();
+        let starGate = null;                // Ancient Star Gate near spawn (E to travel)
+        const GATE_KEY_ID = 41;             // crafted item that powers a dormant gate
         const CREATURES = (_AC ? _AC.DEFS.filter(d => d.spawn) : []);
         const _creatureById = {}; (_AC ? _AC.DEFS : CREATURES).forEach(c => _creatureById[c.id] = c);
 
@@ -7475,7 +7489,7 @@ ${waveConsts}
           player.pos.set(ship.pos.x, gy + 0.02, ship.pos.z);
           player.vel.set(0,0,0); player.knock.set(0,0,0);
           scene.remove(ship.group); ship.dispose(); ship = null;
-          clearShipTrails();
+          clearShipTrails(); clearSpace();
           flying = false; _flyCamPos = null; _flyCamUp = null;
           if(camera) camera.up.set(0,1,0);   // un-tilt for the normal on-foot camera
           if(av && av.group) av.group.visible = !firstPerson;
@@ -7542,7 +7556,8 @@ ${waveConsts}
           // heading: keyboard yaw (mouse yaw is applied live in applyFlightMouse)
           ship.yaw += yawIn*SHIP_TURN*dt;
           const boosting = (thr>0 && k.Space);             // afterburner: Space + W
-          const spd = SHIP_MAX*(boosting?SHIP_BOOST:1);
+          const inSpace = ship.pos.y > SPACE_ENTER_Y;      // open space — worlds are far apart
+          const spd = SHIP_MAX*(boosting?SHIP_BOOST:1)*(inSpace?1.7:1);
           _shipFwd.set(Math.sin(ship.yaw),0,Math.cos(ship.yaw));
           // vertical command: Space/Shift + a decaying mouse climb nudge
           const climb = THREE.MathUtils.clamp(upIn + (ship.climbCmd||0), -1, 1);
@@ -7577,6 +7592,109 @@ ${waveConsts}
           // the player rides the ship (keeps streaming/creatures/camera centred)
           player.pos.copy(ship.pos); player.yaw = ship.yaw;
           if(av && av.group) av.group.visible = false;
+          // space map: climb into orbit to see the other worlds; fly to one to travel.
+          // updateSpace owns the fade-out + teardown so leaving orbit crossfades smoothly.
+          if(ship.pos.y > SPACE_ENTER_Y && !spaceMode) enterSpaceMode();
+          if(spaceMode) updateSpace(dt);
+        }
+
+        // ---- Star map: the worlds as game-sized planet bodies you fly between ----
+        function makeOrbLabel(name, sub){
+          const cv=document.createElement('canvas'); cv.width=256; cv.height=96;
+          const c=cv.getContext('2d'); c.textAlign='center';
+          c.shadowColor='rgba(0,0,0,0.85)'; c.shadowBlur=6;
+          c.font='bold 34px ui-monospace,Menlo,monospace'; c.fillStyle='#eaf4ff'; c.fillText(name,128,40);
+          c.font='600 22px ui-monospace,Menlo,monospace'; c.fillStyle='#9fd0ff'; c.fillText('🇩🇰 '+sub,128,72);
+          const tex=new THREE.CanvasTexture(cv);
+          const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:tex,transparent:true,depthWrite:false,depthTest:false}));
+          sp.scale.set(28,10.5,1); return sp;
+        }
+        function planetColor(def){ return def.id==='aquaria'?0x3fa9e6:(BIOME_ORB[def.biome]||0x8fd0ff); }
+        function _lighten(hex,f){ const r=hex>>16&255,g2=hex>>8&255,b=hex&255;
+          return (Math.round(r+(255-r)*f)<<16)|(Math.round(g2+(255-g2)*f)<<8)|Math.round(b+(255-b)*f); }
+        function makePlanetBody(def, x,y,z, R, isHome){
+          const col=planetColor(def), air=_lighten(col,0.55);
+          const grp=new THREE.Group(); grp.position.set(x,y,z);
+          // low emissive so the sun carves a clear day/night terminator → reads as a real planet
+          const core=new THREE.Mesh(new THREE.SphereGeometry(R,40,28),
+            new THREE.MeshStandardMaterial({color:col,emissive:col,emissiveIntensity:0.1,roughness:1.0,metalness:0.0,
+              transparent:true,opacity:0}));
+          grp.add(core);
+          const atmo=new THREE.Mesh(new THREE.SphereGeometry(R*1.10,28,20),   // bright atmosphere rim
+            new THREE.MeshBasicMaterial({color:air,transparent:true,opacity:0,blending:THREE.AdditiveBlending,depthWrite:false,side:THREE.BackSide}));
+          grp.add(atmo);
+          const glow=new THREE.Mesh(new THREE.SphereGeometry(R*1.42,24,16),    // soft outer halo
+            new THREE.MeshBasicMaterial({color:air,transparent:true,opacity:0,blending:THREE.AdditiveBlending,depthWrite:false,side:THREE.BackSide}));
+          grp.add(glow);
+          const label=makeOrbLabel(def.name, def.nameDa); label.position.y=R+16; label.material.opacity=0; grp.add(label);
+          scene.add(grp);
+          planetOrbs.push({grp, core, def, pos:grp.position.clone(), R, isHome:!!isHome,
+            mats:[{m:core.material,o:1},{m:atmo.material,o:0.30},{m:glow.material,o:0.12},{m:label.material,o:1}]});
+        }
+        function enterSpaceMode(){
+          if(spaceMode) return; spaceMode=true;
+          const AP=getProfileApi(); const list=(AP&&AP.PLANETS)||[];
+          const cx=ship?ship.pos.x:player.pos.x, cz=ship?ship.pos.z:player.pos.z;
+          // the world you're leaving — a real body fixed below the surface, so it shrinks as you climb away
+          const homeDef=list.find(p=>p.id===activePlanetId)||list[0];
+          if(homeDef) makePlanetBody(homeDef, cx, -62, cz, 86, true);
+          // the other worlds, spread far apart across the star field
+          const others=list.filter(p=>p.id!==activePlanetId);
+          others.forEach((def,i)=>{
+            const ang=(i/Math.max(1,others.length))*Math.PI*2 + 0.7, dist=520 + i*340;
+            makePlanetBody(def, cx+Math.cos(ang)*dist, SPACE_ENTER_Y+70+(i%3)*55, cz+Math.sin(ang)*dist, 42, false);
+          });
+          if(g.showMessage) g.showMessage('Entering orbit — pick a distant world and fly to it', 3400);
+        }
+        function clearSpace(){
+          for(const o of planetOrbs){ scene.remove(o.grp);
+            o.grp.traverse(m=>{ if(m.geometry)m.geometry.dispose();
+              if(m.material){ if(m.material.map)m.material.map.dispose(); m.material.dispose(); } }); }
+          planetOrbs.length=0; spaceMode=false; _mapFade=0;
+          const h=document.getElementById('voxel-gate-hint'); if(h) h.hidden=true;
+        }
+        function updateSpace(dt){
+          // crossfade the whole map in/out by altitude → smooth entry AND exit
+          const target = (ship && ship.pos.y > SPACE_EXIT_Y) ? 1 : 0;
+          _mapFade += (target - _mapFade) * (1 - Math.exp(-2.5*dt));
+          let nearest=null, nd=1e9;
+          for(const o of planetOrbs){
+            o.core.rotation.y += dt*0.06;
+            for(const mm of o.mats) mm.m.opacity = mm.o * _mapFade;   // fade with the map
+            if(o.isHome) continue;                                    // the world you left isn't a destination
+            const d=ship?ship.pos.distanceTo(o.pos):1e9;
+            if(d<nd){ nd=d; nearest=o; }
+          }
+          // fully faded out and back in the atmosphere → tear the map down
+          if(_mapFade < 0.02 && target===0){ clearSpace(); return; }
+          const hintEl=document.getElementById('voxel-gate-hint');
+          if(hintEl){
+            if(nearest && _mapFade > 0.5){
+              const AP=getProfileApi(); const unlocked=AP&&AP.isUnlocked(AP.load(), nearest.def.id);
+              hintEl.hidden=false;
+              hintEl.innerHTML='🪐 '+nearest.def.name+' · '+nearest.def.nameDa+' — '+Math.round(nd)+'m'
+                + (unlocked? '' : '<br><b>dormant</b> · needs a Gate Key');
+            } else hintEl.hidden=true;
+          }
+          if(nearest && _mapFade > 0.6 && nd < nearest.R + 16) arriveAtOrb(nearest);
+        }
+        function arriveAtOrb(o){
+          const AP=getProfileApi(); if(!AP) return;
+          const prof=AP.load();
+          if(!AP.isUnlocked(prof, o.def.id)){
+            if(getBackpackCount(GATE_KEY_ID) < 1){
+              if(g.showMessage) g.showMessage(o.def.name+' is dormant — craft a Gate Key to chart it.', 2600);
+              if(ship){ const ax=ship.pos.x-o.pos.x, az=ship.pos.z-o.pos.z, m=Math.hypot(ax,az)||1, push=o.R+22;
+                ship.pos.x=o.pos.x+ax/m*push; ship.pos.z=o.pos.z+az/m*push;   // shove clear so it won't re-trigger
+                ship.vel.multiplyScalar(0.25); }
+              return;
+            }
+            spendFromInventory(GATE_KEY_ID,1); AP.grantPlanet(prof,o.def.id); AP.save(prof);
+            if(g.showMessage) g.showMessage('Gate Key spent — course locked!',1600);
+          }
+          const id=o.def.id;
+          clearSpace();
+          travelToPlanet(id);    // flying arrival drops you into the new world's upper sky
         }
         const _fcFwd=new THREE.Vector3(), _fcUp=new THREE.Vector3(), _fcDesired=new THREE.Vector3(), _fcLook=new THREE.Vector3();
         function updateFlightCamera(dt){
@@ -7599,6 +7717,83 @@ ${waveConsts}
           camera.up.copy(_flyCamUp);
           _fcLook.copy(ship.pos).addScaledVector(_fcFwd,6).addScaledVector(_fcUp,0.6);
           camera.lookAt(_fcLook);
+        }
+
+        /* ===================== STAR GATE ===================== *
+         * The Ancient inter-world travel mechanic + progression spine.
+         * A hovering ring spawns near your landing site; walk up and press
+         * E to step through. A gate to an unvisited world is dormant until
+         * you spend a crafted Gate Key (Crystals power it). Travel reuses
+         * the existing planet-travel chain.                                 */
+        const GATE_REACH = 5.5;
+        // Space map: climb a ship above SPACE_ENTER_Y and the other worlds appear as
+        // orbs you fly to. Drop below SPACE_EXIT_Y to return to the world below.
+        const SPACE_ENTER_Y = SPACE_Y1;          // orbs appear above this altitude
+        const SPACE_EXIT_Y  = SPACE_Y1 - 26;     // orbs clear when you descend past this
+        const SPACE_ARRIVE_Y = SPACE_Y0 - 6;     // you arrive here, descending into a new world
+        const BIOME_ORB = { verdant:0x6ee06a, frost:0xbcd4ec, fungal:0xc46ae8, desert:0xd9b878, volcanic:0xff5a2e };
+        let spaceMode = false; const planetOrbs = [];
+        function gateDestination(){
+          const AP=getProfileApi(); if(!AP || !AP.PLANETS) return null;
+          const list=AP.PLANETS;
+          const i=list.findIndex(p=>p.id===activePlanetId);
+          if(i<0) return list[0]||null;
+          return list[(i+1)%list.length];           // next world in catalog order (wraps)
+        }
+        function clearStarGate(){
+          if(!starGate) return;
+          scene.remove(starGate.actor.group); starGate.actor.dispose();
+          starGate=null;
+        }
+        function spawnStarGate(){
+          clearStarGate();
+          if(!_AS || !_AS.has('StarGate')) return;
+          const dest=gateDestination(); if(!dest) return;
+          const actor=_AS.build('StarGate', { scale:0.5, tilt:0 });
+          if(!actor) return;
+          const ox=Math.round(player.pos.x)+6, oz=Math.round(player.pos.z);
+          const gy=shipGroundY(ox,oz)+3.4;          // hovers above the ground
+          actor.group.position.set(ox, gy, oz);
+          actor.group.rotation.y=Math.atan2(player.pos.x-ox, player.pos.z-oz);  // ring faces spawn
+          scene.add(actor.group);
+          starGate={ actor, pos:new THREE.Vector3(ox,gy,oz), dest };
+        }
+        function updateStarGate(dt){
+          if(!starGate) return;
+          starGate.actor.anim(elapsed, 'idle', dt);
+          const hintEl=document.getElementById('voxel-gate-hint');
+          const near = !flying && Math.hypot(player.pos.x-starGate.pos.x, player.pos.z-starGate.pos.z) < GATE_REACH;
+          if(hintEl){
+            if(near){
+              const dest=starGate.dest, AP=getProfileApi();
+              const unlocked = dest && AP && AP.isUnlocked(AP.load(), dest.id);
+              hintEl.hidden=false;
+              hintEl.innerHTML = '⌾ Star Gate → '+dest.name+' · '+dest.nameDa
+                + '<br><b>E</b> · ' + (unlocked ? 'step through' : 'power with a Gate Key');
+            } else if(!flying) hintEl.hidden=true;   // while flying, the space map owns the hint
+          }
+        }
+        function activateGate(){
+          if(!starGate) return;
+          const AP=getProfileApi(); if(!AP) return;
+          const dest=starGate.dest; if(!dest) return;
+          const prof=AP.load();
+          if(!AP.isUnlocked(prof, dest.id)){
+            if(getBackpackCount(GATE_KEY_ID) < 1){
+              if(g.showMessage) g.showMessage('This gate is dormant. Craft a Gate Key (3× Crystal + Metal) to power it.', 3200);
+              return;
+            }
+            spendFromInventory(GATE_KEY_ID, 1);
+            AP.grantPlanet(prof, dest.id); AP.save(prof);
+            if(g.showMessage) g.showMessage('Gate Key spent — the Star Gate roars to life!', 1800);
+          }
+          // activation burst at the ring, then ride the travel chain
+          if(_AC){ const p=starGate.pos;
+            for(let k=0;k<26;k++){ const a=Math.random()*Math.PI*2, r=1.5+Math.random()*1.5;
+              _AC.spark(new THREE.Vector3(p.x+Math.cos(a)*r, p.y+Math.sin(a)*r, p.z),
+                0xc0b3ff, new THREE.Vector3(Math.cos(a)*2, Math.sin(a)*2, (Math.random()-.5)*2), 0.8, 0.12); } }
+          playSfx('jetpack');
+          travelToPlanet(dest.id);
         }
 
         function _pickWanderTarget(cr){
@@ -8003,6 +8198,7 @@ ${waveConsts}
             stepShotVfx(dt);
             updateCritters(dt);
             updateDrone(dt);          // Hero companion trails the player
+            updateStarGate(dt);       // Ancient gate glow + proximity hint
             updatePlayerCombat(dt);   // health regen / i-frames / hurt flash + hearts HUD
             if(_AC) _AC.stepFx(dt);   // creature breath / spore / ember particles
             updateHUD();
@@ -8109,6 +8305,10 @@ ${waveConsts}
             updateWeaponLabel();
             on(window, 'keydown', e => {
                 keys[e.code] = true;
+                if (e.code === 'KeyE' && !e.shiftKey && !voxelPanelOpen() && starGate && !flying
+                    && Math.hypot(player.pos.x - starGate.pos.x, player.pos.z - starGate.pos.z) < GATE_REACH) {
+                    e.preventDefault(); activateGate(); return;   // step through the gate
+                }
                 if (e.code === 'KeyQ') { cycleWeapon(-1); return; }
                 if (e.code === 'KeyE' && !e.shiftKey) { cycleWeapon(1); return; }
                 if (e.code === 'Escape') {
@@ -8324,6 +8524,7 @@ ${waveConsts}
                 afterPaint(() => {
                     if (!_active) { hideVoxelLoading(); return; }
                     streamInit();
+                    spawnStarGate();
                     hideVoxelLoading();
                 });
             })();
@@ -8380,7 +8581,8 @@ ${waveConsts}
             disposeThumbRenderer();
             clearCritters();
             if (ship) { scene.remove(ship.group); ship.dispose(); ship = null; }
-            clearShipTrails();
+            clearShipTrails(); clearSpace();
+            clearStarGate();
             flying = false; _flyCamPos = null; _flyCamUp = null;
             if (camera) camera.up.set(0,1,0);
             hideFpTuner();

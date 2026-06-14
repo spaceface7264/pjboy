@@ -87,9 +87,24 @@
       lights:[{x:8.5,y:1,z:7,c:0xff3344},{x:-8.5,y:1,z:7,c:0x33ff66},{x:0,y:2,z:12,c:0xffffff,st:1}]};
   }
 
+  // Ancient Star Gate — a hovering ring with an event-horizon membrane (the
+  // inter-world travel structure). Ring stands in the XY plane (faces +z).
+  function StarGate(){
+    const m=new Map();
+    torusXY(m,0,0,0,16,2.6,'hull'); torusXY(m,0,0,0,16,1.3,'hull2');
+    ellipsoid(m,0,0,0,14,14,0.6,'engine');            // event-horizon membrane
+    const L=[];
+    for(let i=0;i<9;i++){ const a=i/9*Math.PI*2;
+      S(m,Math.cos(a)*16,Math.sin(a)*16,2.8,'accent');
+      L.push({x:Math.cos(a)*16,y:Math.sin(a)*16,z:3.4,c:0xc0b3ff,st:1,rate:3+i*0.2}); }
+    box(m,-3,3,-20,-16,-2,2,'panel'); box(m,-4,4,-22,-20,-3,3,'hull2');   // base pylon
+    return {m,ec:0x7a5cff,tilt:0,hum:50,slow:true,streak:false,engines:[],lights:L};
+  }
+
   const BUILDERS = {
     'Drone':       { build:Drone,       faction:'hero' },
-    'Interceptor': { build:Interceptor, faction:'hero' }
+    'Interceptor': { build:Interceptor, faction:'hero' },
+    'StarGate':    { build:StarGate,    faction:'ancient' }
   };
 
   // ---------- renderer (one InstancedMesh per material) ----------

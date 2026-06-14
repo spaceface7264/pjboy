@@ -59,6 +59,15 @@
             output: 34,
             outputCount: 1,
             inputs: [{ id: 7, count: 1 }, { id: 32, count: 1 }]
+        },
+        {
+            // Crystals power the Star Gates — craft a key to reactivate a dormant gate.
+            id: 'craft_gatekey',
+            name: 'Star Gate Key',
+            desc: '3× Crystal + 1× Metal → 1× Gate Key',
+            output: 41,
+            outputCount: 1,
+            inputs: [{ id: 10, count: 3 }, { id: 7, count: 1 }]
         }
     ];
 
