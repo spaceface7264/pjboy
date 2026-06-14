@@ -8359,7 +8359,7 @@ ${waveConsts}
             cr.group.position.copy(cr.pos);
             let d=(cr.face+(cr.sp.faceYaw||0))-cr.group.rotation.y;
             while(d>Math.PI)d-=Math.PI*2; while(d<-Math.PI)d+=Math.PI*2;
-            cr.group.rotation.y += d*(1-Math.exp(-(fly?4.5:10)*dt));
+            cr.group.rotation.y += d*(1-Math.exp(-(fly?4.5:(cr.sp.longBody?5.5:10))*dt));
             const actorState = (cr.alert>0.5 || cr.hurtT>0) ? 'alert' : (moving ? 'move' : 'idle');
             cr.actor.anim(elapsed, actorState, dt);
           }

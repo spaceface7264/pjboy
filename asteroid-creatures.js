@@ -640,7 +640,7 @@
     const plateM=std(0x2a3848,{metal:.3,rough:.5}), plate2=std(0x46586a,{metal:.3}),
           legM=std(0x18222e), pincerM=std(0x6a7888,{metal:.4});
     const g=new THREE.Group();
-    const root=new THREE.Group(); root.position.y=.5; g.add(root);
+    const root=new THREE.Group(); root.position.y=.16; g.add(root);   // sit legs on the ground (not floating)
     const head=new THREE.Group(); root.add(head);
     const skull=pbox(.42,.3,.42,plateM); head.add(skull);
     const pincers=[];
@@ -670,13 +670,15 @@
         ease(st,'move',state==='move'?1:0,6,dt);
         ease(st,'alert',state==='alert'?1:0,12,dt);
         const rate=4+st.move*6+st.alert*4;
-        segs.forEach((S,i)=>{ S.seg.rotation.y=Math.sin(t*rate - i*.6)*(.12+st.move*.1+st.alert*.15);
+        // small per-joint yaw: the chain is parented, so angles compound — keep them
+        // low or the tail coils up. A travelling phase still reads as a clean slither.
+        segs.forEach((S,i)=>{ S.seg.rotation.y=Math.sin(t*rate - i*.6)*(.05+st.move*.035+st.alert*.04);
           S.legs.forEach(L=>{ const ph=Math.sin(t*rate*1.4 - i*.9); L.leg.rotation.x=ph*.6; });
         });
-        head.rotation.y=Math.sin(t*rate*.5)*.1;
+        head.rotation.y=Math.sin(t*rate*.5)*.08;
         const snap=state==='alert'?(Math.sin(t*10)*.5+.5):Math.abs(Math.sin(t*1.5))*.15;
         pincers.forEach(p=>p.pj.rotation.y=-p.s*snap*.6);
-        root.position.y=.5+Math.sin(t*rate*.5)*.02;
+        root.position.y=.16+Math.sin(t*rate*.5)*.02;
       }};
   }
 
@@ -741,11 +743,11 @@
       sci:{ formula:'predator', kingdom:'Animal', fact:'A predator is an animal that hunts other animals for food. The glowing cracks are this one’s own body heat leaking out.' } },
     { id:'razorpede', name:'Razorpede', faction:'living', biome:'Caves', temp:'Hostile', threat:'High',
       build:buildRazorpede, on:[3,2], scale:0.7, fly:false, glow:false, shy:false, spawn:false, scanOn:3,
-      hp:12, dmg:10, aggro:14, atkRange:2.0, atkCd:1.0, speed:4.2, prowl:true,
+      hp:12, dmg:10, aggro:14, atkRange:2.0, atkCd:1.0, speed:4.2, prowl:true, longBody:true,
       cat:'Creature', desc:'An armored cave centipede the length of a corridor. Dozens of legs drive it faster than you can run.',
       sci:{ formula:'exoskeleton', kingdom:'Animal', fact:'Bugs wear their skeleton on the outside, like a suit of armor. It is called an exoskeleton and it protects the soft body inside.' } },
     { id:'dustwurm', name:'Dustwurm', faction:'living', biome:'Dustfall', temp:'Hostile', threat:'BOSS',
-      build:buildDustwurm, on:[6,5], scale:1.0, fly:false, glow:false, shy:false, spawn:false, scanOn:6,
+      build:buildDustwurm, on:[6,5], scale:1.0, fly:false, glow:false, shy:false, spawn:false, scanOn:6, longBody:true,
       cat:'Boss', desc:'A segmented colossus that swims through loose rock and breaches to swallow anything on the surface whole.',
       sci:{ formula:'burrower', kingdom:'Animal', fact:'A burrower digs and moves through the ground. Its long body is split into segments so it can bend and push through the rock.' } }
   ];
