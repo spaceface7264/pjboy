@@ -4291,26 +4291,30 @@ ${waveConsts}
             const p = AP.load();
             const prog = AP.missionProgress(p);
             el.hidden = false;
+            const da = (t) => '<div class="vx-quest-da">🇩🇰 ' + t + '</div>';
             let badge = '';
             if (AP.currentPlanetDef) {
                 const def = AP.currentPlanetDef(p);
                 const charted = (p.system && p.system.unlocked) ? p.system.unlocked.length : 1;
                 const total = AP.PLANETS ? AP.PLANETS.length : 1;
-                badge = '<div class="vx-quest-top"><span class="vx-quest-badge">🪐 ' + def.name + '</span>'
+                badge = '<div class="vx-quest-top"><span class="vx-quest-badge">🪐 ' + def.name
+                    + (def.nameDa ? ' <span class="vx-quest-badge-da">· ' + def.nameDa + '</span>' : '') + '</span>'
                     + '<span class="vx-quest-count">' + charted + ' / ' + total + ' charted</span></div>';
             }
             if (!prog.mission) {
                 el.innerHTML = badge
-                    + '<div class="vx-quest-title vx-quest-done">✓ Surveys complete</div>'
+                    + '<div class="vx-quest-title vx-quest-done">✓ Surveys complete</div>' + da('Opgaver fuldført')
                     + '<div class="vx-quest-goal">Every objective done on this world — keep exploring.</div>'
+                    + da('Alt fuldført på denne verden — bliv ved med at udforske.')
                     + '<div class="vx-quest-bar vx-quest-bar-done"><span style="width:100%"></span></div>';
                 return;
             }
             const cur = Math.max(0, prog.current | 0), tgt = Math.max(1, prog.target | 0);
             const pct = Math.max(0, Math.min(100, Math.round(cur / tgt * 100)));
+            const m = prog.mission;
             el.innerHTML = badge
-                + '<div class="vx-quest-title">🔬 ' + prog.mission.title + '</div>'
-                + '<div class="vx-quest-goal">' + prog.mission.desc + '</div>'
+                + '<div class="vx-quest-title">🔬 ' + m.title + '</div>' + (m.titleDa ? da(m.titleDa) : '')
+                + '<div class="vx-quest-goal">' + m.desc + '</div>' + (m.descDa ? da(m.descDa) : '')
                 + '<div class="vx-quest-bar"><span style="width:' + pct + '%"></span><em>' + cur + ' / ' + tgt + '</em></div>';
         }
 

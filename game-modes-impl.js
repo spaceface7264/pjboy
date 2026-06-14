@@ -872,13 +872,17 @@
             `;
             const prog = AP.missionProgress(p);
             if (prog.done && !prog.mission) {
-                missionEl.innerHTML = '<h3>Field journal</h3><p>All starter surveys complete. Keep cataloging — more missions coming.</p>';
+                missionEl.innerHTML = '<h3>Field journal <span class="meta-mission-da">🇩🇰 Feltjournal</span></h3>'
+                    + '<p>All starter surveys complete. Keep cataloging — more missions coming.</p>'
+                    + '<p class="meta-mission-da">🇩🇰 Alle startopgaver er fuldført. Bliv ved med at katalogisere — flere opgaver er på vej.</p>';
             } else if (prog.mission) {
-                missionEl.innerHTML = `
-                    <h3>${prog.mission.title}</h3>
-                    <p>${prog.mission.desc}</p>
-                    <div class="meta-mission-progress">${prog.label}</div>
-                `;
+                const m = prog.mission;
+                const titleDa = m.titleDa ? ' <span class="meta-mission-da">🇩🇰 ' + m.titleDa + '</span>' : '';
+                const descDa = m.descDa ? '<p class="meta-mission-da">🇩🇰 ' + m.descDa + '</p>' : '';
+                const progDa = prog.labelDa ? ' <span class="meta-mission-da">· ' + prog.labelDa + '</span>' : '';
+                missionEl.innerHTML = '<h3>' + m.title + titleDa + '</h3>'
+                    + '<p>' + m.desc + '</p>' + descDa
+                    + '<div class="meta-mission-progress">' + prog.label + progDa + '</div>';
             }
         },
 

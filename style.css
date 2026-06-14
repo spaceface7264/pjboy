@@ -1992,6 +1992,9 @@ body.mode-asteroid {
     font-size: 11px; color: var(--hud-text-dim); line-height: 1.35; margin-bottom: 8px;
     display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
+/* Danish sub-line (bilingual missions / planet name) */
+.vx-quest-da { font-size: 10px; color: #7fd4ff; opacity: 0.88; line-height: 1.3; margin: -4px 0 7px; }
+.vx-quest-badge-da { color: #7fd4ff; opacity: 0.9; font-weight: 600; }
 .vx-quest-bar {
     position: relative; height: 15px; border-radius: 6px;
     background: var(--hud-ink); border: 1px solid rgba(0, 0, 0, 0.5);

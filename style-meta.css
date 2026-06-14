@@ -858,6 +858,14 @@ body.meta-settings-open #settings-modal.settings-over-meta {
     font-size: 0.82rem;
     color: #a8e8f0;
 }
+/* Danish sub-line on bilingual mission cards */
+.meta-mission-da {
+    color: #7fd4ff;
+    opacity: 0.9;
+    font-weight: 600;
+    font-size: 0.82em;
+}
+.meta-mission-card p.meta-mission-da { margin-top: 0.15rem; }
 
 /* ===== Profiles screen (named save slots) ===== */
 .meta-profiles-list {

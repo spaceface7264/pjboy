@@ -8,29 +8,35 @@
     const PROFILE_KEY = 'pjboy.profile.v2';
     const PROFILE_VERSION = 2;
 
+    // Missions are bilingual (English-forward, Danish underneath) for the
+    // Danish->English learning goal — see CLAUDE.md audience notes.
     const MISSIONS = [
         {
             id: 'first_scan',
-            title: 'First reading',
+            title: 'First reading', titleDa: 'Første aflæsning',
             desc: 'Hold Shift and aim at a block to open the field scanner.',
+            descDa: 'Hold Shift og sigt på en blok for at åbne feltscanneren.',
             goal: { type: 'scan', count: 1 }
         },
         {
             id: 'catalog_three',
-            title: 'Mineralogist',
+            title: 'Mineralogist', titleDa: 'Mineralog',
             desc: 'Catalog three different block types in your field journal.',
+            descDa: 'Katalogisér tre forskellige bloktyper i din feltjournal.',
             goal: { type: 'scan_unique', count: 3 }
         },
         {
             id: 'place_block',
-            title: 'Foundations',
+            title: 'Foundations', titleDa: 'Fundament',
             desc: 'Place a block from your quickbar (right-click).',
+            descDa: 'Placér en blok fra din værktøjslinje (højreklik).',
             goal: { type: 'place', count: 1 }
         },
         {
             id: 'craft_lamp',
-            title: 'Camp light',
+            title: 'Camp light', titleDa: 'Lejrlys',
             desc: 'Craft a Lamp at the refinery (Tab → Refinery) — your first base upgrade.',
+            descDa: 'Byg en lampe i raffinaderiet (Tab → Refinery) — din første base-opgradering.',
             goal: { type: 'craft', itemId: 34, count: 1 }
         }
     ];
@@ -433,24 +439,26 @@
 
     function missionProgress(profile) {
         const m = activeMission(profile);
-        if (!m || profile.missions.completed.includes(m.id)) return { done: true, current: 0, target: 0, label: 'All surveys complete' };
+        if (!m || profile.missions.completed.includes(m.id)) {
+            return { done: true, current: 0, target: 0, label: 'All surveys complete', labelDa: 'Alle opgaver fuldført' };
+        }
         const g = m.goal;
         let current = 0;
-        let label = m.desc;
+        let label = m.desc, labelDa = m.descDa || m.desc;
         if (g.type === 'scan') {
             current = Object.values(profile.journal.scanned).reduce((n, e) => n + (e.count || 0), 0);
-            label = `Scans: ${current} / ${g.count}`;
+            label = `Scans: ${current} / ${g.count}`; labelDa = `Skanninger: ${current} / ${g.count}`;
         } else if (g.type === 'scan_unique') {
             current = journalUniqueCount(profile);
-            label = `Cataloged: ${current} / ${g.count} types`;
+            label = `Cataloged: ${current} / ${g.count} types`; labelDa = `Katalogiseret: ${current} / ${g.count} typer`;
         } else if (g.type === 'place') {
             current = profile.journal.places | 0;
-            label = `Blocks placed: ${current} / ${g.count}`;
+            label = `Blocks placed: ${current} / ${g.count}`; labelDa = `Blokke placeret: ${current} / ${g.count}`;
         } else if (g.type === 'craft') {
             current = (profile.journal.crafted && profile.journal.crafted[String(g.itemId | 0)]) | 0;
-            label = `Crafted: ${current} / ${g.count}`;
+            label = `Crafted: ${current} / ${g.count}`; labelDa = `Bygget: ${current} / ${g.count}`;
         }
-        return { done: current >= g.count, current, target: g.count, label, mission: m };
+        return { done: current >= g.count, current, target: g.count, label, labelDa, mission: m };
     }
 
     function advanceMissionIfDone(profile) {
