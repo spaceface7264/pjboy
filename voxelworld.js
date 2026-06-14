@@ -4165,8 +4165,21 @@ ${waveConsts}
             return `M ${x1} ${y1} L ${elbowX} ${y1} L ${elbowX} ${y2} L ${x2} ${y2}`;
         }
 
+        // Screen-space radius (px) of a creature's on-screen extent.
+        function creatureScreenR(cr) {
+            const sc = (cr.actor && cr.actor.group && cr.actor.group.scale.x) || 1;
+            const cy = cr.pos.y + 0.6 * sc;
+            const w = window.innerWidth, h = window.innerHeight;
+            _scanWorld.set(cr.pos.x, cy, cr.pos.z).project(camera);
+            const cx = (_scanWorld.x * 0.5 + 0.5) * w, cyp = (-_scanWorld.y * 0.5 + 0.5) * h;
+            _scanRight.setFromMatrixColumn(camera.matrixWorld, 0);   // world-space camera right
+            const R = 0.7 * sc + 0.55;
+            _scanWorld2.set(cr.pos.x + _scanRight.x * R, cy + _scanRight.y * R, cr.pos.z + _scanRight.z * R).project(camera);
+            const ex = (_scanWorld2.x * 0.5 + 0.5) * w, ey = (-_scanWorld2.y * 0.5 + 0.5) * h;
+            return Math.max(24, Math.min(160, Math.hypot(ex - cx, ey - cyp)));
+        }
         // Corner-bracket reticle around a scanned creature (screen-space).
-        function updateScanFrame(cr, alpha) {
+        function updateScanFrame(cr, alpha, r) {
             const frame = document.getElementById('voxel-scan-frame');
             if (!frame || !camera) return;
             const sc = (cr.actor && cr.actor.group && cr.actor.group.scale.x) || 1;
@@ -4175,11 +4188,7 @@ ${waveConsts}
             _scanWorld.set(cr.pos.x, cy, cr.pos.z).project(camera);
             if (_scanWorld.z > 1) { frame.hidden = true; return; }
             const cx = (_scanWorld.x * 0.5 + 0.5) * w, cyp = (-_scanWorld.y * 0.5 + 0.5) * h;
-            _scanRight.setFromMatrixColumn(camera.matrixWorld, 0);   // world-space camera right
-            const R = 0.7 * sc + 0.55;
-            _scanWorld2.set(cr.pos.x + _scanRight.x * R, cy + _scanRight.y * R, cr.pos.z + _scanRight.z * R).project(camera);
-            const ex = (_scanWorld2.x * 0.5 + 0.5) * w, ey = (-_scanWorld2.y * 0.5 + 0.5) * h;
-            const r = Math.max(24, Math.min(160, Math.hypot(ex - cx, ey - cyp)));
+            if (r == null) r = creatureScreenR(cr);
             frame.style.left = cx + 'px'; frame.style.top = cyp + 'px';
             frame.style.width = (r * 2) + 'px'; frame.style.height = (r * 2) + 'px';
             frame.style.opacity = String(alpha);
@@ -4309,7 +4318,7 @@ ${waveConsts}
             return { left: x, top: y };
         }
 
-        function layoutScanPanel(t, screen) {
+        function layoutScanPanel(t, screen, gap) {
             const panel = document.getElementById('voxel-scan');
             if (!panel || !camera) return null;
             const { bx, by, w, h } = screen || getScanBlockScreen(t);
@@ -4321,12 +4330,13 @@ ${waveConsts}
             const maxH = scanPanelMaxHeight(h);
             const ph = fitScanPanelContent(maxH);
             const pw = panel.offsetWidth || Math.min(380, w - 24);
+            const g = gap || SCAN_BLOCK_GAP;
             const spaceRight = w - bx - SCAN_PAD;
             const spaceLeft = bx - SCAN_PAD;
 
-            let left = spaceRight >= pw + SCAN_BLOCK_GAP || spaceRight >= spaceLeft
-                ? bx + SCAN_BLOCK_GAP
-                : bx - SCAN_BLOCK_GAP - pw;
+            let left = spaceRight >= pw + g || spaceRight >= spaceLeft
+                ? bx + g
+                : bx - g - pw;
             let top = by - ph * 0.36;
 
             const clamped = clampScanPanelRect(left, top, pw, ph, w, h);
@@ -4416,9 +4426,10 @@ ${waveConsts}
                 } else {
                     const sc = (cre.actor && cre.actor.group && cre.actor.group.scale.x) || 1;
                     const screen = projectScan(cre.pos.x, cre.pos.y + 0.6 * sc, cre.pos.z);
-                    layoutScanPanel(null, screen);            // dynamic card position, like blocks
+                    const r = creatureScreenR(cre);
+                    layoutScanPanel(null, screen, r + 40);    // offset the card clear of the frame
                     updateScanConnector(null, cAlpha, screen, true);   // connector, hide the block marker
-                    updateScanFrame(cre, cAlpha);            // bracket reticle on the creature
+                    updateScanFrame(cre, cAlpha, r);          // bracket reticle on the creature
                 }
                 return;
             }
