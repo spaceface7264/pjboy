@@ -674,7 +674,7 @@
 
         // ---- Asteroid player settings (device-global, Settings tab in the drawer) ----
         const VX_SETTINGS_KEY = 'pjboy.voxelSettings.v1';
-        const VIEW_DIST_R = { low: 10, med: 14, high: 18 };
+        const VIEW_DIST_R = { low: 10, med: 14, high: 18, ultra: 28, max: 40 };
         const vxSettings = { sens: 1.0, view: 'first', sound: 0.6, muted: false, peaceful: false, dist: 'med' };
         function loadSettings() {
             try { const r = localStorage.getItem(VX_SETTINGS_KEY); if (r) Object.assign(vxSettings, JSON.parse(r)); } catch (_) {}
@@ -1106,8 +1106,9 @@
             if(th.ground!=null) pu.uGround.value.setHex(th.ground);
             if(th.sky!=null) pu.uAtmo.value.setHex(th.sky);
           }
-          // grow the far plane in space so the globe's limb (and stars) aren't clipped at far=700.
-          const wantFar = 700 + sf*(3000-700);
+          // far plane must cover the draw distance (grows with View distance) and the space globe.
+          const baseFar = Math.max(700, VIEW_R*CH + 140);
+          const wantFar = baseFar + sf*(3000-baseFar);
           if(Math.abs(camera.far - wantFar) > 2){ camera.far = wantFar; camera.updateProjectionMatrix(); }
         }
         function disposeSkyDome(){
@@ -6922,8 +6923,8 @@ ${waveConsts}
             _settingsRow(body, 'Sound', 'Music + effects volume', soundWrap);
             _settingsRow(body, 'Peaceful mode', 'No monsters or attacks — wildlife stays',
                 _toggleControl(vxSettings.peaceful, (v) => { vxSettings.peaceful = v; saveSettings(); if (v) despawnHostiles(); renderDrawer(); }));
-            _settingsRow(body, 'View distance', 'Lower = smoother on slow devices',
-                _segControl([{ label: 'Low', val: 'low' }, { label: 'Med', val: 'med' }, { label: 'High', val: 'high' }], vxSettings.dist,
+            _settingsRow(body, 'View distance', 'Lower = smoother · Max is very heavy',
+                _segControl([{ label: 'Low', val: 'low' }, { label: 'Med', val: 'med' }, { label: 'High', val: 'high' }, { label: 'Ultra', val: 'ultra' }, { label: 'Max', val: 'max' }], vxSettings.dist,
                     (v) => { vxSettings.dist = v; saveSettings(); applyViewDistance(true); renderDrawer(); }));
 
             const resetBtn = document.createElement('button');
