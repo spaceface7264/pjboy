@@ -8098,6 +8098,33 @@ ${waveConsts}
           cr.target=null;                                           // boxed in → idle
         }
 
+        // Flyers glide: keep a heading that curves slowly toward a forward-biased
+        // wander bearing (never a hard reversal), and bank back when they drift too
+        // far from the player — so skates/jellies sweep in smooth arcs, not darts.
+        const FLYER_SPEED = { driftjelly:2.0, glowmoth:2.6, skate:3.6 };
+        function updateFlyerGlide(cr, dt, startled, dxp, dzp){
+          const sp=cr.sp;
+          if(cr.heading==null) cr.heading = cr.face!=null ? cr.face : Math.random()*Math.PI*2;
+          cr._retarget = (cr._retarget||0) - dt;
+          if(cr._retarget<=0 || cr.tBear==null){
+            cr._retarget = 2.5 + Math.random()*3.5;
+            cr.tBear = cr.heading + (Math.random()-0.5)*3.0;       // ±~85° from current — gentle curve
+          }
+          let desired = cr.tBear, spd = FLYER_SPEED[sp.id] || 3.0;
+          const distP = Math.hypot(dxp, dzp);
+          if(sp.shy && startled){ desired = Math.atan2(dxp, dzp); spd *= 1.6; }   // shy flyers bolt away
+          else if(distP > CRIT_DESPAWN*0.8){ desired = Math.atan2(-dxp, -dzp); }  // drifting away → bank home
+          let dh = desired - cr.heading; while(dh>Math.PI)dh-=Math.PI*2; while(dh<-Math.PI)dh+=Math.PI*2;
+          const maxTurn = (startled?2.2:1.0) * dt;                  // rad/s cap → smooth banking
+          cr.heading += THREE.MathUtils.clamp(dh, -maxTurn, maxTurn);
+          cr.pos.x += Math.sin(cr.heading)*spd*dt;
+          cr.pos.z += Math.cos(cr.heading)*spd*dt;
+          const t = surfaceTopVox(Math.floor(cr.pos.x), Math.floor(cr.pos.z));
+          const groundY = (t!==null ? t+1 : SEA_LEVEL+1) + WORLD_OFFSET.y;
+          cr.pos.y += (groundY + cr.flyH + Math.sin(elapsed*1.2+cr.phase)*0.5 - cr.pos.y) * Math.min(1, 2.5*dt);
+          cr.face = cr.heading;
+        }
+
         /* ===================== COMBAT ===================== *
          * Forgiving by design (kid-first): generous HP, slow regen, a
          * gentle respawn instead of a harsh loss. Wonder over war —
@@ -8294,34 +8321,28 @@ ${waveConsts}
               // alert when the player is close; shy critters also flee
               const startled = distP < CRIT_FLEE;
               cr.alert += ((startled ? 1 : 0) - cr.alert) * (1 - Math.exp(-9*dt));
-              if(cr.sp.shy && startled){
-                const inv=1/(distP||1);
-                cr.target=new THREE.Vector3(cr.pos.x+dxp*inv*8, 0, cr.pos.z+dzp*inv*8);
-                cr.state='walk'; speed=CRIT_SPEED*1.8; cr.timer=0.6;
-              }
-              if(cr.state==='idle'){
-                cr.timer-=dt;
-                if(cr.timer<=0){ cr.state='walk'; cr.timer=1.5+Math.random()*3;
-                  if(fly){ const a=Math.random()*Math.PI*2, d=8+Math.random()*16; cr.target=new THREE.Vector3(cr.pos.x+Math.cos(a)*d,0,cr.pos.z+Math.sin(a)*d); }
-                  else _pickWanderTarget(cr); }
+              if(fly){
+                updateFlyerGlide(cr, dt, startled, dxp, dzp);   // smooth gliding arcs
+                moving = true;
               } else {
-                cr.timer-=dt;
-                if(!cr.target || cr.timer<=0){ cr.state='idle'; cr.timer=1+Math.random()*2.5; cr.target=null; }
-              }
-              if(cr.target){
-                const dx=cr.target.x-cr.pos.x, dz=cr.target.z-cr.pos.z;
-                const d=Math.hypot(dx,dz);
-                if(d<0.25){ cr.target=null; cr.state='idle'; cr.timer=1+Math.random()*2; }
-                else {
-                  const step=Math.min(d, speed*dt), inv=1/d;
-                  const nx=cr.pos.x+dx*inv*step, nz=cr.pos.z+dz*inv*step;
-                  if(fly){                                            // flyers drift over anything
-                    const t=surfaceTopVox(Math.floor(nx),Math.floor(nz));
-                    const groundY=(t!==null? t+1 : SEA_LEVEL+1)+WORLD_OFFSET.y;
-                    cr.pos.x=nx; cr.pos.z=nz;
-                    cr.pos.y += (groundY+cr.flyH+Math.sin(elapsed*1.5+cr.phase)*0.6 - cr.pos.y)*Math.min(1,3*dt);
-                    cr.face=Math.atan2(dx,dz); moving=true;
-                  } else {
+                if(cr.sp.shy && startled){
+                  const inv=1/(distP||1);
+                  cr.target=new THREE.Vector3(cr.pos.x+dxp*inv*8, 0, cr.pos.z+dzp*inv*8);
+                  cr.state='walk'; speed=CRIT_SPEED*1.8; cr.timer=0.6;
+                }
+                if(cr.state==='idle'){
+                  cr.timer-=dt;
+                  if(cr.timer<=0){ cr.state='walk'; cr.timer=1.5+Math.random()*3; _pickWanderTarget(cr); }
+                } else {
+                  cr.timer-=dt;
+                  if(!cr.target || cr.timer<=0){ cr.state='idle'; cr.timer=1+Math.random()*2.5; cr.target=null; }
+                }
+                if(cr.target){
+                  const dx=cr.target.x-cr.pos.x, dz=cr.target.z-cr.pos.z, d=Math.hypot(dx,dz);
+                  if(d<0.25){ cr.target=null; cr.state='idle'; cr.timer=1+Math.random()*2; }
+                  else {
+                    const step=Math.min(d, speed*dt), inv=1/d;
+                    const nx=cr.pos.x+dx*inv*step, nz=cr.pos.z+dz*inv*step;
                     const top=surfaceTopVox(Math.floor(nx),Math.floor(nz));
                     if(top===null){ cr.target=null; }                 // hit water — stop
                     else { cr.pos.x=nx; cr.pos.z=nz;
