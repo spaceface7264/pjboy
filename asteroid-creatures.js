@@ -34,18 +34,28 @@
   }
   function std(color,o){
     o=o||{};
+    const transparent = o.transparent || false;
     return new THREE.MeshStandardMaterial({
       color, roughness:o.rough==null?.82:o.rough, metalness:o.metal==null?.12:o.metal,
       emissive:o.emissive==null?0x000000:o.emissive, emissiveIntensity:o.ei==null?1:o.ei,
-      transparent:o.transparent||false, opacity:o.opacity==null?1:o.opacity });
+      transparent, opacity:o.opacity==null?1:o.opacity,
+      // transparent layers must NOT write depth, or stacked translucent parts
+      // (jelly bell, moth wings) z-fight and flicker as the camera moves.
+      depthWrite: !transparent });
   }
   function pbox(w,h,d,mat){ return new THREE.Mesh(new THREE.BoxGeometry(w,h,d), mat); }
   const OUTLINE = new THREE.MeshBasicMaterial({color:0x090a12, side:THREE.BackSide});
   function addOutlines(root){
     const t=[];
-    root.traverse(o=>{ if(o.isMesh && o.geometry.type==='BoxGeometry'
-      && !o.userData.isOutline && !o.userData.noOutline
-      && !(o.material&&o.material.isMeshBasicMaterial)) t.push(o); });
+    root.traverse(o=>{
+      if(!o.isMesh || o.geometry.type!=='BoxGeometry') return;
+      if(o.userData.isOutline || o.userData.noOutline) return;
+      if(o.material && (o.material.isMeshBasicMaterial || o.material.transparent)) return;  // no outline on glow/translucent
+      const p=o.geometry.parameters;
+      // a 1.06 shell barely offsets a thin panel → it z-fights the face and flickers; skip thin parts
+      if(p && Math.min(p.width, p.height, p.depth) < 0.14) return;
+      t.push(o);
+    });
     t.forEach(m=>{ const o=new THREE.Mesh(m.geometry,OUTLINE);
       o.scale.setScalar(1.06); o.userData.isOutline=true; m.add(o); });
   }

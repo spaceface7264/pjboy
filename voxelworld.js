@@ -8324,16 +8324,21 @@ ${waveConsts}
                   } else {
                     const top=surfaceTopVox(Math.floor(nx),Math.floor(nz));
                     if(top===null){ cr.target=null; }                 // hit water — stop
-                    else { cr.pos.x=nx; cr.pos.z=nz; cr.pos.y=top+1+WORLD_OFFSET.y; cr.face=Math.atan2(dx,dz); moving=true; }
+                    else { cr.pos.x=nx; cr.pos.z=nz;
+                      const ty=top+1+WORLD_OFFSET.y;                   // ease vertical so walkers glide over slope steps
+                      cr.pos.y += (ty-cr.pos.y)*Math.min(1, 12*dt);
+                      cr.face=Math.atan2(dx,dz); moving=true; }
                   }
                 }
               }
             }
-            // drive the Actor: smooth face toward heading (+per-species mesh offset), set state, animate
+            // drive the Actor: smooth face toward heading (+per-species mesh offset), set state, animate.
+            // Flyers turn gentler so flat-bodied ones (skate, jelly) bank around rather than
+            // whipping through an edge-on profile (which read as a flicker).
             cr.group.position.copy(cr.pos);
             let d=(cr.face+(cr.sp.faceYaw||0))-cr.group.rotation.y;
             while(d>Math.PI)d-=Math.PI*2; while(d<-Math.PI)d+=Math.PI*2;
-            cr.group.rotation.y += d*(1-Math.exp(-10*dt));
+            cr.group.rotation.y += d*(1-Math.exp(-(fly?4.5:10)*dt));
             const actorState = (cr.alert>0.5 || cr.hurtT>0) ? 'alert' : (moving ? 'move' : 'idle');
             cr.actor.anim(elapsed, actorState, dt);
           }
