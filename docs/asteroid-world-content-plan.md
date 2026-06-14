@@ -219,12 +219,45 @@ spec: {
 | Frostpeak | frost | glacier + frozen quarter | frozen ruins, crystal spires, ice caves |
 | Mycelia | fungal | spore forest | giant fungus landmarks, glow shrines |
 | Dustfall | desert | dunes + dry seabed | buried ruins, bone digs, oasis |
-| Ember | volcanic | **caldera** (Ashlands) | **volcano**, geyser fields, obsidian wreck |
+| Ember | volcanic | **caldera** (Ashlands) | **volcano**, geyser fields, obsidian wreck, **fire-cave boss lair** |
 | Aquaria | verdant/ocean | isles + tide caves | sunken ruins (already in its lore note) |
+
+Every world also gets a **world boss in a themed lair** — see §9.
 
 ---
 
-## 9. Build order (incremental, each step shippable)
+## 9. Boss lairs — every world gets a boss
+
+Each planet has a **world boss** that lies **dormant in a themed lair** until the player
+finds and approaches it, then wakes and fights. The lair is the world's climactic
+set-piece; the boss is its payoff. This reuses three systems, two of which already exist:
+
+- **Boss creature** — `asteroid-creatures.js` already defines a `BOSS` threat tier.
+  `Warden` and `Dustwurm` exist but are gated off; **Ember has only `Cinderhound`
+  (High, not a boss)**, so it needs a NEW boss def (`biome:'Ember'`, `threat:'BOSS'`,
+  with `sci` card). Build via the existing Actor contract like every other creature.
+- **Lair structure** — a `boss` rarity entry in `asteroid-structures.js`, placed **once
+  per world** (guaranteed, not probabilistic) at a deterministic site away from spawn.
+  Its `stamp` carves the cave and anchors the boss spawn point.
+- **Dormant FSM** — a small extension to `updateHostile`/`maybeSpawnHostile`
+  (`voxelworld.js:8396`/`:8437`): instead of random roaming spawns, the boss is
+  **lair-anchored** and starts in a `dormant` state → `wake` on player proximity →
+  normal hostile combat. Forgiving by design (i-frames, respawn) for the 7-year-old.
+
+**Ember's boss — the fire cave (owner's spec):** the boss lies dormant in a **fire
+cave** with **lava falling from the roof and running down the walls** (lava-falls). The
+lair `stamp` carves a basalt chamber, then draws vertical **lava columns** (`id 38`,
+animated/glowing) from the ceiling and wall-hugging lava sheets; an Actor adds dripping
+embers (reuse the creatures `fx` spark kit). The dormant boss sits in the glow at the
+back of the chamber. Walking in is the "uh oh" moment; it wakes as you approach.
+
+Per-world boss/lair pairings (draft): Ember → fire-cave boss; Frostpeak → frozen-vault
+boss; Mycelia → spore-hive boss; Dustfall → `Dustwurm` (already a BOSS def) in a
+sand-sink; Verdant → a gentle starter boss in an overgrown ruin; Aquaria → tide-cave boss.
+
+---
+
+## 10. Build order (incremental, each step shippable)
 
 1. **`asteroid-structures.js` skeleton** + registry guard + `index.html` wiring +
    `?v=` bump. One def (`volcano`) with a static `stamp`. Prove it renders on Ember.
@@ -236,12 +269,15 @@ spec: {
 6. **`spec.regions`/`landmarks`** parsing in `normalizeSpec`; author Ember + Aquaria.
 7. **`discover` mission type** + `recordDiscover` + objective HUD.
 8. **Animated Actor bits** (volcano smoke plume, shrine glow) via the Actor contract.
+9. **Boss lairs** (§9): lair structures (Ember fire-cave + lava-falls first) + per-world
+   boss creature defs + the dormant→wake FSM extension. Ungate the existing BOSS defs.
 
-Steps 1–4 alone already deliver "each world has explorable structures." 5–8 deepen it.
+Steps 1–4 alone already deliver "each world has explorable structures." 5–9 deepen it;
+step 9 (bosses) is the climactic payoff and can ride on top whenever 1–4 are in.
 
 ---
 
-## 10. Open questions for the owner
+## 11. Open questions for the owner
 
 - **Reward model:** what's in a ruin cache — crafting materials, a Gate Key, a cosmetic,
   a lore page? Keep it forgiving and useful for the crafting/counting loop.

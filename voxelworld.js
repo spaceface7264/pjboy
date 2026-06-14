@@ -822,12 +822,14 @@
             if (def) {
                 activePlanetId = def.id;
                 SEED = def.seed | 0;
+                activeBiomeKey = def.biome || 'verdant';
                 activeBiome = BIOME_THEMES[def.biome] || BIOME_THEMES.verdant;
                 activeSpec = (AP && AP.planetSpec) ? AP.planetSpec(def) : null;
             } else {
                 // No profile API (e.g. standalone) — keep a stable random asteroid.
                 activePlanetId = null;
                 SEED = (Math.random() * 1e9) | 0;
+                activeBiomeKey = 'verdant';
                 activeBiome = BIOME_THEMES.verdant;
                 activeSpec = null;
             }
@@ -894,6 +896,8 @@
         // as the same kind of asteroid. `remap(top, ctx)` returns the surface id;
         // ctx = { bn, icy, rad, h } (h = stable per-column hash). `verdant` has no
         // remap, so the home world generates byte-identically to before.
+        const _AST = window.AsteroidStructures;   // world-structures registry (optional)
+        let activeBiomeKey = 'verdant';            // current planet's biome key (for structures)
         let activePlanetId = null;
         let activeBiome = null;
         // Active planet spec (template) cached into hot-path numbers; defaults = "no change".
@@ -1429,8 +1433,74 @@
               setAt(rx+lx2, cyTop+ly2, rz+lz2, 6, false);                // canopy
             }
           }
+          if(_AST) maxY = stampStructures(buf, cx, cz, x0, z0, maxY);
           applyEditsToCol(buf, cx, cz);
           return { buf, maxY: Math.min(H-1, maxY) };
+        }
+
+        // ---------- world structures (ruins / volcanoes / boss lairs) ----------
+        // Deterministic per-SEED placement painted into the column buffer, before
+        // player edits so mined/built changes always win. Each chunk paints only
+        // its own slice of a structure (clipped in the setter); neighbours recompute
+        // the same deterministic stamp, so multi-chunk structures assemble seamlessly.
+        const _STRUCT_SITE = 96;                    // coarse placement grid (6 chunks)
+        let _lairSeedCache = null, _lairPosCache = null;
+        // One guaranteed boss lair per world, anchored deterministically near spawn.
+        function bossLairPos(){
+          if(_lairSeedCache === SEED) return _lairPosCache;
+          const ang = ihash(31,41,59) * Math.PI * 2;
+          const dist = 90 + ihash(26,53,58) * 90;   // 90..180 blocks from origin
+          _lairPosCache = { x: Math.round(Math.cos(ang)*dist), z: Math.round(Math.sin(ang)*dist) };
+          _lairSeedCache = SEED;
+          return _lairPosCache;
+        }
+        function stampStructures(buf, cx, cz, x0, z0, curMaxY){
+          let mY = curMaxY;
+          const setter = (wx, wy, wz, id) => {
+            if(wy < 0 || wy >= H) return;
+            const llx = wx - x0, llz = wz - z0;
+            if(llx < 0 || llx >= CH || llz < 0 || llz >= CH) return;
+            buf[cIdx(llx, wy, llz)] = id;
+            if(id && wy > mY) mY = wy;
+          };
+          const ctxFor = (ax, az, ground, seedInt) => {
+            let s = seedInt >>> 0;
+            const rng = () => { s = (Math.imul(s,1664525) + 1013904223) >>> 0; return s/4294967296; };
+            return { ground, SEA_LEVEL, H, rng,
+              set(dx,dy,dz,id){ setter(ax+dx, dy, az+dz, id); },
+              heightAt(dx,dz){ return columnProfile(ax+dx, az+dz).height; } };
+          };
+          const biome = activeBiomeKey;
+
+          // (1) scattered landmarks on a coarse site grid. Raw coords — period-correct
+          //     wrapping at WORLD_PERIOD is a later refinement; fine for play near spawn.
+          const scatter = _AST.scatterFor(biome);
+          if(scatter.length){
+            const MARG = 16;
+            const sx0 = Math.floor((x0 - MARG)/_STRUCT_SITE) - 1, sx1 = Math.floor((x0+CH-1+MARG)/_STRUCT_SITE);
+            const sz0 = Math.floor((z0 - MARG)/_STRUCT_SITE) - 1, sz1 = Math.floor((z0+CH-1+MARG)/_STRUCT_SITE);
+            for(let sx=sx0; sx<=sx1; sx++) for(let sz=sz0; sz<=sz1; sz++){
+              if(ihash(sx*2+1, 7001, sz*2+1) >= 0.16) continue;          // ~16% of cells
+              const ax = sx*_STRUCT_SITE + Math.floor(ihash(sx, 131, sz)*_STRUCT_SITE);
+              const az = sz*_STRUCT_SITE + Math.floor(ihash(sx, 262, sz)*_STRUCT_SITE);
+              const ground = columnProfile(ax, az).height;
+              if(ground < SEA_LEVEL) continue;                            // not underwater
+              const def = _AST.get(scatter[Math.floor(ihash(sx, 393, sz)*scatter.length)]);
+              if(!def) continue;
+              def.stamp(ctxFor(ax, az, ground, Math.floor(ihash(ax, 555, az)*4294967296)));
+            }
+          }
+
+          // (2) the world boss lair — one per world, guaranteed.
+          const lair = _AST.lairFor(biome);
+          if(lair){
+            const lp = bossLairPos(), reach = lair.footprint || 24;
+            if(lp.x+reach >= x0 && lp.x-reach <= x0+CH-1 && lp.z+reach >= z0 && lp.z-reach <= z0+CH-1){
+              const ground = columnProfile(lp.x, lp.z).height;
+              lair.stamp(ctxFor(lp.x, lp.z, ground, Math.floor(ihash(lp.x, 999, lp.z)*4294967296)));
+            }
+          }
+          return mY;
         }
         
         // ---------- chunk meshing: merged geometry, face culling, vertex AO ----------
@@ -2904,17 +2974,22 @@ ${waveConsts}
         // Materials to reach each tier (from the previous one). ids: 7 Metal, 10 Crystal, 30 Void Crystal, 33 Circuit.
         const UPGRADE_COST = { 2:[{id:7,count:4},{id:10,count:2}], 3:[{id:7,count:6},{id:10,count:4},{id:30,count:1}] };
         const DRONE_COST   = { 2:[{id:7,count:3},{id:10,count:2}], 3:[{id:7,count:5},{id:10,count:3},{id:33,count:1}] };
+        // Scanner range: tier 1..5 → 10..50 m, +10 m per upgrade.
+        const SCANNER_COST = { 2:[{id:10,count:2},{id:7,count:1}], 3:[{id:10,count:3},{id:7,count:2}],
+                               4:[{id:10,count:4},{id:7,count:2},{id:33,count:1}], 5:[{id:10,count:6},{id:7,count:3},{id:30,count:1}] };
         let _weaponTierCache = {};            // {id: 1..3}, mirrors profile (avoids per-frame localStorage)
-        let _droneTierCache = 1;
+        let _droneTierCache = 1, _scannerTierCache = 1;
         function refreshTierCache() {
             const AP = getProfileApi();
             if (!AP) return;
             const inv = (AP.load().inventory) || {};
             _weaponTierCache = inv.weaponTier || {};
             _droneTierCache = Math.max(1, Math.min(3, (inv.droneTier | 0) || 1));
+            _scannerTierCache = Math.max(1, Math.min(5, (inv.scannerTier | 0) || 1));
         }
         function weaponTierOf(id) { return Math.max(1, Math.min(3, (_weaponTierCache[id] | 0) || 1)); }
         function weaponTierMult(id) { return TIER_MULT[weaponTierOf(id)] || TIER_MULT[1]; }
+        function scannerRange() { return _scannerTierCache * 10; }   // metres
 
         function weaponGameplayFor(id) {
             if (!fpTune) fpTune = loadFpTune();
@@ -6931,9 +7006,23 @@ ${waveConsts}
             if (g.showMessage) g.showMessage('Drone → ' + TIER_NAME[next] + '!', 2400);
             if (drawerOpen) renderDrawer();
         }
-        // One upgrade card (weapon or drone): name, current Mk, next cost, Upgrade button.
-        function appendUpgradeCard(body, label, curTier, cost, onUp) {
-            const maxed = curTier >= 3;
+        function upgradeScanner() {
+            const AP = getProfileApi(); if (!AP) return;
+            const cur = _scannerTierCache; if (cur >= 5) return;
+            const next = cur + 1, cost = SCANNER_COST[next] || [];
+            if (!canAfford(cost)) { if (g.showMessage) g.showMessage('Not enough materials to upgrade the scanner', 2000); return; }
+            spendCost(cost);
+            AP.setScannerTier(AP.load(), next);
+            refreshTierCache();
+            if (g.showMessage) g.showMessage('Scanner range → ' + (next * 10) + ' m!', 2400);
+            if (drawerOpen) renderDrawer();
+        }
+        // One upgrade card. opts.max = top tier (default 3); opts.tierLabel formats the tier.
+        function appendUpgradeCard(body, label, curTier, cost, onUp, opts) {
+            opts = opts || {};
+            const maxT = opts.max || 3;
+            const tierLabel = opts.tierLabel || ((t) => TIER_NAME[t]);
+            const maxed = curTier >= maxT;
             const ok = !maxed && canAfford(cost);
             const card = document.createElement('div');
             card.style.cssText = 'display:flex;align-items:center;gap:12px;padding:10px 12px;margin-bottom:8px;border-radius:10px;background:rgba(70,52,110,0.30);border:1px solid rgba(150,120,230,0.4);';
@@ -6941,7 +7030,7 @@ ${waveConsts}
             info.style.cssText = 'flex:1 1 auto;min-width:0;';
             const title = document.createElement('div');
             title.style.cssText = 'font-weight:700;color:#e8dcff;';
-            title.textContent = label + ' · ' + TIER_NAME[curTier];
+            title.textContent = label + ' · ' + tierLabel(curTier);
             info.appendChild(title);
             const sub = document.createElement('div');
             sub.style.cssText = 'font-size:12px;margin-top:3px;';
@@ -6954,7 +7043,7 @@ ${waveConsts}
             const btn = document.createElement('button');
             btn.type = 'button';
             btn.className = 'vx-btn' + (ok ? ' vx-btn-on' : '');
-            btn.textContent = maxed ? 'Max' : ('→ ' + TIER_NAME[curTier + 1]);
+            btn.textContent = maxed ? 'Max' : ('→ ' + tierLabel(curTier + 1));
             btn.disabled = !ok;
             btn.style.cssText = 'flex:0 0 auto;' + (ok ? '' : 'opacity:0.45;cursor:not-allowed;');
             if (ok) btn.addEventListener('click', onUp);
@@ -6974,6 +7063,9 @@ ${waveConsts}
             });
             // the Drone companion
             appendUpgradeCard(body, 'Drone companion', _droneTierCache, DRONE_COST[_droneTierCache + 1] || [], upgradeDrone);
+            // scanner range (10 → 50 m, +10 m per tier)
+            appendUpgradeCard(body, 'Scanner range', _scannerTierCache, SCANNER_COST[_scannerTierCache + 1] || [], upgradeScanner,
+                { max: 5, tierLabel: (t) => (t * 10) + ' m' });
         }
         // ---- Settings tab (Tab/M → Settings) ----
         function _settingsRow(body, label, sub, controlEl) {
@@ -8291,7 +8383,8 @@ ${waveConsts}
           el.hidden=false;
           el.innerHTML='<b>🎯 TRAINING</b> · '+weaponDef.name+' '+TIER_NAME[weaponTierOf(weaponDef.id)]
             +'<br>combat reach <b>'+combR+'m</b> · mine reach <b>'+mineR+'m</b>'
-            +'<br>damage <b>'+weaponDamage()+'</b> · power '+(gp.power).toFixed(2)+' · range '+(gp.range).toFixed(2);
+            +'<br>damage <b>'+weaponDamage()+'</b> · power '+(gp.power).toFixed(2)+' · range '+(gp.range).toFixed(2)
+            +'<br>scan range <b>'+scannerRange()+'m</b>';
         }
 
         /* ===================== COMBAT ===================== *
@@ -8553,10 +8646,11 @@ ${waveConsts}
           ray.setFromCamera({x:0,y:0}, camera);
           _pcO.copy(ray.ray.origin); _pcD.copy(ray.ray.direction);
           let best=null, bestScore=Infinity;
+          const maxR=scannerRange();
           for(const cr of critters){
             _pcV.set(cr.pos.x - _pcO.x, (cr.pos.y+0.6) - _pcO.y, cr.pos.z - _pcO.z);
             const dist=_pcV.length();
-            if(dist>18) continue;
+            if(dist>maxR) continue;
             const t=_pcV.dot(_pcD);                 // projection along the aim ray
             if(t<=0) continue;                       // behind the camera
             const perp=Math.sqrt(Math.max(0, dist*dist - t*t));   // distance from ray to creature centre

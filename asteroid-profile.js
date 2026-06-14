@@ -233,7 +233,8 @@
                 hotbar: Array(9).fill(null),
                 ownedWeapons: starterWeapons(),
                 weaponTier: {},     // { weaponId: 1..3 } — crafted upgrades (Mk I/II/III)
-                droneTier: 1        // companion Drone upgrade level (1..3)
+                droneTier: 1,       // companion Drone upgrade level (1..3)
+                scannerTier: 1      // scanner range level (1..5 → 10..50 m)
             },
             missions: {
                 active: MISSIONS[0].id,
@@ -270,6 +271,7 @@
         p.inventory.ownedWeapons = Array.isArray(p.inventory.ownedWeapons) ? p.inventory.ownedWeapons.map((i) => i | 0) : [];
         p.inventory.weaponTier = (p.inventory.weaponTier && typeof p.inventory.weaponTier === 'object') ? p.inventory.weaponTier : {};
         p.inventory.droneTier = Math.max(1, Math.min(3, (p.inventory.droneTier | 0) || 1));
+        p.inventory.scannerTier = Math.max(1, Math.min(5, (p.inventory.scannerTier | 0) || 1));
         p.missions = Object.assign({}, base.missions, p.missions || {});
         if (!MISSIONS.some((m) => m.id === p.missions.active)) p.missions.active = MISSIONS[0].id;
         p.missions.completed = Array.isArray(p.missions.completed) ? p.missions.completed : [];
@@ -638,6 +640,14 @@
         save(profile);
         return profile.inventory.droneTier;
     }
+    function scannerTier(profile) {
+        return Math.max(1, Math.min(5, (profile && profile.inventory ? (profile.inventory.scannerTier | 0) : 1) || 1));
+    }
+    function setScannerTier(profile, tier) {
+        profile.inventory.scannerTier = Math.max(1, Math.min(5, tier | 0));
+        save(profile);
+        return profile.inventory.scannerTier;
+    }
 
     function countOf(counts, id) {
         if (!counts) return 0;
@@ -674,6 +684,8 @@
         setWeaponTier,
         droneTier,
         setDroneTier,
+        scannerTier,
+        setScannerTier,
         defaultProfile,
         load,
         save,
