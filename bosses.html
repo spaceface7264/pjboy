@@ -1,22 +1,128 @@
-/* =====================================================================
-   pjboy-bosses.js  :  6 rigged apex bosses for Three.js (r128)
-   Grovekeeper · Rimewyrm · Tidemother · Pyroclast · Sporewarden · Gravemaw
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Boss Arena</title>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#04050a; --panel:rgba(11,14,24,.92); --panel-2:rgba(18,24,40,.94);
+    --line:#3aa8c4; --line-dim:rgba(58,168,196,.3); --cyan:#6fe3ff;
+    --text:#cfe9f2; --text-dim:#7e98a6; --gold:#e8b33b; --host:#ff5a4a;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;overflow:hidden;background:var(--bg)}
+  body{font-family:'Chakra Petch',sans-serif;color:var(--text);user-select:none}
+  #scene{position:fixed;inset:0}
+  canvas{display:block}
 
-   USAGE
-     const kit  = createBossKit(THREE, scene);
-     kit.setCamera(camera);                       // needed for head-tracking
-     const boss = kit.spawn('gravemaw');          // builds + adds boss.group to scene
-     boss.anim(t, bossState, dt);                 // 'dormant'|'walk'|'run'|'enraged'|'ultimate'
-     const { shake, flash } = kit.step(dt);       // advances fx, returns 0..1 camera shake + flash
-     kit.triggerAttack('breach');                 // telegraphed one-shot attack by id
+  #bossbar{position:fixed;top:18px;left:50%;transform:translateX(-50%);z-index:10;width:min(560px,86vw);
+    pointer-events:none;text-align:center}
+  .bb-top{display:flex;justify-content:center;align-items:baseline;gap:12px;margin-bottom:6px}
+  .bb-name{font-size:21px;font-weight:700;letter-spacing:.16em;text-transform:uppercase;
+    text-shadow:0 0 14px rgba(0,0,0,.9)}
+  .bb-threat{font-family:'Space Mono',monospace;font-size:11px;color:var(--host);letter-spacing:.1em}
+  .bb-sub{font-family:'Space Mono',monospace;font-size:10px;color:var(--text-dim);letter-spacing:.14em;margin-bottom:8px}
+  .bb-track{height:11px;border:1px solid var(--line-dim);border-radius:6px;overflow:hidden;
+    background:rgba(0,0,0,.5);position:relative}
+  .bb-fill{height:100%;width:100%;background:linear-gradient(90deg,#ff5a4a,#ffb347);
+    transition:background .3s;box-shadow:0 0 12px rgba(255,90,74,.5)}
+  .bb-pips{display:flex;justify-content:center;gap:8px;margin-top:7px}
+  .bb-pips span{font-family:'Space Mono',monospace;font-size:9px;letter-spacing:.2em;color:var(--text-dim);
+    opacity:.4;transition:all .2s}
+  .bb-pips span.on{opacity:1;color:var(--gold);text-shadow:0 0 8px rgba(232,179,59,.6)}
 
-   Each boss exposes: .group .anim(t,state,dt) .attacks[{id,name,kind,wind,active,rec}]
-                      .biomeCol .airborne .meta{name,biome,faction,lore,desc,...}
-   One active boss at a time (attack envelope tracks kit's current boss).
-   FX self-contained; ground non-airborne bosses yourself (lift group.position.y by bbox).
-   ===================================================================== */
-function createBossKit(THREE, scene){
-  let camera=null, current=null;
+  #panelToggle{position:fixed;z-index:11;left:352px;top:16px;width:34px;height:34px;cursor:pointer;
+    background:var(--panel);border:1px solid var(--line-dim);border-radius:9px;color:var(--cyan);
+    font-size:15px;backdrop-filter:blur(8px);transition:left .28s ease, transform .28s ease}
+  #panel{position:fixed;left:0;top:0;bottom:0;width:340px;z-index:10;overflow-y:auto;
+    background:var(--panel);border-right:1px solid var(--line-dim);backdrop-filter:blur(8px);
+    padding:18px 16px 28px;transition:transform .28s ease}
+  body.collapsed #panel{transform:translateX(-101%)}
+  body.collapsed #panelToggle{left:12px;transform:rotate(-90deg)}
+
+  .title{text-align:center;font-weight:700;letter-spacing:.22em;color:var(--host);font-size:16px;
+    padding:8px;border:1px solid rgba(255,90,74,.3);border-radius:10px;margin-bottom:16px}
+  .sec{font-size:10px;font-weight:600;letter-spacing:.18em;text-transform:uppercase;color:var(--gold);margin:6px 0 9px}
+  .chips{display:grid;grid-template-columns:1fr;gap:8px;margin-bottom:18px}
+  .chip{display:flex;align-items:center;gap:9px;padding:11px 12px;border-radius:9px;cursor:pointer;
+    border:1px solid var(--line-dim);background:var(--panel-2);transition:all .12s;font-size:13px}
+  .chip:hover{border-color:var(--line)}
+  .chip.active{border-color:var(--host);box-shadow:0 0 14px rgba(255,90,74,.3)}
+  .chip .biome{margin-left:auto;font-family:'Space Mono',monospace;font-size:9.5px;color:var(--text-dim)}
+  .dot{width:11px;height:11px;border-radius:3px;flex:0 0 auto;transform:rotate(45deg)}
+  .bb-state{font-family:'Space Mono',monospace;font-size:11px;letter-spacing:.18em;margin-top:8px;color:var(--gold)}
+  .states{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:18px}
+  .stbtn{flex:1 1 auto;min-width:62px;text-align:center;padding:10px 0;border-radius:8px;cursor:pointer;font-size:12px;
+    border:1px solid var(--line-dim);background:var(--panel-2);color:var(--text-dim);transition:all .12s}
+  .stbtn:hover{border-color:var(--line)}
+  .stbtn.active{border-color:var(--host);color:var(--host);box-shadow:0 0 10px rgba(255,90,74,.25)}
+  #autoToggle{float:right;cursor:pointer;font-size:11px;color:var(--muted);border:1px solid var(--line);border-radius:6px;padding:1px 8px}
+  #autoToggle.on{color:var(--gold);border-color:var(--gold)}
+  .atk:active{transform:scale(.96)}
+  .atk{line-height:1.1}
+  .atk .kind{display:block;font-size:9px;letter-spacing:.1em;opacity:.85;margin-top:3px;font-weight:600}
+  .kind.melee{color:#ff9a6a}
+  .kind.ranged{color:#6ad8ff}
+
+  #card .meta{display:flex;gap:7px;flex-wrap:wrap;margin:0 0 13px}
+  .tag{font-family:'Space Mono',monospace;font-size:9.5px;letter-spacing:.06em;padding:3px 8px;
+    border-radius:20px;border:1px solid var(--line-dim);color:var(--text-dim)}
+  .row{display:flex;gap:8px;font-family:'Space Mono',monospace;font-size:11px;margin:5px 0;color:var(--text-dim)}
+  .row b{color:var(--cyan);min-width:74px;display:inline-block}
+  .desc{font-family:'Space Mono',monospace;font-size:11px;line-height:1.6;color:var(--text-dim);margin:12px 0}
+  .lore{font-family:'Space Mono',monospace;font-size:10.5px;line-height:1.6;color:var(--gold);
+    border-left:2px solid var(--line-dim);padding-left:10px;margin-top:12px;font-style:italic}
+
+  #hint{position:fixed;right:14px;bottom:12px;z-index:10;font-family:'Space Mono',monospace;
+    font-size:10px;color:var(--text-dim);text-align:right;line-height:1.7;pointer-events:none}
+  @media(max-width:760px){
+    #panel{width:100%;top:auto;bottom:0;height:48vh;border-right:none;border-top:1px solid var(--line-dim);
+      border-radius:14px 14px 0 0}
+    #panelToggle{left:auto;right:14px;top:auto;bottom:calc(48vh + 10px);transition:bottom .28s ease, transform .28s ease}
+    body.collapsed #panel{transform:translateY(101%)}
+    body.collapsed #panelToggle{left:auto;bottom:14px;transform:rotate(180deg)}
+    #hint{display:none}
+    #bossbar{top:10px}
+  }
+</style>
+</head>
+<body>
+<div id="scene"></div>
+<button id="panelToggle" aria-label="Toggle panel">▾</button>
+<div id="bossbar">
+  <div class="bb-top"><span class="bb-name"></span><span class="bb-threat">☠ APEX</span></div>
+  <div class="bb-sub"></div>
+  <div class="bb-track"><div class="bb-fill"></div></div>
+  <div class="bb-state"></div>
+</div>
+<div id="panel">
+  <div class="title">BOSS ARENA</div>
+  <div class="sec">Apex</div>
+  <div class="chips" id="chips"></div>
+  <div class="sec">Phase</div>
+  <div class="states" id="states">
+    <div class="stbtn active" data-s="dormant">Dormant</div>
+    <div class="stbtn" data-s="walk">Walk</div>
+    <div class="stbtn" data-s="run">Run</div>
+    <div class="stbtn" data-s="enraged">Enraged</div>
+    <div class="stbtn" data-s="ultimate">Ultimate</div>
+  </div>
+  <div id="card"></div>
+  <div class="sec" id="atkSec" style="display:none">Attacks <span id="autoToggle">auto: off</span></div>
+  <div class="states" id="attacks"></div>
+</div>
+<div id="hint">drag orbit · scroll zoom · try Ultimate &amp; Attacks</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+/* =========================================================
+   BOSS ARENA — apex raid bosses
+   Three-stage cycle: Dormant -> Enraged -> Ultimate.
+   Ultimate telegraphs a wind-up, strikes, and fires real
+   FX (shockwaves, screen shake, eruptions).
+   ========================================================= */
 
 const hx=n=>'#'+(n>>>0).toString(16).padStart(6,'0');
 function std(color,o={}){ return new THREE.MeshStandardMaterial({
@@ -1129,6 +1235,129 @@ function buildSporewarden(){
     }};
 }
 
+// ---- GRAVEMAW: Dustfall sand leviathan, Hushed. Armored in fused glass + swallowed Ancient plating. ----
+function buildGravemaw(){
+  const clamp=(v,a,b)=>v<a?a:v>b?b:v; const _gw=new THREE.Vector3();
+  const sandM=std(0xc9a45a,{rough:.96}), sandD=std(0x9c7838,{rough:.96}),
+        glassM=std(0xd8c89a,{rough:.3,metal:.1,transparent:true,opacity:.5}),
+        plateM=std(0x6a6e74,{metal:.5,rough:.5}),
+        voidM=std(0x0a0812), glowM=std(0x8a5ac8,{emissive:0x5a2a9a,ei:1.6}),
+        crackM=std(0x7a3aca,{emissive:0x5a1a9a,ei:1.2}), eyeM=new THREE.MeshBasicMaterial({color:0xb070ff});
+  const g=new THREE.Group(); const root=new THREE.Group(); g.add(root);
+
+  // sand mound it erupts from
+  const mound=new THREE.Group(); root.add(mound);
+  for(let i=0;i<16;i++){ const a=Math.random()*Math.PI*2, r=1.1+Math.random()*1.9, s=.5+Math.random()*.7;
+    const b=pbox(s,s*.5,s,Math.random()<.5?sandM:sandD); b.position.set(Math.cos(a)*r,.08+Math.random()*.18,Math.sin(a)*r); b.rotation.y=Math.random(); mound.add(b); }
+
+  // segmented body: kinematic chain rising from the mound
+  const segs=[]; let p=root; const N=7;
+  for(let i=0;i<N;i++){
+    const j=new THREE.Group(); j.position.y = i===0?.7:.98; p.add(j);
+    const rad=1.15 - i*.1;
+    j.add(pbox(rad*1.2,1.0,rad*1.2,sandD));
+    const plates=[], PC=6;
+    for(let k=0;k<PC;k++){ const a=k/PC*Math.PI*2;
+      const pl=pbox(.5,.92,.28,(k%3===0)?plateM:(k%2?glassM:sandM));
+      pl.position.set(Math.cos(a)*rad,0,Math.sin(a)*rad); pl.rotation.y=-a;
+      pl.userData.basePos=pl.position.clone(); plates.push(pl); j.add(pl); }
+    for(let k=0;k<3;k++){ const a=(k/3+.16)*Math.PI*2; const cr=pbox(.08,.82,.12,crackM);
+      cr.position.set(Math.cos(a)*rad*1.02,0,Math.sin(a)*rad*1.02); cr.rotation.y=-a; cr.userData.noOutline=true; j.add(cr); }
+    segs.push({j,plates,rad,by:i===0?.7:.98}); p=j;
+  }
+
+  // head
+  const headJ=new THREE.Group(); headJ.position.y=.9; p.add(headJ);
+  const skull=pbox(1.5,1.2,1.6,sandD); skull.position.z=.1; headJ.add(skull);
+  [-1,1].forEach(s=>{ const br=pbox(.7,.5,1.0,glassM); br.position.set(s*.55,.5,.2); br.rotation.z=-s*.2; headJ.add(br); });
+  const crown=pbox(1.0,.3,1.0,plateM); crown.position.set(0,.7,0); headJ.add(crown);
+  const maw=pbox(1.0,1.0,.6,voidM); maw.position.set(0,-.05,.95); maw.userData.noOutline=true; headJ.add(maw);
+  const throat=pbox(.7,.7,.4,glowM); throat.position.set(0,-.05,.85); throat.userData.noOutline=true; headJ.add(throat);
+  const mawLight=new THREE.PointLight(0x8a5ac8,1.2,9); mawLight.position.set(0,0,1.0); headJ.add(mawLight);
+
+  // radial mandibles (4) that open like a maw
+  const mand=[];
+  for(let k=0;k<4;k++){ const a=k/4*Math.PI*2 + Math.PI/4;
+    const m=new THREE.Group(); m.position.set(0,-.05,1.0); headJ.add(m);
+    const plate=pbox(.55,.82,.7,k%2?sandM:sandD); plate.position.set(Math.cos(a)*.55,Math.sin(a)*.55,.2); plate.rotation.z=a; m.add(plate);
+    const fang=pbox(.12,.32,.12,glassM); fang.position.set(Math.cos(a)*.42,Math.sin(a)*.42,.55); m.add(fang);
+    mand.push({m,axis:new THREE.Vector3(Math.sin(a),-Math.cos(a),0).normalize()}); }
+
+  // hush sensory eyes
+  const eyes=[];
+  for(let k=0;k<6;k++){ const a=(k/6)*Math.PI*2; const e=pbox(.14,.14,.14,eyeM.clone());
+    e.position.set(Math.cos(a)*.5,.35+Math.sin(a)*.3,.6); e.userData.noOutline=true; headJ.add(e); eyes.push(e); }
+
+  addOutlines(g);
+  const baseRot=segs.map((s,i)=> -0.04 + i*0.02 );
+  const st={rage:0, weave:0, atkHit:false};
+  const attacks=[
+    {id:'swallow', name:'Swallow', kind:'melee', wind:.5, active:.34, rec:.7},
+    {id:'spray',   name:'Sand Spray', kind:'ranged', wind:.55, active:.5, rec:.7},
+    {id:'breach',  name:'Breach Slam', kind:'melee', wind:.7, active:.3, rec:.9},
+  ];
+
+  return { group:g, scale:1, biomeCol:0xc9a45a, attacks,
+    anim(t,state,dt){
+      const U=ultPhase(st,state,dt), A=attackEnv(dt);
+      const enr=state==='enraged'||state==='ultimate';
+      ease(st,'rage',enr?1:0,3,dt);
+      const moving=state==='walk'||state==='run';
+      const spd=state==='run'?2.2:state==='walk'?1.4:1.0;
+      const amp=(state==='run'?.18:.12)*(1+st.rage*.4);
+      st.weave += dt*spd;
+
+      const burst=U.rel;
+      let openMaw = U.wind*.3 + burst*1.0;
+      let lean=0, sink=(state==='dormant'?.4:0) + U.wind*1.1 - burst*.2;
+      if(A.id==='swallow'){ lean+=A.wind*.15+A.active*.5-A.active*A.active*.3; openMaw=Math.max(openMaw,A.wind*1.0-A.active*.9); }
+      if(A.id==='spray'){ openMaw=Math.max(openMaw,A.wind*.6+A.active*.9); lean+=-A.active*.12; }
+      if(A.id==='breach'){ sink+=A.wind*.5; lean+=-A.wind*.2+A.active*.6; openMaw=Math.max(openMaw,A.active*.5); }
+
+      segs.forEach((s,i)=>{
+        s.j.rotation.z = Math.sin(st.weave - i*.7)*amp;
+        s.j.rotation.x = baseRot[i] + Math.cos(st.weave*.8 - i*.5)*amp*.4 + lean*(i/N);
+        s.j.position.y = s.by - sink*(.18 - i*.01);
+        const flare = st.rage*.12 + burst*.4;
+        s.plates.forEach(pl=>{ const b=pl.userData.basePos; pl.position.set(b.x*(1+flare),b.y,b.z*(1+flare)); });
+      });
+
+      headJ.getWorldPosition(_gw);
+      const dx=camera.position.x-_gw.x, dy=camera.position.y-_gw.y, dz=camera.position.z-_gw.z;
+      const yaw=Math.atan2(dx,dz), pitch=-Math.atan2(dy,Math.hypot(dx,dz));
+      const track=clamp(1-U.wind-burst,0,1)*(.5+st.rage*.2);
+      headJ.rotation.y = clamp(yaw,-1,1)*track + Math.sin(st.weave*1.1)*amp;
+      headJ.rotation.x = baseRot[N-1] + clamp(pitch,-.6,.6)*track*.6 + lean*.5 - burst*.4 + sink*.08;
+
+      mand.forEach(mm=> mm.m.setRotationFromAxisAngle(mm.axis, openMaw*.9));
+      throat.material.emissiveIntensity = .8 + st.rage*1.4 + openMaw*1.2 + Math.sin(t*4)*.15;
+      mawLight.intensity = .8 + st.rage*1.5 + openMaw*1.8;
+      mawLight.color.setHex(st.rage>.5?0xb070ff:0x8a5ac8);
+      const eb=.6 + st.rage*1.2 + openMaw*.5;
+      eyes.forEach(e=> e.material.color.setRGB(Math.min(1,.69*eb),Math.min(1,.44*eb),Math.min(1,eb)) );
+
+      if(Math.random() < (.12 + (moving?.2:0) + st.rage*.2)){
+        const s=segs[(Math.random()*N)|0];
+        spark(worldOf(s.j,(Math.random()-.5)*s.rad*2,.2,(Math.random()-.5)*s.rad*2), 0xc9a45a,
+          new THREE.Vector3((Math.random()-.5)*.4,-.1,(Math.random()-.5)*.4),1.6,.09,5);
+      }
+      if(A.id==='spray' && A.active>0 && Math.random()<.85){
+        const o=worldOf(headJ,0,0,1.3);
+        const dir=new THREE.Vector3(Math.sin(headJ.rotation.y),-headJ.rotation.x*.5+.1,Math.cos(headJ.rotation.y));
+        spark(o, Math.random()<.3?0x8a5ac8:0xc9a45a,
+          dir.multiplyScalar(5+Math.random()*4).add(new THREE.Vector3((Math.random()-.5)*2,Math.random()*1.5,(Math.random()-.5)*2)),1.4,.12,6);
+      }
+      const impact=(A.id==='swallow'&&A.active>0)||(A.id==='breach'&&A.active>0)||U.fire;
+      if(impact && !st.atkHit){ st.atkHit=true;
+        shockwave(0xc9a45a,.1); kaboom(U.fire?1.0:.55);
+        const cnt=U.fire?40:18;
+        for(let i=0;i<cnt;i++){ const a=Math.random()*Math.PI*2, sp=4+Math.random()*7;
+          spark(worldOf(root,Math.cos(a)*1.2,.3,Math.sin(a)*1.2), Math.random()<.25?0x8a5ac8:0xc9a45a,
+            new THREE.Vector3(Math.cos(a)*sp,3+Math.random()*6,Math.sin(a)*sp),1.8,.14,8); }
+      }
+      if(A.active<=0 && !U.fire) st.atkHit=false;
+    }};
+}
 
 // ---- Gravemaw: Dustfall sand leviathan (Hushed) ----
 function buildGravemaw(){
@@ -1278,13 +1507,135 @@ const BOSSES=[
     lore:"Dustfall has no horizon you can trust. The dune that was not there a moment ago is the part of it that is awake." },
 ];
 
-  function build(id){ const e=BOSSES.find(b=>b.id===id); if(!e) throw new Error('unknown boss: '+id);
-    const obj=e.build(); obj.meta=e; obj.id=id; return obj; }
-  function spawn(id){ const obj=build(id); scene.add(obj.group); current=obj; return obj; }
-  function step(dt){ stepFx(dt); stepRings(dt);
-    const s=shake, f=flash; shake=Math.max(0,shake-dt*4); flash=Math.max(0,flash-dt*4);
-    return { shake:s, flash:f }; }
-  return { BOSSES, build, spawn, triggerAttack,
-           setCamera:c=>{ camera=c; }, setActive:o=>{ current=o; }, step };
+// ---------- scene ----------
+const container=document.getElementById('scene');
+const renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setSize(innerWidth,innerHeight);
+container.appendChild(renderer.domElement);
+
+const scene=new THREE.Scene();
+scene.fog=new THREE.FogExp2(0x04050a,.022);
+(function backdrop(){
+  const c=document.createElement('canvas'); c.width=c.height=1024; const x=c.getContext('2d');
+  const base=x.createRadialGradient(512,400,80,512,512,720);
+  base.addColorStop(0,'#16183a'); base.addColorStop(.5,'#0a0b1e'); base.addColorStop(1,'#04050a');
+  x.fillStyle=base; x.fillRect(0,0,1024,1024);
+  for(let i=0;i<400;i++){ const s=Math.random(); x.fillStyle=`rgba(255,255,255,${.15+s*.6})`;
+    x.fillRect(Math.random()*1024,Math.random()*1024,s>.96?3:1.4,s>.96?3:1.4); }
+  scene.background=new THREE.CanvasTexture(c);
+})();
+scene.add(new THREE.HemisphereLight(0x8a9ccc,0x0a0a18,.55));
+const keyL=new THREE.DirectionalLight(0xffffff,.8); keyL.position.set(14,30,18); scene.add(keyL);
+const rimL=new THREE.PointLight(0xff5a4a,2,40); rimL.position.set(-12,10,-14); scene.add(rimL);
+const fillL=new THREE.PointLight(0xffffff,0,30); fillL.position.set(0,14,12); scene.add(fillL); // flash light
+// arena floor
+const floor=new THREE.Mesh(new THREE.CylinderGeometry(13,13,.5,52),
+  new THREE.MeshStandardMaterial({color:0x14161f,roughness:.96})); floor.position.y=-.25; scene.add(floor);
+const grid=new THREE.GridHelper(24,24,0x3aa8c4,0x1c2c3a); grid.position.y=.02;
+grid.material.opacity=.18; grid.material.transparent=true; scene.add(grid);
+
+const camera=new THREE.PerspectiveCamera(52,innerWidth/innerHeight,.1,400);
+const orbit={theta:.7,phi:1.12,dist:13};
+let dragging=false,prx=0,pry=0,autorot=true;
+addEventListener('pointerdown',e=>{ if(e.target.closest('#panel')||e.target.closest('#panelToggle'))return;
+  dragging=true;autorot=false;prx=e.clientX;pry=e.clientY;});
+addEventListener('pointerup',()=>dragging=false);
+addEventListener('pointermove',e=>{ if(!dragging)return;
+  orbit.theta-=(e.clientX-prx)*.007; orbit.phi=Math.max(.2,Math.min(1.45,orbit.phi-(e.clientY-pry)*.007));
+  prx=e.clientX;pry=e.clientY;});
+addEventListener('wheel',e=>{ if(e.target.closest('#panel'))return;
+  orbit.dist=Math.max(6,Math.min(26,orbit.dist+e.deltaY*.01));},{passive:true});
+
+// ---------- current ----------
+let current=null, state='dormant', selIdx=0, lookY=2.4, fitDist=13;
+function spawn(idx){
+  if(current) scene.remove(current.group);
+  while(fx.length) scene.remove(fx.pop().m);
+  while(rings.length) scene.remove(rings.pop().m);
+  shake=0; flash=0;                                  // clear any leftover FX from the last boss
+  state='dormant';                                   // every boss enters dormant
+  document.querySelectorAll('.stbtn').forEach(x=>x.classList.toggle('active',x.dataset.s==='dormant'));
+  const b=BOSSES[idx]; current=b.build(); scene.add(current.group);
+  const box=new THREE.Box3().setFromObject(current.group);
+  if(!current.airborne) current.group.position.y += -box.min.y;   // rest legged bosses on the floor
+  box.setFromObject(current.group);                                // recompute after any lift
+  lookY = (box.min.y+box.max.y)/2;                                 // frame on the boss's center
+  fitDist = Math.max(box.max.x-box.min.x, box.max.y-box.min.y, box.max.z-box.min.z)*1.6 + 5;
+  orbit.dist = fitDist;
+  rimL.color.setHex(b.biomeCol); rimL.intensity=2;
+  buildCard(b); updateBossbar(b); buildAttacks(current); atk.id=null;
+  [...document.querySelectorAll('.chip')].forEach(el=>el.classList.toggle('active',+el.dataset.idx===idx));
+  selIdx=idx;
 }
-if(typeof module!=='undefined' && module.exports) module.exports={ createBossKit };
+
+// ---------- UI ----------
+document.getElementById('panelToggle').onclick=()=>document.body.classList.toggle('collapsed');
+const chipsEl=document.getElementById('chips');
+BOSSES.forEach((b,i)=>{ const d=document.createElement('div'); d.className='chip'; d.dataset.idx=i;
+  d.innerHTML=`<span class="dot" style="background:${hx(b.col)}"></span>${b.name}<span class="biome">${b.biome}</span>`;
+  d.onclick=()=>spawn(i); chipsEl.appendChild(d); });
+document.querySelectorAll('.stbtn').forEach(btn=>{ btn.onclick=()=>{ state=btn.dataset.s;
+  document.querySelectorAll('.stbtn').forEach(x=>x.classList.toggle('active',x===btn)); }; });
+function buildCard(b){ document.getElementById('card').innerHTML=`
+  <div class="meta">
+    <span class="tag" style="border-color:var(--host);color:var(--host)">${b.threat}</span>
+    <span class="tag">${b.faction}</span>
+    <span class="tag">${b.biome}</span>
+    <span class="tag">${b.height}</span>
+  </div>
+  <div class="row"><b>Signature</b> ${b.ability}</div>
+  <div class="row"><b>Behaviour</b> ${b.behav}</div>
+  <div class="desc">${b.desc}</div>
+  <div class="lore">${b.lore}</div>`; }
+const bbName=document.querySelector('.bb-name'), bbSub=document.querySelector('.bb-sub'),
+      bbFill=document.querySelector('.bb-fill'), bbState=document.querySelector('.bb-state');
+function updateBossbar(b){ bbName.textContent=b.name; bbName.style.color=hx(b.col); bbSub.textContent=b.ability.toUpperCase(); }
+const atkSec=document.getElementById('atkSec'), attacksEl=document.getElementById('attacks'), autoToggle=document.getElementById('autoToggle');
+function buildAttacks(b){ attacksEl.innerHTML='';
+  if(!b.attacks){ atkSec.style.display='none'; attacksEl.style.display='none'; return; }
+  atkSec.style.display=''; attacksEl.style.display='flex';
+  b.attacks.forEach(a=>{ const d=document.createElement('div'); d.className='stbtn atk';
+    const kind=a.kind||'melee'; d.innerHTML=a.name+'<span class="kind '+kind+'">'+kind.toUpperCase()+'</span>';
+    d.onclick=()=>{ triggerAttack(a.id); d.classList.add('active'); setTimeout(()=>d.classList.remove('active'),220); };
+    attacksEl.appendChild(d); }); }
+autoToggle.onclick=()=>{ atkAuto=!atkAuto; autoToggle.classList.toggle('on',atkAuto);
+  autoToggle.textContent='auto: '+(atkAuto?'on':'off'); atkAutoT=.4; };
+
+// ---------- loop ----------
+const clock=new THREE.Clock(); let t=0;
+function frame(){
+  requestAnimationFrame(frame);
+  const dt=Math.min(clock.getDelta(),.05); t+=dt;
+  if(autorot) orbit.theta+=dt*.14;
+  if(atkAuto && current && current.attacks && !atk.id){ atkAutoT-=dt;
+    if(atkAutoT<=0){ const a=current.attacks[(Math.random()*current.attacks.length)|0]; triggerAttack(a.id); atkAutoT=1.6+Math.random()*1.4; } }
+  if(current) current.anim(t,state,dt);
+  stepFx(dt); stepRings(dt);
+  // bossbar fill + state readout
+  const stateLabel={dormant:'DORMANT',walk:'WALKING',run:'RUNNING',enraged:'ENRAGED',ultimate:'ULTIMATE'};
+  const targetW = state==='enraged'?62 : state==='ultimate'?30+Math.sin(t*12)*8 : 100;
+  const fillW=(parseFloat(bbFill.style.width)||100);
+  bbFill.style.width=(fillW+(targetW-fillW)*.1)+'%';
+  bbFill.style.background = state==='ultimate'? 'linear-gradient(90deg,#ff2a2a,#ff8a4a)'
+    : 'linear-gradient(90deg,#ff5a4a,#ffb347)';
+  bbState.textContent=stateLabel[state]||'';
+  bbState.style.color = state==='ultimate'?'#ff5a4a' : state==='enraged'?'#ffb347' : 'var(--gold)';
+  // flash + shake
+  flash=Math.max(0,flash-dt*2.5); fillL.intensity=flash*6;
+  shake=Math.max(0,shake-dt*3);
+  const sh=shake*shake;
+  const cx=Math.sin(orbit.phi)*Math.sin(orbit.theta)*orbit.dist;
+  const cy=Math.cos(orbit.phi)*orbit.dist;
+  const cz=Math.sin(orbit.phi)*Math.cos(orbit.theta)*orbit.dist;
+  camera.position.set(cx+(Math.random()-.5)*sh*3, cy+lookY+(Math.random()-.5)*sh*3, cz+(Math.random()-.5)*sh*3);
+  camera.lookAt(0,lookY,0);
+  renderer.render(scene,camera);
+}
+addEventListener('resize',()=>{ camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight); });
+spawn(0); frame();
+window.BOSSES=BOSSES;
+</script>
+</body>
+</html>

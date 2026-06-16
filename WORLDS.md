@@ -130,11 +130,11 @@ Canonical order (this overrides the current `PLANETS` ordering/gating, which sho
 - **Landing:** a dry, Moon-like regolith world; old roads and Ancient ruins lie buried; the first **Riftlings** appear (the gentle "this world needs you soon" clock).
 - **New mechanic:** **navigation & digging** — the Wayfinder leans toward buried things; dig to **Ancient ruins**, solve a simple **door puzzle**; sandstorms cut sight.
 - **Signature blocks:** Red Rock, Sand. **Meter:** none.
-- **FIGHT:** **Dustwurm** *(already built in `asteroid-creatures.js`)* — the burrowing colossus that breaches the surface. **WAKE:** **Riftlings** (frazzled, not drowsy) + **Sleepers** wandering the dunes.
-- **Apex beast:** **Dustwurm** doubles as the Warden here (sand leviathan; read the sand-tells, dodge the breach, strike on the surface). *(If you'd rather a bespoke boss, that's the only new boss model needed — "Gravemaw" — otherwise Dustwurm covers it with zero new art.)*
+- **FIGHT:** **Dustwurm** *(in `asteroid-creatures.js`)* roams as a lesser burrowing beast. **WAKE:** **Riftlings** (frazzled, not drowsy) + **Sleepers** wandering the dunes.
+- **Apex beast:** **Gravemaw** *(built — `pjboy-bosses.js`; "The dune that was not there a moment ago is the part of it that is awake.")*. Sand leviathan armored in fused glass and swallowed Ancient plating: read the sand-tells, dodge the **Breach Slam**, strike on the surface; attacks `Swallow / Breach Slam / Sand Spray`.
 - **Echoes:** regolith & Mars rust; the buried road network; the first Kindlers thread.
 - **Totem:** **Wayfinder** (boon: **reveal buried ruins**) → lights **The Wayrest**, unlocks **Ember**. *(Meet ally **Sift** here — to build.)*
-- **Mission chain:** Dust survey (`scan_unique 3`) → Deep dig (`collect Red Rock ×8`) → Open the ruins (`place Beacon` + `collect Hush-shard ×4`) → Wake the Dustwurm (`fight dustwurm`) → Plant the Wayfinder (`plant wayfinder`).
+- **Mission chain:** Dust survey (`scan_unique 3`) → Deep dig (`collect Red Rock ×8`) → Open the ruins (`place Beacon` + `collect Hush-shard ×4`) → Best the Gravemaw (`fight gravemaw`) → Plant the Wayfinder (`plant wayfinder`).
 
 ---
 
@@ -166,7 +166,7 @@ Canonical order (this overrides the current `PLANETS` ordering/gating, which sho
 | Mycelia | Sporewarden | `pjboy-bosses.js` | ✅ built |
 | Frostpeak | Rimewyrm | `pjboy-bosses.js` | ✅ built |
 | Ember | Pyroclast | `pjboy-bosses.js` | ✅ built |
-| Dustfall | Dustwurm *(or new "Gravemaw")* | `asteroid-creatures.js` | ✅ built (reuse) |
+| Dustfall | Gravemaw | `pjboy-bosses.js` | ✅ built |
 | Finale | Architect | — | 🆕 to build |
 
 `pjboy-bosses.js` is banked in the repo as a content library (not wired in). Its contract: `createBossKit(THREE, scene)` → `spawn(id)` → `{group, anim(t,state,dt), attacks[], meta}`, states `dormant|walk|run|enraged|ultimate`, plus `kit.triggerAttack(id)` and `kit.step(dt)` returning camera `{shake, flash}`. Integration is the same adapter pattern noted for the cast: route into the existing creature/combat system, ground non-airborne bosses, and bump `index.html` `?v=`.
@@ -175,7 +175,7 @@ Canonical order (this overrides the current `PLANETS` ordering/gating, which sho
 
 ## PART D — What's built vs. net-new
 
-**✅ Reuse as-is:** scanner, mining, placing, refinery crafting (incl. Lamp & Gate Key), gate/space travel, mission tracking + HUD, peaceful + hostile creatures, forgiving combat/respawn, weapon/drone tiers, **5 apex bosses + Dustwurm**, the **cast** (`pjboy-cast.js`).
+**✅ Reuse as-is:** scanner, mining, placing, refinery crafting (incl. Lamp & Gate Key), gate/space travel, mission tracking + HUD, peaceful + hostile creatures, forgiving combat/respawn, weapon/drone tiers, **all 6 apex bosses** (`pjboy-bosses.js`), the **cast** (`pjboy-cast.js`).
 
 **🆕 Net-new, small:** `collect` / `wake` / `plant` goal types (+ recorders), Hush-shard block + spawner, Echo motes, Beacon build-goal, the three survival meters + woozy-teleport fail, Totem props + plant action, unlock-by-Totem gating.
 
@@ -197,6 +197,6 @@ Even though all six are specced, build the proof first:
 
 ## PART F — Still open (your call)
 
-- **Dustfall boss:** reuse **Dustwurm** (zero new art) or model a bespoke **Gravemaw**? *(Recommend: reuse for MVP.)*
+- ~~Dustfall boss: reuse Dustwurm or build Gravemaw?~~ **Resolved — Gravemaw delivered & banked.**
 - **Danish copy:** facts stay English (current rule) — confirm, and we'll write full EN+DA for all mission/HUD strings at build time.
 - **Co-op depth:** ship solo-first and add the second Kindler later, or design co-op into the Verdant slice from day one?
