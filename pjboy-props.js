@@ -1,25 +1,27 @@
 /* =====================================================================
-   pjboy-props.js  :  Batch 1 props for Three.js (r128) — the loop & hearth
-   Hush-shard · Beacon · Echo mote · Greenheart (Totem) · Hearth Lantern
+   pjboy-props.js  :  Totems & loop props for Three.js (r128)
+   Batch 1 (loop & hearth):  Hush-shard · Beacon · Echo mote · Hearth Lantern
+   Totems (one per world):   Greenheart · Tideshell · Gilllight · Threetail · Wayfinder · Emberkin
 
    Contract matches pjboy-cast.js / pjboy-bosses.js:
      const kit  = createPropKit(THREE, scene);
      kit.setCamera(camera);                 // optional; no prop tracks the camera
-     const prop = kit.spawn('beacon');      // builds + adds prop.group to scene
-     prop.anim(t, state, dt);               // see states per prop below
+     const prop = kit.spawn('tideshell');   // builds + adds prop.group to scene
+     prop.anim(t, state, dt);
      kit.step(dt);                          // advances spark fx
 
    spawn(id) -> { group, anim(t,state,dt), meta:{name,role,lore}, accent, airborne?, states }
 
    STATES  (state 'idle' rests; any other string drives the lit/woken pose)
-     hushshard   idle · waking · cleared      (cleared = one-shot burst + shards fade)
+     hushshard   idle · waking · cleared
      beacon      idle/unlit · lit
-     echomote    idle · scanned   (airborne; scanned = flash, rise, fade)
-     greenheart  idle/carried · planted
+     echomote    idle · scanned         (airborne)
      hearth      idle/guttering · kindled
+     the 6 Totems  idle/carried · planted   (planted = roots spread + light up + flourish)
 
    NOTES
      - Echo mote is airborne:true (floats); ground the others yourself by bbox.
+     - All six Totems share one base footprint (totemBase) so they read as a set.
      - FX self-contained: call kit.step(dt) each frame.
    ===================================================================== */
 function createPropKit(THREE, scene){
@@ -300,6 +302,180 @@ function buildHearthLantern(){
     }};
 }
 
+// ---- shared totem base (matches Greenheart footprint so the set reads consistent) ----
+function totemBase(accent, soilCol){
+  const soil=std(soilCol||0x4a3a2a,{rough:.97}), woodD=std(0x46362a), bark=std(0x6a5238);
+  const g=new THREE.Group(); const root=new THREE.Group(); g.add(root);
+  const base=pbox(.95,.3,.95,soil); base.position.y=.15; root.add(base);
+  for(let i=0;i<4;i++){ const a=i/4*Math.PI*2; const s=pbox(.18,.14,.18,woodD); s.position.set(Math.cos(a)*.4,.1,Math.sin(a)*.4); root.add(s); }
+  const roots=[]; for(let i=0;i<6;i++){ const a=i/6*Math.PI*2; const rj=new THREE.Group(); rj.position.y=.08; rj.rotation.y=a; root.add(rj);
+    const r=pbox(.16,.14,.7,woodD); r.position.z=.45; rj.add(r); const node=pbox(.18,.12,.18,bark); node.position.z=.78; rj.add(node); roots.push({rj,r,node}); }
+  const light=new THREE.PointLight(accent,.8,5); light.position.y=.74; root.add(light);
+  return {g, root, base, roots, light};
+}
+function makeGlowRing(hex){ const mat=new THREE.MeshStandardMaterial({color:hex,emissive:hex,emissiveIntensity:1.2,transparent:true,opacity:0,side:THREE.DoubleSide,roughness:.6});
+  const m=pbox(1.6,.02,1.6,mat); m.position.y=.03; m.userData.noOutline=true; return m; }
+function spreadRoots(roots,act){ roots.forEach(o=>{ o.r.scale.z=Math.max(.02,act); o.r.position.z=.45*act; o.node.scale.setScalar(Math.max(.02,act)); o.node.position.z=.78*act; }); }
+
+// TIDESHELL — Aquaria. spiral shell cradling a tide-light · planted: shell glows, water ripples out
+function buildTideshell(){
+  const B=totemBase(0x6fe3ff,0x2a3a44);
+  const shellM=std(0xd8cdb8), shellD=std(0xb8a890), lipM=std(0xe8e0d0), tideM=std(0x6fe3ff,{emissive:0x2adfff,ei:1.6});
+  const post=pbox(.4,.5,.4,shellD); post.position.y=.5; B.root.add(post);
+  const shell=new THREE.Group(); shell.position.set(0,.9,0); B.root.add(shell);
+  [[.6,.6,0,0],[.5,.5,.18,.6],[.4,.42,.32,1.2],[.3,.34,.4,1.8],[.22,.26,.44,2.4]].forEach(([w,h,zy,ang],i)=>{
+    const b=pbox(w,h,w*.7,i%2?shellM:shellD); b.position.set(Math.sin(ang)*.16,zy,Math.cos(ang)*.16); b.rotation.y=ang; shell.add(b); });
+  const lip=pbox(.66,.1,.5,lipM); lip.position.set(0,-.05,.2); shell.add(lip);
+  const core=pbox(.26,.3,.26,tideM); core.position.set(0,0,.3); core.userData.noOutline=true; shell.add(core);
+  const ripple=makeGlowRing(0x6fe3ff); B.root.add(ripple);
+  addOutlines(B.g);
+  const st={act:0};
+  return {group:B.g, scale:1, accent:0x6fe3ff,
+    meta:{name:'Tideshell', role:'Totem · Aquaria', lore:"Hold it to your ear. That is the sound of the sea, humming in its sleep."},
+    anim(t,state,dt){ const planted=state!=='idle'; ease(st,'act',planted?1:0,4,dt);
+      const pulse=.5+Math.sin(t*1.8)*.5;
+      core.material.emissiveIntensity=1.0+pulse*.7+st.act*2.2; core.scale.setScalar(1+pulse*.07+st.act*.25);
+      B.light.intensity=.5+pulse*.3+st.act*2.4;
+      shell.rotation.y=Math.sin(t*.5)*.06; shell.position.y=.9+Math.sin(t*1.4)*.02*(1-st.act);
+      spreadRoots(B.roots,st.act);
+      ripple.material.opacity=st.act*(.18+.12*Math.sin(t*3)); ripple.scale.setScalar(1+st.act*.3+Math.sin(t*2)*.12*st.act);
+      ripple.material.emissiveIntensity=1.0+st.act*1.5;
+      if(planted && st.act>.6 && Math.random()<.12) spark(worldOf(shell,(Math.random()-.5)*.5,0,.3),0x9af0ff,new THREE.Vector3((Math.random()-.5)*.4,.5+Math.random()*.5,(Math.random()-.5)*.4),1.4,.05,-.4);
+    }};
+}
+
+// GILLLIGHT — Mycelia. glowing gill-cap on a pale stem · planted: cap blooms, low glow spreads
+function buildGilllight(){
+  const B=totemBase(0x7af0c8,0x2a3a30);
+  const stemM=std(0xd8e0d0), stemD=std(0xb8c4b4), capM=std(0x4a8a6a), gillM=std(0x7af0c8,{emissive:0x3ad0a0,ei:1.6}), coreM=std(0x7af0c8,{emissive:0x3ad0a0,ei:1.4});
+  const stem=pbox(.34,.7,.34,stemM); stem.position.y=.6; B.root.add(stem);
+  const ring=pbox(.4,.1,.4,stemD); ring.position.y=.78; B.root.add(ring);
+  const cap=new THREE.Group(); cap.position.y=1.0; B.root.add(cap);
+  [[.95,.22,0],[.7,.2,.16],[.45,.18,.28]].forEach(([w,h,y])=>{ const c=pbox(w,h,w,capM); c.position.y=y; cap.add(c); });
+  const gills=[]; for(let i=0;i<8;i++){ const a=i/8*Math.PI*2; const gl=pbox(.08,.06,.4,gillM); gl.position.set(Math.cos(a)*.28,-.02,Math.sin(a)*.28); gl.rotation.y=-a; gl.userData.noOutline=true; cap.add(gl); gills.push(gl); }
+  const core=pbox(.2,.2,.2,coreM); core.position.y=-.06; core.userData.noOutline=true; cap.add(core);
+  const disc=makeGlowRing(0x7af0c8); B.root.add(disc);
+  const spores=[]; for(let i=0;i<5;i++){ const s=pbox(.07,.07,.07,gillM); s.userData.noOutline=true; B.root.add(s); spores.push({s,a:i/5*Math.PI*2,r:.4+Math.random()*.3,y:.6+Math.random()*.6,sp:.2+Math.random()*.3}); }
+  addOutlines(B.g);
+  const st={act:0};
+  return {group:B.g, scale:1, accent:0x7af0c8,
+    meta:{name:'Gilllight', role:'Totem · Mycelia', lore:"One light, shared a thousand ways. That is how the Hollow remembers itself."},
+    anim(t,state,dt){ const planted=state!=='idle'; ease(st,'act',planted?1:0,4,dt);
+      const pulse=.5+Math.sin(t*1.8)*.5;
+      core.material.emissiveIntensity=1.0+pulse*.6+st.act*2.0;
+      gills.forEach(gl=>gl.material.emissiveIntensity=1.0+pulse*.5+st.act*2.2);
+      B.light.intensity=.5+pulse*.3+st.act*2.4;
+      cap.scale.setScalar(1+st.act*.18+Math.sin(t*1.6)*.02); cap.position.y=1.0+Math.sin(t*1.4)*.02*(1-st.act);
+      spreadRoots(B.roots,st.act);
+      disc.material.opacity=st.act*(.16+.1*Math.sin(t*2.5)); disc.scale.setScalar(1.1+st.act*.3);
+      spores.forEach((o,i)=>{ const a=o.a+t*o.sp, r=o.r*(1+st.act*.5); o.s.position.set(Math.cos(a)*r,o.y+Math.sin(t*.8+i)*.2,Math.sin(a)*r); o.s.scale.setScalar(st.act); o.s.material.emissiveIntensity=1.0+st.act; });
+    }};
+}
+
+// THREETAIL — Frostpeak. carved frost-fox breathing mist · planted: warm aura + breath sparks
+function buildThreetail(){
+  const B=totemBase(0xbfe8ff,0x2a3640);
+  const furM=std(0xeaf4ff), furD=std(0xbcd4ec), faceM=std(0xdfeeff), noseM=std(0x3a4a5a), coreM=std(0xbfe8ff,{emissive:0x6ac0ff,ei:1.4});
+  const plinth=pbox(.6,.24,.6,furD); plinth.position.y=.42; B.root.add(plinth);
+  const body=new THREE.Group(); body.position.y=.66; B.root.add(body);
+  const torso=pbox(.5,.6,.42,furM); torso.position.y=.1; body.add(torso);
+  const chest=pbox(.4,.3,.2,faceM); chest.position.set(0,0,.22); body.add(chest);
+  const core=pbox(.16,.18,.1,coreM); core.position.set(0,.06,.26); core.userData.noOutline=true; body.add(core);
+  const head=pbox(.4,.36,.36,furM); head.position.set(0,.5,.12); body.add(head);
+  const snout=pbox(.2,.16,.22,faceM); snout.position.set(0,.44,.34); body.add(snout);
+  const nose=pbox(.08,.08,.08,noseM); nose.position.set(0,.46,.46); nose.userData.noOutline=true; body.add(nose);
+  [-1,1].forEach(s=>{ const ear=pbox(.14,.22,.08,furM); ear.position.set(s*.16,.74,.1); ear.rotation.z=-s*.18; body.add(ear);
+    const inner=pbox(.07,.12,.04,coreM); inner.position.set(s*.16,.72,.14); inner.userData.noOutline=true; body.add(inner); });
+  const tails=[]; [-1,0,1].forEach((o)=>{ const tj=new THREE.Group(); tj.position.set(o*.16,.16,-.24); body.add(tj);
+    const seg=pbox(.18,.18,.5,o===0?furM:furD); seg.position.z=-.28; tj.add(seg);
+    const tip=pbox(.14,.14,.2,faceM); tip.position.z=-.56; tj.add(tip); tails.push({tj,o}); });
+  const aura=makeGlowRing(0xffd8a0); B.root.add(aura);
+  addOutlines(B.g);
+  const st={act:0,mistT:0};
+  return {group:B.g, scale:1, accent:0xbfe8ff,
+    meta:{name:'Threetail', role:'Totem · Frostpeak', lore:"Where the three tails point, the snow is thin. Where they still, turn back and warm up."},
+    anim(t,state,dt){ const planted=state!=='idle'; ease(st,'act',planted?1:0,4,dt);
+      const pulse=.5+Math.sin(t*1.8)*.5;
+      core.material.emissiveIntensity=1.0+pulse*.6+st.act*2.2; core.scale.setScalar(1+pulse*.06+st.act*.2);
+      B.light.intensity=.5+pulse*.3+st.act*2.4;
+      body.position.y=.66+Math.sin(t*1.4)*.02*(1-st.act);
+      head.rotation.y=Math.sin(t*.7)*.15;
+      tails.forEach((T,i)=>{ T.tj.rotation.y=Math.sin(t*2.5+i*.8)*(.18+st.act*.12)*(T.o===0?.6:1); T.tj.rotation.x=-.1-st.act*.1; });
+      spreadRoots(B.roots,st.act);
+      aura.material.opacity=st.act*(.14+.1*Math.sin(t*2)); aura.scale.setScalar(1+st.act*.3);
+      st.mistT-=dt; if(st.mistT<=0 && Math.random()<.6){ st.mistT=.4+Math.random()*.5; spark(worldOf(body,0,.46,.5),0xeaf6ff,new THREE.Vector3((Math.random()-.5)*.2,.05,.3+Math.random()*.2),1.2,.05,.15*(1-st.act)); }
+      if(planted && st.act>.6 && Math.random()<.1) spark(worldOf(body,0,.46,.5),0xfff0d8,new THREE.Vector3((Math.random()-.5)*.3,.2,.4),1.4,.06,.1);
+    }};
+}
+
+// WAYFINDER — Dustfall. bone compass that tilts/leans · planted: needle settles, buried glint revealed
+function buildWayfinder(){
+  const B=totemBase(0xd9a441,0x3a3024);
+  const boneM=std(0xe8dcc0), boneD=std(0xc8bca0), goldM=std(0xd9a441,{emissive:0x8a5a10,ei:1.0}), needleM=std(0xffcf6a,{emissive:0xc08a20,ei:1.4}), glintM=std(0xffe6a0,{emissive:0xffc040,ei:1.8});
+  const post=pbox(.3,.5,.3,boneD); post.position.y=.5; B.root.add(post);
+  const comp=new THREE.Group(); comp.position.y=1.05; B.root.add(comp);
+  for(let i=0;i<8;i++){ const a=i/8*Math.PI*2; const seg=pbox(.16,.16,.1,i%2?boneM:boneD); seg.position.set(Math.cos(a)*.42,0,Math.sin(a)*.42); seg.rotation.y=-a; comp.add(seg); }
+  const hub=pbox(.22,.1,.22,goldM); comp.add(hub);
+  const core=pbox(.14,.12,.14,glintM); core.position.y=.02; core.userData.noOutline=true; comp.add(core);
+  const needleJ=new THREE.Group(); comp.add(needleJ);
+  const nN=pbox(.06,.05,.5,needleM); nN.position.z=.16; nN.userData.noOutline=true; needleJ.add(nN);
+  const nS=pbox(.06,.05,.3,boneD); nS.position.z=-.12; needleJ.add(nS);
+  const glint=pbox(.14,.06,.14,glintM); glint.position.set(.3,.05,-.3); glint.userData.noOutline=true; B.root.add(glint);
+  addOutlines(B.g);
+  const st={act:0,wob:0,wobT:0,ny:0};
+  return {group:B.g, scale:1, accent:0xd9a441,
+    meta:{name:'Wayfinder', role:'Totem · Dustfall', lore:"The Dust hides the old roads. The Wayfinder remembers them."},
+    anim(t,state,dt){ const planted=state!=='idle'; ease(st,'act',planted?1:0,4,dt);
+      const pulse=.5+Math.sin(t*1.8)*.5;
+      core.material.emissiveIntensity=1.0+pulse*.6+st.act*2.2; core.scale.setScalar(1+pulse*.06+st.act*.2);
+      B.light.intensity=.5+pulse*.3+st.act*2.4;
+      comp.position.y=1.05+Math.sin(t*1.4)*.02*(1-st.act); comp.rotation.z=Math.sin(t*.8)*.05;
+      st.wobT-=dt; if(st.wobT<=0){ st.wob=(Math.random()-.5)*2.0; st.wobT=.4+Math.random()*.8; }
+      ease(st,'ny',(1-st.act)*(Math.sin(t*1.3)*.6+st.wob),6,dt);
+      needleJ.rotation.y=st.ny; needleJ.rotation.x=-.05-st.act*.05;
+      spreadRoots(B.roots,st.act);
+      glint.scale.setScalar(Math.max(0,st.act)); glint.position.y=.05+Math.sin(t*3)*.03*st.act;
+      glint.material.emissiveIntensity=1.0+Math.sin(t*4)*.6+st.act*2;
+      if(planted && st.act>.6 && Math.random()<.06) spark(worldOf(glint,0,0,0),0xffe6a0,new THREE.Vector3((Math.random()-.5)*.3,.4,(Math.random()-.5)*.3),1.0,.05,1);
+    }};
+}
+
+// EMBERKIN — Ember. small hound-shaped brazier · planted: flame swells warm, ember sparks
+function buildEmberkin(){
+  const B=totemBase(0xff7a2c,0x3a241c);
+  const ironM=std(0x3a2a22,{metal:.3}), ironD=std(0x2a1e18,{metal:.3}), crackM=std(0xff7a2c,{emissive:0xc03a00,ei:1.4}),
+        flameM=std(0xffb24a,{emissive:0xff7a10,ei:2}), coreM=std(0xff7a2c,{emissive:0xff5a00,ei:1.4});
+  const dog=new THREE.Group(); dog.position.y=.5; B.root.add(dog);
+  const body=pbox(.6,.4,.85,ironM); body.position.y=.2; dog.add(body);
+  const chest=pbox(.5,.4,.3,ironD); chest.position.set(0,.18,.42); dog.add(chest);
+  const head=pbox(.4,.38,.4,ironM); head.position.set(0,.5,.5); dog.add(head);
+  const snout=pbox(.22,.18,.24,ironD); snout.position.set(0,.42,.74); dog.add(snout);
+  [-1,1].forEach(s=>{ const ear=pbox(.12,.2,.08,ironD); ear.position.set(s*.16,.72,.46); ear.rotation.z=s*.2; dog.add(ear); });
+  [-1,1].forEach(s=>{ const fl=pbox(.16,.4,.16,ironD); fl.position.set(s*.2,0,.42); dog.add(fl);
+    const ha=pbox(.22,.24,.3,ironD); ha.position.set(s*.22,.06,-.2); dog.add(ha); });
+  const cracks=[]; for(let i=0;i<4;i++){ const cr=pbox(.1,.06,.3,crackM); cr.position.set((i%2?1:-1)*.18,.3,-.1+i*.1); cr.userData.noOutline=true; dog.add(cr); cracks.push(cr); }
+  const bowl=pbox(.4,.16,.4,ironD); bowl.position.set(0,.46,-.05); dog.add(bowl);
+  const coals=pbox(.3,.1,.3,coreM); coals.position.set(0,.54,-.05); coals.userData.noOutline=true; dog.add(coals);
+  const flame=pbox(.3,.5,.3,flameM); flame.position.set(0,.7,-.05); flame.userData.noOutline=true; dog.add(flame);
+  addOutlines(B.g);
+  const st={act:0};
+  return {group:B.g, scale:1, accent:0xff7a2c,
+    meta:{name:'Emberkin', role:'Totem · Ember', lore:"A fire that does not burn what it loves. The warmest thing in all of Ember."},
+    anim(t,state,dt){ const planted=state!=='idle'; ease(st,'act',planted?1:0,4,dt);
+      const pulse=.5+Math.sin(t*1.8)*.5, flick=.8+Math.sin(t*8)*.12+Math.sin(t*19)*.06;
+      coals.material.emissiveIntensity=(1.0+pulse*.4+st.act*1.4)*flick;
+      cracks.forEach(c=>c.material.emissiveIntensity=1.0+pulse*.5+st.act*1.6);
+      B.light.intensity=.5+pulse*.3+st.act*2.6;
+      flame.scale.set(.7+.3*flick,(.5+st.act*.9)*(.9+.15*Math.sin(t*6)),.7+.3*flick);
+      flame.material.emissiveIntensity=(1.4+st.act*1.2)*flick;
+      flame.material.color.setRGB(1,.62+st.act*.18,.18+st.act*.08);
+      flame.position.y=.7+st.act*.12;
+      dog.position.y=.5+Math.sin(t*1.4)*.02*(1-st.act); head.rotation.y=Math.sin(t*.7)*.12;
+      spreadRoots(B.roots,st.act);
+      if(planted && st.act>.5 && Math.random()<.16) spark(worldOf(dog,0,.7,-.05),0xff9a4a,new THREE.Vector3((Math.random()-.5)*.3,.6+Math.random()*.5,(Math.random()-.5)*.3),1.2,.05,1.2);
+    }};
+}
+
 /* ========================= REGISTRY ========================= */
 const PROPS=[
   { id:'hushshard',  build:buildHushShard,    states:[{s:'idle',l:'Idle'},{s:'waking',l:'Waking'},{s:'cleared',l:'Cleared'}] },
@@ -307,6 +483,11 @@ const PROPS=[
   { id:'echomote',   build:buildEchoMote,     states:[{s:'idle',l:'Idle'},{s:'scanned',l:'Scanned'}] },
   { id:'greenheart', build:buildGreenheart,   states:[{s:'idle',l:'Carried'},{s:'planted',l:'Planted'}] },
   { id:'hearth',     build:buildHearthLantern,states:[{s:'idle',l:'Guttering'},{s:'kindled',l:'Kindled'}] },
+  { id:'tideshell',  build:buildTideshell,    states:[{s:'idle',l:'Carried'},{s:'planted',l:'Planted'}] },
+  { id:'gilllight',  build:buildGilllight,    states:[{s:'idle',l:'Carried'},{s:'planted',l:'Planted'}] },
+  { id:'threetail',  build:buildThreetail,    states:[{s:'idle',l:'Carried'},{s:'planted',l:'Planted'}] },
+  { id:'wayfinder',  build:buildWayfinder,    states:[{s:'idle',l:'Carried'},{s:'planted',l:'Planted'}] },
+  { id:'emberkin',   build:buildEmberkin,     states:[{s:'idle',l:'Carried'},{s:'planted',l:'Planted'}] },
 ];
 
   function build(id){ const e=PROPS.find(p=>p.id===id); if(!e) throw new Error('unknown prop: '+id);
