@@ -862,7 +862,14 @@
             if (!AP || !p || !statsEl || !missionEl) return;
             const summary = AP.claimSummary(p);
             if (tag) {
-                tag.textContent = (p.displayName || 'Explorer') + ' — progress saves on this device until cloud accounts ship.';
+                const CS = window.CloudSync;
+                if (CS && CS.enabled() && CS.getCode()) {
+                    tag.textContent = (p.displayName || 'Explorer') + ' — synced to the cloud. Use your code to play anywhere.';
+                } else if (CS && CS.enabled()) {
+                    tag.textContent = (p.displayName || 'Explorer') + ' — back up below to play on any device.';
+                } else {
+                    tag.textContent = (p.displayName || 'Explorer') + ' — progress saves on this device.';
+                }
             }
             // fresh profile (no in-world progress yet) → "Start", otherwise "Continue"
             const playBtn = document.getElementById('meta-asteroid-play-btn');
@@ -891,6 +898,61 @@
                     + '<p>' + m.desc + '</p>' + descDa
                     + '<div class="meta-mission-progress">' + prog.label + progDa + '</div>';
             }
+            this._renderCloudCard();
+        },
+
+        // Cloud-save card on the claim screen. Hidden entirely when cloud is off
+        // (config unfilled), so the game looks/works exactly as before offline.
+        _renderCloudCard() {
+            const el = document.getElementById('meta-cloud-card');
+            const CS = window.CloudSync;
+            if (!el) return;
+            if (!CS || !CS.enabled()) { el.hidden = true; el.innerHTML = ''; return; }
+            el.hidden = false;
+            const code = CS.getCode();
+            if (code) {
+                el.innerHTML =
+                    '<h3>☁️ Cloud save <span class="meta-mission-da">🇩🇰 Skysave</span></h3>'
+                    + '<p>Your code — write it down to play on another device or the live site:</p>'
+                    + '<div class="meta-cloud-code" id="meta-cloud-code">' + code + '</div>'
+                    + '<div class="meta-cloud-acts">'
+                    + '<button type="button" class="meta-btn meta-btn-ghost" id="meta-cloud-copy">Copy code</button>'
+                    + '<button type="button" class="meta-btn meta-btn-ghost" id="meta-cloud-link">Use another code…</button>'
+                    + '</div><div class="meta-cloud-msg" id="meta-cloud-msg" aria-live="polite"></div>';
+                const copy = document.getElementById('meta-cloud-copy');
+                if (copy) copy.addEventListener('click', () => {
+                    try { navigator.clipboard.writeText(code); this._cloudMsg('Copied ✓'); } catch (_) { this._cloudMsg('Copy failed — write it down.'); }
+                });
+            } else {
+                el.innerHTML =
+                    '<h3>☁️ Cloud save <span class="meta-mission-da">🇩🇰 Skysave</span></h3>'
+                    + '<p>Back up your world so you can play it on any device or the live site.</p>'
+                    + '<div class="meta-cloud-acts">'
+                    + '<button type="button" class="meta-btn" id="meta-cloud-create">Back up to cloud</button>'
+                    + '<button type="button" class="meta-btn meta-btn-ghost" id="meta-cloud-link">I have a code…</button>'
+                    + '</div><div class="meta-cloud-msg" id="meta-cloud-msg" aria-live="polite"></div>';
+                const create = document.getElementById('meta-cloud-create');
+                if (create) create.addEventListener('click', () => {
+                    create.disabled = true; this._cloudMsg('Saving to cloud…');
+                    CS.createForCurrent()
+                        .then(() => { this.audio && this.audio.play('uiClick'); this._renderAsteroidHome(); })
+                        .catch((e) => { create.disabled = false; this._cloudMsg('Could not save: ' + (e.message || e)); });
+                });
+            }
+            const link = document.getElementById('meta-cloud-link');
+            if (link) link.addEventListener('click', () => {
+                const entered = (window.prompt('Enter your cloud save code (e.g. EMBER-FOX-COMET-4821):', '') || '').trim();
+                if (!entered) return;
+                this._cloudMsg('Loading…');
+                CS.linkCode(entered)
+                    .then(() => { this.audio && this.audio.play('uiClick'); this._loadPlayerProfile(); this._renderAsteroidHome(); })
+                    .catch((e) => this._cloudMsg(e.message || String(e)));
+            });
+        },
+
+        _cloudMsg(text) {
+            const m = document.getElementById('meta-cloud-msg');
+            if (m) m.textContent = text;
         },
 
         _showProfiles(returnPhase) {

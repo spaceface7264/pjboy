@@ -197,3 +197,7 @@ recordings/
 notes.md
 todo.md
 dev-notes.txt
+
+# Supabase CLI local link state (machine-specific; only migrations are tracked)
+supabase/.temp/
+supabase/.branches/
