@@ -943,6 +943,7 @@
             if (link) link.addEventListener('click', () => {
                 const entered = (window.prompt('Enter your cloud save code (e.g. EMBER-FOX-COMET-4821):', '') || '').trim();
                 if (!entered) return;
+                if (!window.confirm('Loading a code replaces the world on THIS device with the saved one. Continue?')) return;
                 this._cloudMsg('Loading…');
                 CS.linkCode(entered)
                     .then(() => { this.audio && this.audio.play('uiClick'); this._loadPlayerProfile(); this._renderAsteroidHome(); })

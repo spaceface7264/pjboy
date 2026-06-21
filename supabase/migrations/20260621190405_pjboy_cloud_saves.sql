@@ -13,7 +13,8 @@
 --     the function owner (bypassing RLS) but only ever operate on this one table,
 --     keyed by the caller-supplied code. search_path is pinned to defeat hijack.
 --   * Residual risk: a guessed/leaked code grants access to that one save. Codes
---     carry ~3.4e10 entropy (3 words + 4 digits) and saves are non-sensitive, so
+--     carry ~7.7e9 combinations (95^3 words * 9000 digits) and saves are
+--     non-sensitive, so
 --     this is acceptable for the use case. Add rate-limiting later if needed.
 
 create table if not exists public.saves (

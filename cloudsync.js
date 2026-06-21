@@ -56,7 +56,14 @@ window.CloudSync = (function () {
       String(1000 + rnd(9000))].join('-');
   }
   function normalize(code) {
-    return String(code || '').trim().toUpperCase().replace(/\s+/g, '-').replace(/-+/g, '-');
+    // Whitespace -> dash, then drop anything that isn't a code char. The strip
+    // also hardens the UI: the code is rendered into innerHTML on the claim
+    // screen and the table is writable via the public anon key, so a linked
+    // code must never be able to carry markup.
+    return String(code || '').trim().toUpperCase()
+      .replace(/\s+/g, '-')
+      .replace(/[^A-Z0-9-]/g, '')
+      .replace(/-+/g, '-');
   }
 
   // ---- RPCs ----
