@@ -382,6 +382,7 @@
         const e = idx.list.find((s) => s.id === idx.active);
         if (e) { e.name = ((p.displayName || e.name || 'Explorer') + '').slice(0, 16); e.lastPlayed = p.lastPlayed; writeJSON(PROFILES_KEY, idx); }
         syncLegacyKeys(p);
+        if (window.CloudSync) window.CloudSync.onProfileSaved(p);   // debounced cloud push (no-op if cloud off / unlinked)
         return p;
     }
 

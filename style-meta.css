@@ -914,3 +914,52 @@ body.meta-settings-open #settings-modal.settings-over-meta {
     padding: 0.35rem 0.6rem;
     font-size: 0.72rem;
 }
+
+/* ---- Cloud save card (claim screen) ---- */
+.meta-cloud-card {
+    text-align: left;
+    padding: 0.75rem 0.85rem;
+    margin-bottom: 1.25rem;
+    background: rgba(200, 120, 50, 0.12);
+    border: 1px solid rgba(240, 170, 90, 0.38);
+}
+.meta-cloud-card h3 {
+    margin: 0 0 0.35rem;
+    font-size: 0.95rem;
+    color: #ffc078;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+.meta-cloud-card p {
+    margin: 0 0 0.55rem;
+    font-size: 0.86rem;
+    opacity: 0.88;
+    line-height: 1.4;
+}
+.meta-cloud-code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 1.05rem;
+    letter-spacing: 0.08em;
+    color: #ffe0b0;
+    background: rgba(0, 0, 0, 0.28);
+    border: 1px dashed rgba(240, 170, 90, 0.5);
+    padding: 0.5rem 0.65rem;
+    margin-bottom: 0.6rem;
+    user-select: all;
+    word-break: break-all;
+}
+.meta-cloud-acts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+.meta-cloud-acts .meta-btn {
+    flex: 1 1 auto;
+    margin: 0;
+}
+.meta-cloud-msg {
+    margin-top: 0.5rem;
+    font-size: 0.8rem;
+    color: #ffd9a8;
+    min-height: 1em;
+}

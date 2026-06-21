@@ -11,7 +11,7 @@
     <meta http-equiv="Expires" content="0">
     <title>3D Second-Person Game - 128-bit Style</title>
     <link rel="stylesheet" href="style.css?v=68">
-    <link rel="stylesheet" href="style-meta.css?v=15">
+    <link rel="stylesheet" href="style-meta.css?v=16">
 </head>
 <body>
     <div id="gameContainer">
@@ -323,6 +323,7 @@
                 <p class="meta-tagline" id="meta-claim-tagline">Personal asteroid — progress saves on this device</p>
                 <div id="meta-claim-stats" class="meta-claim-stats"></div>
                 <div id="meta-mission-card" class="meta-mission-card"></div>
+                <div id="meta-cloud-card" class="meta-cloud-card" hidden></div>
                 <button type="button" class="meta-btn meta-btn-primary" id="meta-asteroid-play-btn">Continue expedition</button>
                 <button type="button" class="meta-btn meta-btn-ghost" id="meta-asteroid-profiles-btn">Switch profile</button>
                 <button type="button" class="meta-btn meta-btn-ghost" id="meta-asteroid-back-btn">Back to modes</button>
@@ -563,6 +564,9 @@
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/utils/SkeletonUtils.js"></script>
     <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+    <script src="cloud-config.js?v=1"></script>
+    <script src="cloudsync.js?v=2"></script>
     <script src="multiplayer.js?v=3"></script>
     <script src="openworld.js?v=3"></script>
     <script src="worldstream.js?v=51"></script>
@@ -570,13 +574,13 @@
     <script src="planet.js?v=173"></script>
     <script src="voxel-character.js?v=37"></script>
     <script src="meta-char-preview.js?v=3"></script>
-    <script src="asteroid-profile.js?v=13"></script>
+    <script src="asteroid-profile.js?v=14"></script>
     <script src="asteroid-creatures.js?v=4"></script>
     <script src="asteroid-ships.js?v=6"></script>
     <script src="asteroid-structures.js?v=4"></script>
     <script src="voxelworld.js?v=191"></script>
     <script src="modes.js?v=9"></script>
     <script src="game.js?v=153"></script>
-    <script src="game-modes-impl.js?v=45"></script>
+    <script src="game-modes-impl.js?v=47"></script>
 </body>
 </html>
