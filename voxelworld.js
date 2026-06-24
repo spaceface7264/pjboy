@@ -721,8 +721,9 @@
         function saveSettings() { try { localStorage.setItem(VX_SETTINGS_KEY, JSON.stringify(vxSettings)); } catch (_) {} }
         function applyViewDistance(restream) {
             VIEW_R = VIEW_DIST_R[vxSettings.dist] || 14; KEEP_R = VIEW_R + 2; UNLOAD_R = VIEW_R + 4;
-            // scale the haze to the new draw distance so the change is actually visible
-            FOG_FAR = VIEW_R * CH * 0.92; FOG_NEAR = FOG_FAR * 0.26;
+            // haze only the very edge so you see crisp terrain almost all the way out,
+            // with just enough fade at the boundary to mask chunk pop-in.
+            FOG_FAR = VIEW_R * CH; FOG_NEAR = FOG_FAR * 0.55;
             if (g.scene && g.scene.fog) { g.scene.fog.near = FOG_NEAR; g.scene.fog.far = FOG_FAR; }
             if (restream && _active && typeof resetStreaming === 'function') { resetStreaming(); streamInit(); }
         }
@@ -792,12 +793,13 @@
           c[cIdx(x-cx*CH, y, z-cz*CH)] = id;
           recordEdit(x,y,z,id);
           if(id){ const k=colKey(cx,cz); if(y > (colMaxY.get(k)||0)) colMaxY.set(k, y); }
-          rebuildChunkAt(x,y,z);
-          // borders share faces with the neighbor chunk
+          rebuildChunkAt(x,y,z);               // instant: the chunk you actually touched
+          // borders share faces with the neighbor chunk — remesh those async (next frame
+          // or two) so a single edit never triggers up to 7 synchronous chunk rebuilds.
           const lx=_mod(x,CH), lz=_mod(z,CH);
-          if(lx===0) rebuildChunkAt(x-1,y,z); if(lx===CH-1) rebuildChunkAt(x+1,y,z);
-          if(y%CH===0) rebuildChunkAt(x,y-1,z); if(y%CH===CH-1) rebuildChunkAt(x,y+1,z);
-          if(lz===0) rebuildChunkAt(x,y,z-1); if(lz===CH-1) rebuildChunkAt(x,y,z+1);
+          if(lx===0) queueRebuildAt(x-1,y,z); if(lx===CH-1) queueRebuildAt(x+1,y,z);
+          if(y%CH===0) queueRebuildAt(x,y-1,z); if(y%CH===CH-1) queueRebuildAt(x,y+1,z);
+          if(lz===0) queueRebuildAt(x,y,z-1); if(lz===CH-1) queueRebuildAt(x,y,z+1);
           persistBlockEdit(x, y, z, id);
         }
 
@@ -849,7 +851,9 @@
             if(lz===0) addChunk(x,y,z-1); if(lz===CH-1) addChunk(x,y,z+1);
           }
           if(p) AP.save(p);
-          for(const ck of chunks){ const a=ck.split(','); buildChunkMesh(+a[0],+a[1],+a[2]); }
+          // Spread the flood remesh across frames so filling a big cavern flows smoothly
+          // instead of rebuilding dozens of chunks in one synchronous spike.
+          for(const ck of chunks){ const a=ck.split(','); queueRebuildChunk(+a[0],+a[1],+a[2]); }
         }
 
         // Resolve the player's current planet → drives SEED, biome theme, atmosphere.
@@ -872,6 +876,7 @@
             }
             applyActiveSpec();
             applyPlanetAtmosphere();
+            if (typeof loadWaypoint === 'function') loadWaypoint();   // per-planet waypoint
         }
 
         // Cache the active spec's generation/physics inputs and merge any custom sky
@@ -1135,7 +1140,9 @@
           // recedes into a shrinking lit disc below instead of a hard fog wall.
           if(g.scene.fog){
             g.scene.fog.near = FOG_NEAR + sf*60;
-            g.scene.fog.far  = FOG_FAR  + sf*(1400 - FOG_FAR);
+            // keep the haze pinned just past the meshed edge at all altitudes so flying
+            // up never reveals the hard map boundary / chunk pop-in.
+            g.scene.fog.far  = Math.min(FOG_FAR + sf*(1400 - FOG_FAR), VIEW_R*CH*1.04);
             g.scene.fog.color.setHex(_baseFogHex).lerp(_SPACE_COL, sf);
           }
           // curved planet globe below: fade in with altitude, sit under the player, face the sun.
@@ -1999,6 +2006,8 @@
         const meshedCols = new Set();           // "cx,cz" columns claimed (generated/meshing)
         let buildQueue = [];                    // pending columns to GENERATE, nearest first
         let meshQueue = [];                     // pending per-sub-chunk MESH jobs {cx,cy,cz}
+        let editQueue = [];                     // high-priority rebuilds from player edits (mine/place/flood)
+        const _editQueued = new Set();          // dedup keys "cx,cy,cz" for editQueue
         let _streamCx = null, _streamCz = null;
 
         function meshColumn(cx,cz){
@@ -2060,11 +2069,17 @@
         // (one sub-chunk mesh, or one column generation), never spanning a whole column.
         // Mesh jobs run first so claimed columns finish before new ones generate.
         function processBuildQueue(maxMs){
-          if(!meshQueue.length && !buildQueue.length) return;
+          if(!editQueue.length && !meshQueue.length && !buildQueue.length) return;
           const now = (typeof performance!=='undefined' && performance.now) ? ()=>performance.now() : ()=>Date.now();
+          // player edits are urgent — give them a little more headroom so a dig/build
+          // flushes within a frame or two without ever spiking a whole 7-chunk rebuild.
+          const cap = editQueue.length ? Math.max(maxMs, 6) : maxMs;
           const t0 = now();
           do {
-            if(meshQueue.length){
+            if(editQueue.length){
+              const j = editQueue.shift(); _editQueued.delete(j.k);
+              if(meshedCols.has(colKey(j.cx,j.cz))) buildChunkMesh(j.cx,j.cy,j.cz);
+            } else if(meshQueue.length){
               const j = meshQueue.shift();
               // skip stale jobs whose column drifted out of range before meshing
               if(meshedCols.has(colKey(j.cx,j.cz))) buildChunkMesh(j.cx,j.cy,j.cz);
@@ -2072,7 +2087,54 @@
               const job = buildQueue.shift();
               if(job && !meshedCols.has(colKey(job.cx,job.cz))) genColumnJob(job.cx,job.cz);
             }
-          } while((meshQueue.length || buildQueue.length) && now()-t0 < maxMs);
+          } while((editQueue.length || meshQueue.length || buildQueue.length) && now()-t0 < cap);
+        }
+        // Queue a single sub-chunk remesh from a player edit (deduped, async). Border
+        // edits touch neighbour chunks; spreading those over a couple frames kills the
+        // synchronous 7-chunk rebuild hitch while the directly-edited chunk stays instant.
+        function queueRebuildChunk(cx,cy,cz){
+          if(cy<0 || cy>=VCH) return;
+          if(!meshedCols.has(colKey(cx,cz))) return;   // not resident; it'll mesh when streamed
+          const k = cx+','+cy+','+cz;
+          if(_editQueued.has(k)) return;
+          _editQueued.add(k); editQueue.push({cx,cy,cz,k});
+        }
+        function queueRebuildAt(x,y,z){
+          if(y<0 || y>=H) return;
+          queueRebuildChunk(Math.floor(x/CH), Math.floor(y/CH), Math.floor(z/CH));
+        }
+
+        // ---------- adaptive draw distance ----------
+        // Hold a smooth frame rate while pushing the horizon as far out as the hardware
+        // allows: raise VIEW_R when frames are cheap + streaming has caught up, shed it
+        // fast when they aren't. updateSky() (per frame) propagates VIEW_R -> fog + camera
+        // far-plane, so changing these globals + forcing one stream pass is all we need.
+        const VR_MIN = 16, VR_MAX = 48;         // column-chunk radius bounds (×16 blocks)
+        const VR_SEED = 28;                     // distance to jump to on entry, before fine-tuning
+        let _frameMsEMA = 16, _qCooldown = 0, _qHoldUp = 0, _qSeeded = false;
+        let _adaptive = true;                   // auto-tune view distance to frame rate
+        function setLiveViewR(r){
+          r = Math.max(VR_MIN, Math.min(VR_MAX, r|0));
+          if(r === VIEW_R) return;
+          VIEW_R = r; KEEP_R = VIEW_R + 2; UNLOAD_R = VIEW_R + 4;
+          FOG_FAR = VIEW_R * CH; FOG_NEAR = FOG_FAR * 0.55;
+          if(g.scene && g.scene.fog){ g.scene.fog.near = FOG_NEAR; g.scene.fog.far = FOG_FAR; }
+          _streamCx = _streamCz = null;         // force streamAround to re-evaluate load/unload now
+        }
+        function adaptQuality(dt){
+          if(!_adaptive) return;
+          if(!_qSeeded){ _qSeeded = true; setLiveViewR(Math.max(VIEW_R, VR_SEED)); }  // start far, then tune
+          const ms = Math.min(100, dt*1000);    // clamp outliers (streaming spikes, tab stalls)
+          _frameMsEMA += (ms - _frameMsEMA) * 0.1;
+          _qCooldown -= dt;
+          if(_qCooldown > 0) return;
+          if(_frameMsEMA > 28){                 // < ~36 fps: only pull back when genuinely choppy
+            setLiveViewR(VIEW_R - 2); _qHoldUp = 0; _qCooldown = 0.7; return;
+          }
+          // running OK (> ~52 fps) AND streaming has caught up: push the horizon out, eagerly
+          if(_frameMsEMA < 19 && meshQueue.length < 12 && buildQueue.length < 80){
+            setLiveViewR(VIEW_R + 3); _qCooldown = 0.8;
+          } else { _qHoldUp = 0; _qCooldown = 0.5; }
         }
         // Dispose all chunks + buffers (used when entering / changing planet).
         function resetStreaming(){
@@ -2082,6 +2144,9 @@
           colMaxY.clear();
           buildQueue = [];
           meshQueue = [];
+          editQueue = [];
+          _editQueued.clear();
+          _qSeeded = false;                     // re-seed the far view distance on next entry
           _streamCx = _streamCz = null;
         }
         // Build the spawn area up front; the rest streams in over the next frames.
@@ -6317,7 +6382,7 @@ ${waveConsts}
         const controlsDrawerEl = document.getElementById('voxel-controls-drawer');
 
         function voxelPanelOpen() {
-            return drawerOpen || controlsDrawerOpen;
+            return drawerOpen || controlsDrawerOpen || mapOpen;
         }
 
         function backpackTotal() {
@@ -7636,6 +7701,506 @@ ${waveConsts}
                 }));
             }
         }
+        // ===================== World Map (press O) =====================
+        // A top-down atlas of the whole (periodic) world, biome-coloured by surface
+        // block, with every player-placed block marked so the kid can always find
+        // their base. The terrain raster is cached per-planet; the build/markers
+        // overlay is redrawn each time the map opens (cheap).
+        const MAP_TERRAIN_RES = 96;    // chunky tile grid across one world period (stylized, not realistic)
+        const MAP_VIEW_PX = 640;       // visible canvas pixel size
+        // Representative flat colour for each block id on the map.
+        const MAP_COLOR = {
+            1:0x5ba843, 2:0x7d5a3a, 3:0x808a96, 4:0xd9c27e, 5:0x8a6038, 6:0x3f8a3c,
+            7:0x9aa6b2, 8:0xa8d8ee, 9:0x3fa6b0, 10:0x8a4ec0, 11:0xd84a18, 12:0x37a08a,
+            13:0xb04632, 14:0x7a4ec0, 15:0xd9a93c, 16:0x8a8a92, 17:0x3a3d44, 18:0xa85438,
+            19:0x6a6660, 20:0xeef2f8, 21:0x201c2a, 22:0x6f9a6a, 23:0xa86a4a, 24:0xd9b441,
+            25:0x6a7078, 26:0x2a3a6a, 27:0x2e2e34, 28:0x4a9a2a, 29:0x2a9a52, 30:0x18142a,
+            31:0x8a929a, 32:0xbfe0e8, 33:0x2a6a52, 34:0xf0d97a, 35:0x4a525a, 36:0x7a5a78,
+            37:0xc89a3a, 38:0xe85a1a, 39:0x7ad94a, 40:0x2f6fc0, 41:0x8a4ec0, 42:0xff6a1e,
+            43:0x8a8278, 44:0xc24a1e
+        };
+        const _mapRgb = (hex) => [(hex >> 16) & 255, (hex >> 8) & 255, hex & 255];
+        const _cssHex = (hex) => '#' + ('000000' + (hex >>> 0).toString(16)).slice(-6);
+
+        let mapEl = null, mapCanvas = null, mapOpen = false;
+        let _mapTerrainCanvas = null, _mapTerrainKey = '';
+        let _mapClusters = [], _mapRaf = 0;
+
+        // Pan/zoom view over the periodic world. `cx,cz` is the world point at the canvas
+        // centre; `scale` is pixels-per-block; `follow` keeps the view locked on the player.
+        const _mapView = { cx: 0, cz: 0, scale: MAP_VIEW_PX / WORLD_PERIOD, follow: true };
+        const _mapScaleMin = () => MAP_VIEW_PX / WORLD_PERIOD;        // whole world fits
+        const _mapScaleMax = () => (MAP_VIEW_PX / WORLD_PERIOD) * 10; // zoom right in
+        const _mapClampScale = (s) => Math.max(_mapScaleMin(), Math.min(_mapScaleMax(), s));
+        const _mapS2W = (px, py) => ({
+            wx: _mapView.cx + (px - MAP_VIEW_PX / 2) / _mapView.scale,
+            wz: _mapView.cz + (py - MAP_VIEW_PX / 2) / _mapView.scale
+        });
+        function _mapRecenter() {
+            _mapView.cx = pmod(player.pos.x);
+            _mapView.cz = pmod(player.pos.z);
+            _mapView.scale = _mapScaleMin();
+            _mapView.follow = true;
+        }
+
+        // ---- player waypoint: a mark dropped on the map + an on-screen guide beacon ----
+        const WAYPOINT_KEY = 'pjboy.voxelWaypoint.v1';
+        let waypoint = null;                         // { x, z } canonical world coords, current planet
+        let waypointEl = null;
+        const _wpVec = new THREE.Vector3(), _wpDir = new THREE.Vector3(), _wpTo = new THREE.Vector3();
+        const _wpPlanetKey = () => activePlanetId || 'default';
+        function _wpStore() {
+            try { return JSON.parse(localStorage.getItem(WAYPOINT_KEY) || '{}') || {}; }
+            catch (_) { return {}; }
+        }
+        function loadWaypoint() {
+            const w = _wpStore()[_wpPlanetKey()];
+            waypoint = (w && isFinite(w.x) && isFinite(w.z)) ? { x: w.x, z: w.z } : null;
+        }
+        function saveWaypoint() {
+            const all = _wpStore();
+            if (waypoint) all[_wpPlanetKey()] = { x: Math.round(waypoint.x), z: Math.round(waypoint.z) };
+            else delete all[_wpPlanetKey()];
+            try { localStorage.setItem(WAYPOINT_KEY, JSON.stringify(all)); } catch (_) {}
+        }
+        function setWaypoint(wx, wz) { waypoint = { x: pmod(wx), z: pmod(wz) }; saveWaypoint(); }
+        function clearWaypoint() { waypoint = null; saveWaypoint(); }
+
+        // Wrapped (toroidal) delta from a→b on one axis, into [-PERIOD/2, PERIOD/2).
+        function _wrapDelta(a, b) {
+            let d = (((b - a) % WORLD_PERIOD) + WORLD_PERIOD) % WORLD_PERIOD;
+            return d > WORLD_PERIOD / 2 ? d - WORLD_PERIOD : d;
+        }
+        // Place a waypoint at a world point, or clear it if you tapped the existing one.
+        function _toggleWaypointAt(wx, wz) {
+            const cw = pmod(wx), cz = pmod(wz);
+            if (waypoint) {
+                const dx = _wrapDelta(waypoint.x, cw), dz = _wrapDelta(waypoint.z, cz);
+                if (Math.hypot(dx, dz) < 18 / _mapView.scale) {
+                    clearWaypoint();
+                    if (g.showMessage) g.showMessage('Waypoint cleared', 1400);
+                    return;
+                }
+            }
+            setWaypoint(cw, cz);
+            if (g.showMessage) g.showMessage('⚑ Waypoint set — follow the marker', 2000);
+        }
+
+        // Cyan target reticle for the waypoint on the map.
+        function _mapWaypointPin(ctx, x, y, pulse) {
+            ctx.save();
+            ctx.strokeStyle = 'rgba(111,227,255,' + (0.6 + pulse * 0.4).toFixed(3) + ')';
+            ctx.lineWidth = 2;
+            ctx.shadowColor = 'rgba(111,227,255,0.9)'; ctx.shadowBlur = 10;
+            ctx.beginPath(); ctx.arc(x, y, 9 + pulse * 3, 0, Math.PI * 2); ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(x - 13, y); ctx.lineTo(x - 5, y); ctx.moveTo(x + 5, y); ctx.lineTo(x + 13, y);
+            ctx.moveTo(x, y - 13); ctx.lineTo(x, y - 5); ctx.moveTo(x, y + 5); ctx.lineTo(x, y + 13);
+            ctx.stroke();
+            ctx.shadowBlur = 0;
+            ctx.beginPath(); ctx.arc(x, y, 2.5, 0, Math.PI * 2); ctx.fillStyle = '#dffaff'; ctx.fill();
+            ctx.restore();
+        }
+
+        function ensureWaypointHud() {
+            if (waypointEl) return waypointEl;
+            const overlay = document.getElementById('voxel-overlay');
+            if (!overlay) return null;
+            const el = document.createElement('div');
+            el.id = 'voxel-waypoint'; el.className = 'vx-waypoint'; el.hidden = true;
+            el.innerHTML = '<span class="vx-wp-arrow">◈</span><span class="vx-wp-dist">0 m</span>';
+            overlay.appendChild(el);
+            waypointEl = el;
+            return el;
+        }
+
+        // Each frame (map closed): project the waypoint to screen, clamp to the edge with
+        // a pointing arrow when off-screen, and show the live distance. Auto-clears on arrival.
+        function updateWaypointHud() {
+            const el = ensureWaypointHud();
+            if (!el) return;
+            if (!waypoint || voxelPanelOpen() || !camera) { if (!el.hidden) el.hidden = true; return; }
+            const dx = _wrapDelta(player.pos.x, waypoint.x), dz = _wrapDelta(player.pos.z, waypoint.z);
+            const dist = Math.hypot(dx, dz);
+            if (dist < 2.6 && !flying) {
+                clearWaypoint();
+                el.hidden = true;
+                if (g.showMessage) g.showMessage('⚑ Waypoint reached!', 1800);
+                try { playSfx('voxelPlace'); } catch (_) {}
+                return;
+            }
+            const nearX = player.pos.x + dx, nearZ = player.pos.z + dz;
+            // sit the beacon on the terrain at the mark (respects builds), not at eye level
+            const fvx = Math.floor(nearX), fvz = Math.floor(nearZ);
+            let topVy = surfaceTopVox(fvx, fvz);
+            if (topVy == null) topVy = Math.max(SEA_LEVEL, columnHeight(fvx, fvz));   // water surface / fallback
+            const beaconY = topVy + 1 + WORLD_OFFSET.y + 1.2;   // hover just above the ground
+            _wpVec.set(nearX, beaconY, nearZ).project(camera);
+            camera.getWorldDirection(_wpDir);
+            _wpTo.set(nearX - camera.position.x, beaconY - camera.position.y, nearZ - camera.position.z);
+            const ahead = _wpTo.dot(_wpDir) > 0;
+            let nx = _wpVec.x, ny = _wpVec.y;
+            if (!ahead) { nx = -nx; ny = -ny; }
+            const W = window.innerWidth, H = window.innerHeight, pad = 56;
+            const onScreen = ahead && nx >= -0.98 && nx <= 0.98 && ny >= -0.98 && ny <= 0.98;
+            let sx, sy, edge, rot = 0;
+            if (onScreen) {
+                sx = (nx * 0.5 + 0.5) * W; sy = (-ny * 0.5 + 0.5) * H; edge = false;
+            } else {
+                const m = Math.max(Math.abs(nx), Math.abs(ny)) || 1;
+                sx = (nx / m * 0.5 + 0.5) * W; sy = (-ny / m * 0.5 + 0.5) * H;
+                sx = Math.max(pad, Math.min(W - pad, sx));
+                sy = Math.max(pad, Math.min(H - pad, sy));
+                rot = Math.atan2(sy - H / 2, sx - W / 2);   // point the arrow from screen centre toward target
+                edge = true;
+            }
+            el.hidden = false;
+            el.classList.toggle('vx-wp-edge', edge);
+            el.style.left = sx + 'px';
+            el.style.top = sy + 'px';
+            const arrow = el.querySelector('.vx-wp-arrow');
+            const distEl = el.querySelector('.vx-wp-dist');
+            if (arrow) {
+                arrow.textContent = edge ? '➤' : '◈';
+                arrow.style.transform = edge ? 'rotate(' + rot + 'rad)' : 'none';
+            }
+            if (distEl) distEl.textContent = Math.round(dist) + ' m';
+        }
+
+        // Rasterise the world into a low-res, flat-coloured tile grid — a stylized,
+        // poster-like map (no realistic hillshade). Each tile is one biome colour with a
+        // couple of discrete elevation steps; the display scales it crisp (nearest-neighbour)
+        // so it reads as chunky voxel tiles. Cached per planet.
+        function buildMapTerrain() {
+            const key = SEED + '|' + activeBiomeKey + '|' + MAP_TERRAIN_RES;
+            if (_mapTerrainCanvas && _mapTerrainKey === key) return _mapTerrainCanvas;
+            const R = MAP_TERRAIN_RES, stepW = WORLD_PERIOD / R;
+            const oc = document.createElement('canvas');
+            oc.width = R; oc.height = R;
+            const octx = oc.getContext('2d');
+            const img = octx.createImageData(R, R);
+            const data = img.data;
+            const isVolc = activeBiomeKey === 'volcanic';
+            const seaShallow = _mapRgb(isVolc ? 0xe8631e : 0x3a93b0);
+            const seaDeep = _mapRgb(isVolc ? 0xb33a12 : 0x245d7e);
+            const clamp255 = (v) => v < 0 ? 0 : v > 255 ? 255 : v;
+            for (let j = 0; j < R; j++) {
+                for (let i = 0; i < R; i++) {
+                    const p = columnProfile((i + 0.5) * stepW, (j + 0.5) * stepW);
+                    const h = p.height;
+                    let r, g, b;
+                    if (h < SEA_LEVEL) {
+                        const c = (SEA_LEVEL - h) > 6 ? seaDeep : seaShallow;   // 2-tone coast/deep
+                        r = c[0]; g = c[1]; b = c[2];
+                    } else {
+                        const c = _mapRgb(MAP_COLOR[p.top] || 0x808a96);
+                        // discrete elevation steps → a stylized topographic look, not realistic relief
+                        const band = Math.max(0, Math.min(3, Math.floor((h - SEA_LEVEL) / 9)));
+                        const f = 0.90 + band * 0.05;            // 0.90 · 0.95 · 1.00 · 1.05
+                        r = c[0] * f; g = c[1] * f; b = c[2] * f;
+                    }
+                    const o = (j * R + i) * 4;
+                    data[o] = clamp255(r); data[o + 1] = clamp255(g); data[o + 2] = clamp255(b); data[o + 3] = 255;
+                }
+            }
+            octx.putImageData(img, 0, 0);
+            _mapTerrainCanvas = oc; _mapTerrainKey = key;
+            return oc;
+        }
+
+        // Group placed blocks (canonical, topmost per column) into build sites so a base
+        // reads as ONE clear marker the kid can find — not a scatter of sub-pixel dots.
+        function collectMapBuilds() {
+            const cols = new Map();
+            editStore.forEach((id, k) => {
+                if (!id) return;                                  // 0 = mined air, not a build
+                const a = k.split(',');
+                const ex = +a[0], y = +a[1], ez = +a[2], ck = ex + ',' + ez;
+                const cur = cols.get(ck);
+                if (!cur || y > cur.y) cols.set(ck, { x: ex, z: ez, id });
+            });
+            const GB = 176;   // ~176-block grid buckets → one pin per build site
+            const buckets = new Map();
+            cols.forEach((c) => {
+                const bk = Math.floor(c.x / GB) + ',' + Math.floor(c.z / GB);
+                let bu = buckets.get(bk);
+                if (!bu) { bu = { sx: 0, sz: 0, n: 0, ids: {} }; buckets.set(bk, bu); }
+                bu.sx += c.x; bu.sz += c.z; bu.n++;
+                bu.ids[c.id] = (bu.ids[c.id] || 0) + 1;
+            });
+            const clusters = [];
+            buckets.forEach((bu) => {
+                let best = 0, bid = 0;
+                for (const k in bu.ids) if (bu.ids[k] > best) { best = bu.ids[k]; bid = +k; }
+                clusters.push({ x: bu.sx / bu.n, z: bu.sz / bu.n, n: bu.n, id: bid });
+            });
+            return clusters;
+        }
+
+        function _mapPin(ctx, x, y, color, glyph) {
+            ctx.font = 'bold 18px system-ui, sans-serif';
+            ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            ctx.lineWidth = 3.5; ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+            ctx.strokeText(glyph, x, y);
+            ctx.fillStyle = color; ctx.fillText(glyph, x, y);
+        }
+
+        // A warm amber survey beacon marking a build site — gently pulsing, dark-edged,
+        // with a hot white core so it reads even on sandy ground (count badge if >1 block).
+        function _mapBuildPin(ctx, x, y, n, pulse) {
+            const baseR = Math.min(18, 7 + Math.sqrt(n) * 1.5);
+            ctx.save();
+            ctx.beginPath();
+            ctx.arc(x, y, baseR + 3 + pulse * 4, 0, Math.PI * 2);
+            ctx.strokeStyle = 'rgba(255,212,114,' + (0.45 + pulse * 0.4).toFixed(3) + ')';
+            ctx.lineWidth = 2; ctx.stroke();
+            ctx.shadowColor = 'rgba(245,183,62,0.95)'; ctx.shadowBlur = 12;
+            ctx.beginPath();
+            ctx.moveTo(x, y - baseR); ctx.lineTo(x + baseR, y); ctx.lineTo(x, y + baseR); ctx.lineTo(x - baseR, y); ctx.closePath();
+            ctx.fillStyle = '#ffd45c'; ctx.fill();
+            ctx.shadowBlur = 0;
+            ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(42,26,8,0.95)'; ctx.stroke();
+            if (n > 1) {
+                ctx.fillStyle = '#2a1a08';
+                ctx.font = 'bold 11px "Courier New", monospace';
+                ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+                ctx.fillText(n > 999 ? '999+' : String(n), x, y + 0.5);
+            } else {
+                ctx.beginPath(); ctx.arc(x, y, 2, 0, Math.PI * 2);
+                ctx.fillStyle = '#fff4d6'; ctx.fill();   // hot core pip
+            }
+            ctx.restore();
+        }
+
+        // The live "you are here" arrow — heading-aware, with a warm amber halo.
+        function _mapPlayerArrow(ctx, x, y, yaw, pulse) {
+            ctx.save();
+            ctx.beginPath();
+            ctx.arc(x, y, 9 + pulse * 3, 0, Math.PI * 2);
+            ctx.strokeStyle = 'rgba(255,212,114,' + (0.35 + pulse * 0.45).toFixed(3) + ')';
+            ctx.lineWidth = 2; ctx.stroke();
+            ctx.translate(x, y);
+            ctx.rotate(Math.atan2(Math.sin(yaw), -Math.cos(yaw)));
+            ctx.shadowColor = 'rgba(245,183,62,0.7)'; ctx.shadowBlur = 6;
+            ctx.beginPath(); ctx.moveTo(0, -11); ctx.lineTo(7, 8); ctx.lineTo(0, 4); ctx.lineTo(-7, 8); ctx.closePath();
+            ctx.lineWidth = 2.5; ctx.strokeStyle = 'rgba(42,26,8,0.95)'; ctx.stroke();
+            ctx.fillStyle = '#fff4d6'; ctx.fill();
+            ctx.restore();
+        }
+
+        // Composite the cached terrain + grid + build sites + home/gate + live player.
+        // `phase` (seconds) drives the gentle marker pulse.
+        function drawMap(phase) {
+            if (!mapCanvas) return 0;
+            const ctx = mapCanvas.getContext('2d');
+            const S = MAP_VIEW_PX, scale = _mapView.scale;
+            ctx.clearRect(0, 0, S, S);
+            ctx.imageSmoothingEnabled = false;          // crisp chunky tiles, not a smooth photo
+
+            // ---- terrain: the period tiles seamlessly, so draw wrapped copies centred on the view ----
+            const terr = buildMapTerrain();
+            const periodPx = WORLD_PERIOD * scale;
+            let baseX = S / 2 - _mapView.cx * scale;
+            let baseY = S / 2 - _mapView.cz * scale;
+            baseX = ((baseX % periodPx) + periodPx) % periodPx; if (baseX > 0) baseX -= periodPx;
+            baseY = ((baseY % periodPx) + periodPx) % periodPx; if (baseY > 0) baseY -= periodPx;
+            for (let tx = baseX; tx < S; tx += periodPx)
+                for (let ty = baseY; ty < S; ty += periodPx)
+                    ctx.drawImage(terr, tx, ty, periodPx, periodPx);
+
+            // light warm wash so the flat tiles still sit inside the brass console
+            ctx.save();
+            ctx.globalCompositeOperation = 'soft-light';
+            ctx.fillStyle = 'rgba(245,183,62,0.16)';
+            ctx.fillRect(0, 0, S, S);
+            ctx.restore();
+            // soft warm vignette — darker toward the rim, like glass under the bezel
+            const vig = ctx.createRadialGradient(S / 2, S / 2, S * 0.34, S / 2, S / 2, S * 0.74);
+            vig.addColorStop(0, 'rgba(20,13,4,0)');
+            vig.addColorStop(1, 'rgba(18,11,3,0.42)');
+            ctx.fillStyle = vig; ctx.fillRect(0, 0, S, S);
+
+            // world-locked reference grid (every 384 blocks) in warm amber — pans with the map
+            ctx.strokeStyle = 'rgba(255,212,114,0.07)'; ctx.lineWidth = 1;
+            const gpx = 384 * scale;
+            for (let x = ((S / 2 - _mapView.cx * scale) % gpx + gpx) % gpx; x < S; x += gpx) {
+                const p = Math.round(x) + 0.5; ctx.beginPath(); ctx.moveTo(p, 0); ctx.lineTo(p, S); ctx.stroke();
+            }
+            for (let y = ((S / 2 - _mapView.cz * scale) % gpx + gpx) % gpx; y < S; y += gpx) {
+                const p = Math.round(y) + 0.5; ctx.beginPath(); ctx.moveTo(0, p); ctx.lineTo(S, p); ctx.stroke();
+            }
+
+            // ---- markers: project world→screen, wrapping to the copy nearest the view centre ----
+            const HALF = WORLD_PERIOD / 2;
+            const w2s = (wx, wz) => {
+                let dx = (((wx - _mapView.cx) % WORLD_PERIOD) + WORLD_PERIOD) % WORLD_PERIOD; if (dx > HALF) dx -= WORLD_PERIOD;
+                let dz = (((wz - _mapView.cz) % WORLD_PERIOD) + WORLD_PERIOD) % WORLD_PERIOD; if (dz > HALF) dz -= WORLD_PERIOD;
+                return [S / 2 + dx * scale, S / 2 + dz * scale];
+            };
+            const vis = (sx, sy, m) => sx >= -m && sx <= S + m && sy >= -m && sy <= S + m;
+            const pulse = 0.5 + 0.5 * Math.sin(phase * 3);
+
+            _mapClusters.forEach((c) => { const s = w2s(c.x, c.z); if (vis(s[0], s[1], 30)) _mapBuildPin(ctx, s[0], s[1], c.n, pulse); });
+            if (_spawnPos.lengthSq() > 0) { const s = w2s(_spawnPos.x, _spawnPos.z); if (vis(s[0], s[1], 20)) _mapPin(ctx, s[0], s[1], '#a6cf63', '⌂'); }
+            if (starGate) { const s = w2s(starGate.pos.x, starGate.pos.z); if (vis(s[0], s[1], 20)) _mapPin(ctx, s[0], s[1], '#C9A0FF', '◎'); }
+            if (waypoint) { const s = w2s(waypoint.x, waypoint.z); if (vis(s[0], s[1], 20)) _mapWaypointPin(ctx, s[0], s[1], pulse); }
+            const ps = w2s(player.pos.x, player.pos.z);
+            _mapPlayerArrow(ctx, ps[0], ps[1], player.yaw, pulse);
+            return _mapClusters.length;
+        }
+
+        // Redraw loop while the map is open — keeps the player arrow live and the
+        // build/player markers gently pulsing. Terrain + clusters are cached, so each
+        // frame is just a blit plus a handful of marker draws.
+        function _mapTick() {
+            if (!mapOpen) { _mapRaf = 0; return; }
+            if (_mapView.follow) { _mapView.cx = pmod(player.pos.x); _mapView.cz = pmod(player.pos.z); }
+            try { drawMap(elapsed); } catch (e) { if (window.console) console.warn('[map] draw failed', e); }
+            _mapRaf = requestAnimationFrame(_mapTick);
+        }
+
+        function buildMapUI() {
+            if (mapEl) return mapEl;
+            const overlay = document.getElementById('voxel-overlay');
+            if (!overlay) return null;
+            const el = document.createElement('div');
+            el.id = 'voxel-map'; el.className = 'vx-map'; el.hidden = true;
+            el.innerHTML = `
+                <div class="vx-map-panel">
+                    <div class="vx-map-head">
+                        <h3 class="vx-map-title"><span class="vx-map-glyph">◳</span> Survey Map<span id="voxel-map-sub" class="vx-map-sub"></span></h3>
+                        <div class="vx-map-tools">
+                            <button type="button" class="vx-map-close" data-vx-map-recenter title="Center on you">⊙</button>
+                            <button type="button" class="vx-map-close" data-vx-map-close aria-label="Close map">✕</button>
+                        </div>
+                    </div>
+                    <div class="vx-map-stage">
+                        <canvas id="voxel-map-canvas" width="${MAP_VIEW_PX}" height="${MAP_VIEW_PX}"></canvas>
+                        <div class="vx-map-scan" aria-hidden="true"></div>
+                        <i class="vx-map-corner vx-map-corner-tl"></i>
+                        <i class="vx-map-corner vx-map-corner-tr"></i>
+                        <i class="vx-map-corner vx-map-corner-bl"></i>
+                        <i class="vx-map-corner vx-map-corner-br"></i>
+                        <span class="vx-map-compass vx-map-n">N</span>
+                        <span class="vx-map-compass vx-map-s">S</span>
+                        <span class="vx-map-compass vx-map-e">E</span>
+                        <span class="vx-map-compass vx-map-w">W</span>
+                    </div>
+                    <div class="vx-map-legend">
+                        <span><i class="vx-map-key vx-map-you"></i>You</span>
+                        <span><i class="vx-map-key vx-map-build"></i>Your builds</span>
+                        <span><b style="color:#a6cf63">⌂</b> Home</span>
+                        <span><b style="color:#C9A0FF">◎</b> Star Gate</span>
+                        <span><i class="vx-map-key vx-map-wp"></i>Waypoint</span>
+                        <span id="voxel-map-count" class="vx-map-count"></span>
+                    </div>
+                    <p class="vx-map-foot">Click to set waypoint · drag to pan · scroll to zoom · <kbd>⊙</kbd> recenter · <kbd>O</kbd>/<kbd>Esc</kbd> close</p>
+                </div>`;
+            overlay.appendChild(el);
+            mapCanvas = el.querySelector('#voxel-map-canvas');
+            on(el, 'click', (e) => { if (e.target === el) toggleMap(false); });
+            on(el.querySelector('[data-vx-map-close]'), 'click', () => toggleMap(false));
+            on(el.querySelector('[data-vx-map-recenter]'), 'click', () => _mapRecenter());
+            on(el, 'wheel', (e) => e.stopPropagation(), { passive: true });
+
+            // ---- click = drop waypoint · drag = pan · scroll = zoom · right-click = clear ----
+            mapCanvas.style.cursor = 'crosshair';
+            let dragging = false, lastX = 0, lastY = 0, downX = 0, downY = 0, moved = false;
+            const evPos = (e) => {
+                const r = mapCanvas.getBoundingClientRect(), k = MAP_VIEW_PX / r.width;
+                return [(e.clientX - r.left) * k, (e.clientY - r.top) * k];
+            };
+            on(mapCanvas, 'mousedown', (e) => {
+                if (e.button !== 0) return;
+                e.preventDefault();
+                dragging = true; moved = false;
+                const p = evPos(e); lastX = downX = p[0]; lastY = downY = p[1];
+                mapCanvas.style.cursor = 'grabbing';
+            });
+            on(window, 'mousemove', (e) => {
+                if (!dragging) return;
+                const p = evPos(e);
+                if (Math.hypot(p[0] - downX, p[1] - downY) > 8) moved = true;   // a real pan, not a drifty click
+                if (moved) {
+                    _mapView.cx -= (p[0] - lastX) / _mapView.scale;
+                    _mapView.cz -= (p[1] - lastY) / _mapView.scale;
+                    _mapView.follow = false;
+                }
+                lastX = p[0]; lastY = p[1];
+            });
+            on(window, 'mouseup', () => {
+                if (!dragging) return;
+                dragging = false; mapCanvas.style.cursor = 'crosshair';
+            });
+            // Placement uses the native click event (its own click-vs-drag detection);
+            // `moved` suppresses the click the browser fires at the end of a pan.
+            on(mapCanvas, 'click', (e) => {
+                if (moved) { moved = false; return; }
+                const p = evPos(e), w = _mapS2W(p[0], p[1]);
+                _toggleWaypointAt(w.wx, w.wz);
+            });
+            on(mapCanvas, 'contextmenu', (e) => {
+                e.preventDefault();
+                if (waypoint) { clearWaypoint(); if (g.showMessage) g.showMessage('Waypoint cleared', 1400); }
+            });
+            on(mapCanvas, 'wheel', (e) => {
+                e.preventDefault(); e.stopPropagation();
+                const p = evPos(e);
+                const ns = _mapClampScale(_mapView.scale * Math.exp(-e.deltaY * 0.0015));
+                if (_mapView.follow) {
+                    _mapView.scale = ns;                         // keep centred on the player
+                } else {
+                    const b = _mapS2W(p[0], p[1]);
+                    _mapView.scale = ns;
+                    const a = _mapS2W(p[0], p[1]);               // keep the point under the cursor fixed
+                    _mapView.cx += b.wx - a.wx; _mapView.cz += b.wz - a.wz;
+                }
+            }, { passive: false });
+
+            mapEl = el;
+            return el;
+        }
+
+        function toggleMap(force) {
+            const next = force !== undefined ? !!force : !mapOpen;
+            if (next === mapOpen) return;
+            if (next) {
+                if (!buildMapUI()) return;
+                if (drawerOpen) toggleDrawer(false);
+                if (controlsDrawerOpen) toggleControlsDrawer(false);
+                if (scanExpanded) setScanExpanded(false);
+                mapOpen = true;
+                mapEl.hidden = false;
+                releasePointerLock();
+                syncViewCursor();
+                const subEl = document.getElementById('voxel-map-sub');
+                if (subEl) {
+                    let nm = '';
+                    try {
+                        const AP = getProfileApi();
+                        const d = (AP && AP.currentPlanetDef) ? AP.currentPlanetDef(AP.load()) : null;
+                        if (d) nm = d.name + (d.nameDa ? ' · ' + d.nameDa : '');
+                    } catch (_) {}
+                    subEl.textContent = nm ? ' — ' + nm : '';
+                }
+                _mapClusters = collectMapBuilds();
+                _mapRecenter();
+                const sites = _mapClusters.length;
+                const blocks = _mapClusters.reduce((s, c) => s + c.n, 0);
+                const cnt = document.getElementById('voxel-map-count');
+                if (cnt) cnt.textContent = sites
+                    ? sites + ' build site' + (sites === 1 ? '' : 's') + ' · ' + blocks + ' block' + (blocks === 1 ? '' : 's')
+                    : 'No builds yet — place blocks to map them';
+                drawMap(elapsed);
+                if (!_mapRaf) _mapRaf = requestAnimationFrame(_mapTick);
+            } else {
+                mapOpen = false;
+                if (_mapRaf) { cancelAnimationFrame(_mapRaf); _mapRaf = 0; }
+                if (mapEl) mapEl.hidden = true;
+                if (firstPerson) requestFpPointerLock();
+            }
+        }
+
         function toggleControlsDrawer(force) {
             const next = force !== undefined ? !!force : !controlsDrawerOpen;
             if (next && drawerOpen) toggleDrawer(false);
@@ -8968,7 +9533,8 @@ ${waveConsts}
             if (g._hideLegacyPlayUI) g._hideLegacyPlayUI();
             // stream chunks around the player (load ahead, unload behind)
             streamAround(player.pos.x, player.pos.z);
-            processBuildQueue(2.5);            // ms/frame — granular (per sub-chunk) so it spreads without spiking
+            processBuildQueue(4);              // ms/frame — granular (per sub-chunk) so it spreads without spiking
+            adaptQuality(dt);                  // auto-tune view distance to hold a smooth frame rate
             updateDayNight(dt);
             updateSky(dt);
             updateClouds(dt);
@@ -9093,6 +9659,7 @@ ${waveConsts}
             if(_AC) _AC.stepFx(dt);   // creature breath / spore / ember particles
             stepEmberFx(dt);          // Ember: falling ash + rising embers
             updateHUD();
+            updateWaypointHud();      // off-screen beacon guiding to a map waypoint
             updateCamera(dt);
             setUnderwaterTint(eyeInWater());
             updateTpAimVisuals();
@@ -9215,6 +9782,10 @@ ${waveConsts}
                 if (e.code === 'KeyQ') { cycleWeapon(-1); return; }
                 if (e.code === 'KeyE' && !e.shiftKey) { cycleWeapon(1); return; }
                 if (e.code === 'Escape') {
+                    if (mapOpen) {
+                        toggleMap(false);
+                        return;
+                    }
                     if (scanExpanded) {
                         setScanExpanded(false);
                         return;
@@ -9233,15 +9804,18 @@ ${waveConsts}
                         return;
                     }
                 }
-                if (e.code === 'KeyO' && !voxelPanelOpen()) {
-                    if (scanExpanded) {
-                        setScanExpanded(false);
-                    } else {
-                        const shell = document.getElementById('voxel-scan');
-                        if (shell && !shell.hidden && isScanCompactActive(pickTarget())) {
-                            setScanExpanded(true);
-                        }
+                if (e.code === 'KeyO') {
+                    e.preventDefault();
+                    if (mapOpen) { toggleMap(false); return; }
+                    if (scanExpanded) { setScanExpanded(false); return; }
+                    // Keep the scanner-expand shortcut while focus-aiming a block;
+                    // otherwise O opens the world map.
+                    const shell = document.getElementById('voxel-scan');
+                    if (shell && !shell.hidden && isScanCompactActive(pickTarget())) {
+                        setScanExpanded(true);
+                        return;
                     }
+                    if (!voxelPanelOpen()) toggleMap(true);
                     return;
                 }
                 if (e.code === 'KeyH') {

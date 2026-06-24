@@ -2360,6 +2360,240 @@ body.mode-asteroid {
     0%, 100% { transform: scale(1); opacity: 0.85; }
     50% { transform: scale(1.25); opacity: 1; }
 }
+/* ---------- World Map (press O) ---------- */
+.vx-map {
+    position: fixed;
+    inset: 0;
+    z-index: 10058;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: auto;
+    background:
+        radial-gradient(80% 70% at 50% 45%, rgba(58, 42, 20, 0.42), transparent 70%),
+        rgba(10, 7, 3, 0.74);
+    backdrop-filter: blur(5px);
+    -webkit-backdrop-filter: blur(5px);
+}
+.vx-map[hidden] { display: none !important; }
+.vx-map-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px 18px 14px;
+    background: linear-gradient(180deg, var(--hud-bg), var(--hud-bg-2));
+    border: 2px solid var(--hud-edge);
+    border-radius: 12px;
+    box-shadow: var(--hud-bevel), 0 18px 60px rgba(0, 0, 0, 0.65);
+    color: var(--hud-text);
+    font-family: 'Courier New', monospace;
+    max-width: calc(100vw - 24px);
+    max-height: calc(100vh - 24px);
+}
+.vx-map-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding-bottom: 10px;
+    border-bottom: 2px solid rgba(122, 96, 56, 0.55);
+}
+.vx-map-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0;
+    color: var(--hud-amber-lit);
+    font-size: 14px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    text-shadow: 0 0 8px rgba(245, 183, 62, 0.45);
+}
+.vx-map-glyph {
+    color: var(--hud-amber);
+    text-shadow: 0 0 6px rgba(245, 183, 62, 0.6);
+}
+.vx-map-sub {
+    color: var(--hud-text-dim);
+    font-size: 12px;
+    letter-spacing: 1px;
+    text-transform: none;
+}
+.vx-map-tools {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.vx-map-close {
+    width: 30px;
+    height: 30px;
+    border: 2px solid var(--hud-edge);
+    border-radius: 6px;
+    background: rgba(20, 14, 7, 0.5);
+    color: var(--hud-text-dim);
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+}
+.vx-map-close:hover {
+    color: var(--hud-amber-lit);
+    border-color: var(--hud-amber);
+}
+.vx-map-stage {
+    position: relative;
+    align-self: center;
+    line-height: 0;
+    padding: 3px;
+    background: var(--hud-ink);
+    border: 2px solid var(--hud-edge);
+    border-radius: 10px;
+    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.5), inset 0 2px 6px rgba(0, 0, 0, 0.6);
+}
+.vx-map-stage canvas {
+    display: block;
+    width: min(72vmin, 640px);
+    height: min(72vmin, 640px);
+    border-radius: 6px;
+    image-rendering: auto;
+}
+/* retro amber scanlines + soft glass vignette over the survey */
+.vx-map-scan {
+    position: absolute;
+    inset: 3px;
+    border-radius: 6px;
+    pointer-events: none;
+    z-index: 1;
+    background:
+        repeating-linear-gradient(0deg, rgba(255, 179, 71, 0.05) 0 1px, transparent 1px 4px),
+        radial-gradient(130% 130% at 50% 42%, transparent 60%, rgba(20, 12, 4, 0.35) 100%);
+    mix-blend-mode: screen;
+    animation: vx-map-flicker 4.5s ease-in-out infinite;
+}
+@keyframes vx-map-flicker {
+    0%, 100% { opacity: 0.85; }
+    50% { opacity: 1; }
+}
+/* tactical corner brackets framing the survey (scanner-reticle language) */
+.vx-map-corner {
+    position: absolute;
+    width: 18px;
+    height: 18px;
+    border-color: var(--hud-amber-lit);
+    border-style: solid;
+    filter: drop-shadow(0 0 4px rgba(245, 183, 62, 0.6));
+    pointer-events: none;
+    z-index: 3;
+}
+.vx-map-corner-tl { left: -3px; top: -3px; border-width: 2px 0 0 2px; border-top-left-radius: 4px; }
+.vx-map-corner-tr { right: -3px; top: -3px; border-width: 2px 2px 0 0; border-top-right-radius: 4px; }
+.vx-map-corner-bl { left: -3px; bottom: -3px; border-width: 0 0 2px 2px; border-bottom-left-radius: 4px; }
+.vx-map-corner-br { right: -3px; bottom: -3px; border-width: 0 2px 2px 0; border-bottom-right-radius: 4px; }
+.vx-map-compass {
+    position: absolute;
+    z-index: 4;
+    color: var(--hud-amber-lit);
+    font-size: 12px;
+    font-weight: bold;
+    letter-spacing: 1px;
+    text-shadow: 0 0 4px rgba(0, 0, 0, 0.95), 0 0 8px rgba(245, 183, 62, 0.5);
+    pointer-events: none;
+}
+.vx-map-n { top: 7px; left: 50%; transform: translateX(-50%); }
+.vx-map-s { bottom: 7px; left: 50%; transform: translateX(-50%); }
+.vx-map-e { right: 9px; top: 50%; transform: translateY(-50%); }
+.vx-map-w { left: 9px; top: 50%; transform: translateY(-50%); }
+.vx-map-legend {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 16px;
+    font-size: 12px;
+    color: var(--hud-text-dim);
+}
+.vx-map-legend span {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+.vx-map-key {
+    width: 11px;
+    height: 11px;
+    border-radius: 2px;
+    display: inline-block;
+}
+.vx-map-you {
+    background: #fff4d6;
+    clip-path: polygon(50% 0, 100% 100%, 50% 78%, 0 100%);
+    border-radius: 0;
+    filter: drop-shadow(0 0 3px rgba(245, 183, 62, 0.8));
+}
+.vx-map-build {
+    background: #ffd45c;
+    width: 12px;
+    height: 12px;
+    border-radius: 0;
+    transform: rotate(45deg);
+    box-shadow: 0 0 6px rgba(245, 183, 62, 0.95);
+}
+.vx-map-count {
+    margin-left: auto;
+    color: var(--hud-amber);
+}
+.vx-map-foot {
+    margin: 0;
+    text-align: center;
+    font-size: 11px;
+    color: var(--hud-text-dim);
+}
+.vx-map-foot kbd {
+    font-family: inherit;
+    background: rgba(20, 14, 7, 0.6);
+    border: 1px solid var(--hud-edge);
+    border-radius: 4px;
+    padding: 1px 5px;
+    color: var(--hud-amber-lit);
+}
+.vx-map-wp {
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    background: transparent;
+    border: 2px solid #6fe3ff;
+    box-shadow: 0 0 5px rgba(111, 227, 255, 0.9);
+}
+
+/* On-screen waypoint guide beacon (shown when the map is closed) */
+.vx-waypoint {
+    position: fixed;
+    transform: translate(-50%, -50%);
+    z-index: 6;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    pointer-events: none;
+    font-family: 'Courier New', monospace;
+    will-change: left, top;
+}
+.vx-waypoint[hidden] { display: none !important; }
+.vx-wp-arrow {
+    font-size: 26px;
+    line-height: 1;
+    color: #aef0ff;
+    text-shadow: 0 0 7px rgba(111, 227, 255, 0.95), 0 0 2px rgba(0, 0, 0, 0.85);
+}
+.vx-waypoint.vx-wp-edge .vx-wp-arrow { font-size: 30px; }
+.vx-wp-dist {
+    font-size: 12px;
+    font-weight: bold;
+    color: #dffaff;
+    background: rgba(6, 18, 26, 0.62);
+    border: 1px solid rgba(111, 227, 255, 0.5);
+    border-radius: 6px;
+    padding: 0 6px;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+}
+
 #voxel-scan {
     position: fixed;
     left: 0;
