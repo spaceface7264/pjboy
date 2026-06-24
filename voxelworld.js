@@ -1489,6 +1489,25 @@
           return p.height > SEA_LEVEL && (p.top===1 || p.top===12 || p.top===13);
         }
 
+        // Giant toadstools dotting the fungal world (Mycelia). Deterministic + periodic:
+        // one candidate per coarse grid cell, kept on dry land. Returns null unless (x,z)
+        // is the exact root column of a mushroom, else its build params.
+        const SHROOM_GRID = 48;                     // divides WORLD_PERIOD → seamless wrap
+        function giantShroom(x, z){
+          if(activeBiomeKey !== 'fungal') return null;
+          const px = pmod(x), pz = pmod(z);
+          const gx = Math.floor(px/SHROOM_GRID), gz = Math.floor(pz/SHROOM_GRID);
+          if(ihash(gx, 701, gz) > 0.45) return null;                 // ~45% of cells host one
+          const ox = 7 + ((ihash(gx, 13, gz)*(SHROOM_GRID-14))|0);   // keep root off the cell edge
+          const oz = 7 + ((ihash(gx, 27, gz)*(SHROOM_GRID-14))|0);
+          if(px !== gx*SHROOM_GRID+ox || pz !== gz*SHROOM_GRID+oz) return null;
+          const p = columnProfile(px, pz);
+          if(p.height <= SEA_LEVEL+1) return null;                   // dry land only
+          const stemH = 9 + ((ihash(gx, 99, gz)*6)|0);              // 9..14 tall
+          const capR  = 4 + ((ihash(gx, 55, gz)*3)|0);              // 4..6 cap radius
+          return { ground: p.height, stemH, capR };
+        }
+
         // Single-voxel generation (fallback for getBlock outside loaded columns).
         function genBlockSingle(x,y,z){
           const e = editStore.get(pmod(x)+','+y+','+pmod(z));
@@ -1546,6 +1565,41 @@
             for(let lx2=-2;lx2<=2;lx2++) for(let ly2=0;ly2<=2;ly2++) for(let lz2=-2;lz2<=2;lz2++){
               if(lx2*lx2+lz2*lz2+ly2*ly2>5) continue;
               setAt(rx+lx2, cyTop+ly2, rz+lz2, 6, false);                // canopy
+            }
+          }
+          // Giant mushrooms (Mycelia): white stem, domed red spore-cap with white spots and
+          // fungal gills. Wide margin so big caps overhang into neighbouring chunks seamlessly.
+          if(activeBiomeKey === 'fungal'){
+            const setM = (bx,by,bz,id) => {
+              if(by<0||by>=H) return;
+              const llx=bx-x0, llz=bz-z0;
+              if(llx<0||llx>=CH||llz<0||llz>=CH) return;
+              buf[cIdx(llx,by,llz)] = id;
+              if(by>maxY) maxY = Math.min(H-1, by);
+            };
+            for(let rx=x0-8; rx<x0+CH+8; rx++) for(let rz=z0-8; rz<z0+CH+8; rz++){
+              const ms = giantShroom(rx, rz);
+              if(!ms) continue;
+              const gY = ms.ground, capBaseY = gY + ms.stemH, capH = ms.capR;
+              for(let sy=1; sy<=ms.stemH; sy++)                            // rounded white stem
+                for(let sx=-1;sx<=1;sx++) for(let sz=-1;sz<=1;sz++){
+                  if(sx*sx+sz*sz>2) continue;
+                  setM(rx+sx, gY+sy, rz+sz, 20);
+                }
+              const cr2 = ms.capR*ms.capR;
+              for(let dx=-ms.capR; dx<=ms.capR; dx++) for(let dz=-ms.capR; dz<=ms.capR; dz++){   // fungal gills under the brim
+                const d2 = dx*dx+dz*dz;
+                if(d2<=cr2+0.4 && d2>(ms.capR-1.6)*(ms.capR-1.6)) setM(rx+dx, capBaseY-1, rz+dz, 36);
+              }
+              for(let cy=0; cy<=capH; cy++){                              // domed red spore-cap
+                const rr = ms.capR * (1 - cy/(capH+1)), rr2 = rr*rr + 0.4;
+                for(let dx=-ms.capR; dx<=ms.capR; dx++) for(let dz=-ms.capR; dz<=ms.capR; dz++){
+                  if(dx*dx+dz*dz > rr2) continue;
+                  let id = 13;                                            // red cap
+                  if(cy>=capH-1 && ihash(pmod(rx+dx), 321, pmod(rz+dz)) > 0.82) id = 20;   // white spots
+                  setM(rx+dx, capBaseY+cy, rz+dz, id);
+                }
+              }
             }
           }
           if(_AST) maxY = stampStructures(buf, cx, cz, x0, z0, maxY);
@@ -2113,6 +2167,7 @@
         const VR_SEED = 28;                     // distance to jump to on entry, before fine-tuning
         let _frameMsEMA = 16, _qCooldown = 0, _qHoldUp = 0, _qSeeded = false;
         let _adaptive = true;                   // auto-tune view distance to frame rate
+        let _preloading = false;                // true while prewarmHorizon builds — freeze auto-tune
         function setLiveViewR(r){
           r = Math.max(VR_MIN, Math.min(VR_MAX, r|0));
           if(r === VIEW_R) return;
@@ -2122,7 +2177,7 @@
           _streamCx = _streamCz = null;         // force streamAround to re-evaluate load/unload now
         }
         function adaptQuality(dt){
-          if(!_adaptive) return;
+          if(!_adaptive || _preloading) return;   // don't shrink the horizon while pre-building it
           if(!_qSeeded){ _qSeeded = true; setLiveViewR(Math.max(VIEW_R, VR_SEED)); }  // start far, then tune
           const ms = Math.min(100, dt*1000);    // clamp outliers (streaming spikes, tab stalls)
           _frameMsEMA += (ms - _frameMsEMA) * 0.1;
@@ -2155,6 +2210,51 @@
           const N = Math.min(buildQueue.length, 200);   // nearest disc synchronously
           for(let i=0;i<N;i++){ const j=buildQueue.shift(); if(j && !meshedCols.has(colKey(j.cx,j.cz))) meshColumn(j.cx,j.cz); }
           updateHUD();
+        }
+
+        // Build the WHOLE view disc out to the horizon under the loading screen — time-sliced
+        // across frames so it never hitches — then call onDone. The player spawns to a full
+        // horizon instead of watching chunks pop in. A safety cap lets the rest stream in if
+        // generation runs long on a slow device.
+        const PRELOAD_R = 28;                           // min horizon radius to pre-build (×16 blocks)
+        function prewarmHorizon(onDone){
+          const target = Math.max(VIEW_R, PRELOAD_R);
+          _preloading = true;                           // freeze auto-tune so it can't shrink mid-build
+          _qSeeded = true;                              // don't let adaptQuality re-jump the radius
+          VIEW_R = target; KEEP_R = VIEW_R + 2; UNLOAD_R = VIEW_R + 4;
+          FOG_FAR = VIEW_R * CH; FOG_NEAR = FOG_FAR * 0.55;
+          if(g.scene && g.scene.fog){ g.scene.fog.near = FOG_NEAR; g.scene.fog.far = FOG_FAR; }
+          _streamCx = _streamCz = null;
+          streamAround(player.pos.x, player.pos.z);
+          const total = Math.max(1, buildQueue.length);
+          // spawn core synchronously so the player can't fall through before the rest builds
+          for(let i=0, n=Math.min(buildQueue.length, 120); i<n; i++){
+            const j = buildQueue.shift();
+            if(j && !meshedCols.has(colKey(j.cx,j.cz))) meshColumn(j.cx,j.cz);
+          }
+          const hintEl = _loadEl && _loadEl.querySelector('.vx-load-hint');
+          const _now = (typeof performance!=='undefined' && performance.now) ? ()=>performance.now() : ()=>Date.now();
+          const tStart = _now();
+          const MAX_MS = 9000;                          // safety: never block the load forever
+          const step = () => {
+            if(!_active){ _preloading = false; if(onDone) onDone(); return; }
+            processBuildQueue(15);                       // generous per-frame budget; still yields each frame
+            const remaining = buildQueue.length + meshQueue.length;
+            if(hintEl){
+              const pct = Math.min(99, Math.round((total - buildQueue.length) / total * 100));
+              hintEl.textContent = 'Charting the horizon… ' + pct + '%';
+            }
+            if(remaining === 0 || _now() - tStart > MAX_MS){
+              if(hintEl) hintEl.textContent = 'Generating your world…';
+              _frameMsEMA = 16;                          // forget the heavy build frames so auto-tune won't shrink
+              _preloading = false;
+              updateHUD();
+              if(onDone) onDone();
+              return;
+            }
+            requestAnimationFrame(step);
+          };
+          requestAnimationFrame(step);
         }
 
         // ---------- loading screen (covers the synchronous spawn-area build) ----------
@@ -8531,18 +8631,19 @@ ${waveConsts}
                 resetStreaming();
                 clearCritters();
                 spawnPlayerAtCenter();
-                streamInit();
-                spawnStarGate();
-                // if you flew here, arrive in the upper sky still piloting — descend to explore
-                if (flying && ship) {
-                    ship.pos.set(player.pos.x, SPACE_ARRIVE_Y, player.pos.z);
-                    ship.vel.set(0,0,0); ship.pitch=0; ship.roll=0; ship.climbCmd=0;
-                    player.pos.copy(ship.pos); player.yaw = ship.yaw;
-                }
-                flushProfileState();
-                hideVoxelLoading();
-                if (def && g.showMessage) g.showMessage((flying?'Descending toward ':'Arrived at ') + def.name + ' · ' + def.nameDa, 2600);
-                if (typeof updateJournalHud === 'function') updateJournalHud();
+                prewarmHorizon(() => {
+                    spawnStarGate();
+                    // if you flew here, arrive in the upper sky still piloting — descend to explore
+                    if (flying && ship) {
+                        ship.pos.set(player.pos.x, SPACE_ARRIVE_Y, player.pos.z);
+                        ship.vel.set(0,0,0); ship.pitch=0; ship.roll=0; ship.climbCmd=0;
+                        player.pos.copy(ship.pos); player.yaw = ship.yaw;
+                    }
+                    flushProfileState();
+                    hideVoxelLoading();
+                    if (def && g.showMessage) g.showMessage((flying?'Descending toward ':'Arrived at ') + def.name + ' · ' + def.nameDa, 2600);
+                    if (typeof updateJournalHud === 'function') updateJournalHud();
+                });
             });
             return true;
         }
@@ -9999,9 +10100,10 @@ ${waveConsts}
                 showVoxelLoading(def ? ('Charting ' + def.name) : 'Loading…', def ? def.nameDa : '');
                 afterPaint(() => {
                     if (!_active) { hideVoxelLoading(); return; }
-                    streamInit();
-                    spawnStarGate();
-                    hideVoxelLoading();
+                    prewarmHorizon(() => {
+                        spawnStarGate();
+                        hideVoxelLoading();
+                    });
                 });
             })();
             renderHotbar();
