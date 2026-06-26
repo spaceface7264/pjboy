@@ -36,9 +36,11 @@ jobs:
         
       - name: Copy project files
         run: |
-          # Copy main files
-          cp index.html _site/
-          cp style.css _site/
+          # Copy every top-level HTML and CSS file (index.html, goto-ember.html,
+          # style.css, style-meta.css, style-char-creator.css, …). Use globs, not a
+          # hand-maintained list, so newly added pages/stylesheets ship automatically.
+          cp *.html _site/ 2>/dev/null || true
+          cp *.css _site/ 2>/dev/null || true
           cp README.md _site/
           cp instructions.txt _site/
 
