@@ -67,6 +67,16 @@
             inputs: [{ id: 7, count: 1 }, { id: 32, count: 1 }]
         },
         {
+            // Copper traces on a silica board — "Cu on Si". Needed for weapon/drone
+            // upgrades past Mk II; without this recipe Circuit is unobtainable.
+            id: 'print_circuit',
+            name: 'Print Circuit',
+            desc: '2× Copper Ore + 1× Glass → 1× Circuit',
+            output: 33,
+            outputCount: 1,
+            inputs: [{ id: 22, count: 2 }, { id: 32, count: 1 }]
+        },
+        {
             // Crystals power the Star Gates — craft a key to reactivate a dormant gate.
             id: 'craft_gatekey',
             name: 'Star Gate Key',

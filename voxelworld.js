@@ -4,6 +4,7 @@
  */
 (function () {
     'use strict';
+    console.log('[pjboy] voxelworld v213 — longer horizon + altitude-safe fog (slant-capped to built edge)');
 
     class VoxelWorld {
         constructor(game) {
@@ -793,12 +794,12 @@
           c[cIdx(x-cx*CH, y, z-cz*CH)] = id;
           recordEdit(x,y,z,id);
           if(id){ const k=colKey(cx,cz); if(y > (colMaxY.get(k)||0)) colMaxY.set(k, y); }
-          rebuildChunkAt(x,y,z);               // instant: the chunk you actually touched
-          // borders share faces with the neighbor chunk — remesh those async (next frame
-          // or two) so a single edit never triggers up to 7 synchronous chunk rebuilds.
+          rebuildChunkAt(x,y,z);               // instant: the column you actually touched
+          // x/z borders share faces with the neighbor column — remesh those async (next
+          // frame or two) so a single edit never triggers synchronous multi-column rebuilds.
+          // (columns are meshed full-height now, so vertical borders need nothing)
           const lx=_mod(x,CH), lz=_mod(z,CH);
           if(lx===0) queueRebuildAt(x-1,y,z); if(lx===CH-1) queueRebuildAt(x+1,y,z);
-          if(y%CH===0) queueRebuildAt(x,y-1,z); if(y%CH===CH-1) queueRebuildAt(x,y+1,z);
           if(lz===0) queueRebuildAt(x,y,z-1); if(lz===CH-1) queueRebuildAt(x,y,z+1);
           persistBlockEdit(x, y, z, id);
         }
@@ -834,8 +835,8 @@
           if(!touchesWater) return;                        // sealed dry pocket — leave it dry
           const AP = getProfileApi();
           const p = (AP && !_suppressProfileBlockSave) ? AP.load() : null;
-          const chunks = new Set();
-          const addChunk = (x,y,z)=> chunks.add(_fdiv(x,CH)+','+_fdiv(y,CH)+','+_fdiv(z,CH));
+          const cols = new Set();
+          const addCol = (x,z)=> cols.add(_fdiv(x,CH)+','+_fdiv(z,CH));
           for(const cell of region){
             const x=cell[0], y=cell[1], z=cell[2];
             const cx=_fdiv(x,CH), cz=_fdiv(z,CH);
@@ -844,16 +845,15 @@
             recordEdit(x,y,z,WATER);
             if(p) AP.upsertBlockEdit(p, pmod(x), y, pmod(z), WATER);
             const k=colKey(cx,cz); if(y>(colMaxY.get(k)||0)) colMaxY.set(k,y);
-            addChunk(x,y,z);
-            const lx=_mod(x,CH), ly=_mod(y,CH), lz=_mod(z,CH);
-            if(lx===0) addChunk(x-1,y,z); if(lx===CH-1) addChunk(x+1,y,z);
-            if(ly===0) addChunk(x,y-1,z); if(ly===CH-1) addChunk(x,y+1,z);
-            if(lz===0) addChunk(x,y,z-1); if(lz===CH-1) addChunk(x,y,z+1);
+            addCol(x,z);
+            const lx=_mod(x,CH), lz=_mod(z,CH);
+            if(lx===0) addCol(x-1,z); if(lx===CH-1) addCol(x+1,z);
+            if(lz===0) addCol(x,z-1); if(lz===CH-1) addCol(x,z+1);
           }
           if(p) AP.save(p);
           // Spread the flood remesh across frames so filling a big cavern flows smoothly
-          // instead of rebuilding dozens of chunks in one synchronous spike.
-          for(const ck of chunks){ const a=ck.split(','); queueRebuildChunk(+a[0],+a[1],+a[2]); }
+          // instead of rebuilding dozens of columns in one synchronous spike.
+          for(const ck of cols){ const a=ck.split(','); queueRebuildCol(+a[0],+a[1]); }
         }
 
         // Resolve the player's current planet → drives SEED, biome theme, atmosphere.
@@ -1139,10 +1139,16 @@
           // thin the atmosphere as we climb: push fog out + darken toward space so the world
           // recedes into a shrinking lit disc below instead of a hard fog wall.
           if(g.scene.fog){
-            g.scene.fog.near = FOG_NEAR + sf*60;
-            // keep the haze pinned just past the meshed edge at all altitudes so flying
-            // up never reveals the hard map boundary / chunk pop-in.
-            g.scene.fog.far  = Math.min(FOG_FAR + sf*(1400 - FOG_FAR), VIEW_R*CH*1.04);
+            // The fog may open up along the SLANT to the built edge: seen from height h,
+            // the boundary of the built disc (radius = the frontier-following FOG_FAR,
+            // NOT the VIEW_R build target) sits at sqrt(h² + R²). Capping there means
+            // climbing reveals more and more of the world below, but the disc's rim —
+            // and any not-yet-built gap — always melts into haze, at every altitude.
+            // From space the rim reads as a soft atmosphere limb instead of a hard cut.
+            const camH = camera ? Math.max(0, camera.position.y) : 0;
+            const slantEdge = Math.sqrt(camH*camH + FOG_FAR*FOG_FAR);
+            g.scene.fog.far  = Math.min(FOG_FAR + sf*(1400 - FOG_FAR), slantEdge*0.98);
+            g.scene.fog.near = Math.min(FOG_NEAR + sf*60, g.scene.fog.far*0.8);
             g.scene.fog.color.setHex(_baseFogHex).lerp(_SPACE_COL, sf);
           }
           // curved planet globe below: fade in with altitude, sit under the player, face the sun.
@@ -1482,6 +1488,45 @@
           return false;
         }
 
+        // Crystal formations line the CEILINGS of deep caves: a solid cell whose neighbour
+        // directly below is carved open "hangs" into the void (matches the codex — amethyst
+        // is "violet formations hanging from the underside of worlds"). Clustered by a slow
+        // noise so they grow as patches, not scattered confetti, and periodic (pvnoise3/pmod)
+        // so it tiles seamlessly with the wrapping world. Deeper caves grow rarer, more
+        // exotic species: amethyst (10) up high, emerald (29) mid, void crystal (30) near
+        // bedrock. Returns a crystal block id, or 0 for "not a crystal here".
+        function crystalAt(x, y, z, height, roof){
+          if(y < 4 || y > height-10) return 0;                     // genuinely underground, above the basalt floor
+          const yb = y-1;                                          // the cell directly beneath us
+          if(!(yb <= height-roof && caveAt(x, yb, z))) return 0;   // needs an open cave below → this is a ceiling
+          if(pvnoise3(x*0.12, y*0.12, z*0.12, 64, 515) < 0.74) return 0;   // only the densest patches crystallize
+          const pick = ihash(pmod(x), y*17+3, pmod(z));            // species roll, deterministic per cell
+          if(y <= 8)  return pick > 0.72 ? 30 : (pick > 0.42 ? 29 : 10);   // deep: void / emerald / amethyst
+          if(y <= 16) return pick > 0.70 ? 29 : 10;                        // mid: emerald / amethyst
+          return 10;                                                        // upper caves: amethyst
+        }
+
+        // Cobalt blooms cling to the FLOORS and lower walls of caves (codex: "deep-blue
+        // blooms found only on cave walls") — the counterpart to ceiling crystals: a solid
+        // cell with an open cave directly ABOVE it. Same cheap same-column gate as crystals,
+        // clustered + periodic. Returns block id 26 (Cobalt) or 0.
+        function cobaltAt(x, y, z, height, roof){
+          if(y < 4 || y > height-8) return 0;                      // underground, below the dirt cap
+          const ya = y+1;                                          // the cell directly above us
+          if(!(ya <= height-roof && caveAt(x, ya, z))) return 0;   // needs an open cave above → this is a floor/wall
+          if(pvnoise3(x*0.11, y*0.11, z*0.11, 64, 611) < 0.80) return 0;   // sparse blue blooms, in patches
+          return 26;
+        }
+
+        // Hive nests — rare pockets of living amber comb embedded in the rock (codex:
+        // "organic nests hidden underground … something built this"). Tight, uncommon
+        // clusters you mine into and discover; no cave needed. Returns block id 37 or 0.
+        function hiveAt(x, y, z, height){
+          if(y < 5 || y > height-8) return 0;                      // hidden underground, off the surface
+          if(pvnoise3(x*0.09, y*0.09, z*0.09, 64, 711) < 0.90) return 0;   // rare, tightly clustered nests
+          return 37;
+        }
+
         // A grass column above water, sparsely chosen by a periodic hash.
         function isTreeRoot(x, z){
           if(ihash(pmod(x), 999, pmod(z)) > 0.012) return false;
@@ -1515,9 +1560,10 @@
           const p = columnProfile(x,z);
           if(y > p.height) return (p.height < SEA_LEVEL && y <= SEA_LEVEL) ? WATER : 0;
           if(y === p.height) return p.top;
-          if(y < p.height && y <= p.height-caveRoof(x,z,p.height) && caveAt(x,y,z)) return 0;  // caves / cliff mouths
+          const roof = caveRoof(x,z,p.height);
+          if(y < p.height && y <= p.height-roof && caveAt(x,y,z)) return 0;  // caves / cliff mouths
           if(y >= p.height-4) return 2;
-          return oreAt(x,y,z) || 3;
+          return crystalAt(x,y,z,p.height,roof) || cobaltAt(x,y,z,p.height,roof) || hiveAt(x,y,z,p.height) || oreAt(x,y,z) || 3;
         }
 
         // Generate one column-chunk buffer: terrain + ores + water + trees + edits.
@@ -1534,7 +1580,7 @@
               if(y===p.height) id=p.top;
               else if(y<=p.height-roof && caveAt(x,y,z)) continue;   // caves / cliff mouths
               else if(y>=p.height-4) id=2;
-              else id = oreAt(x,y,z) || 3;
+              else id = crystalAt(x,y,z,p.height,roof) || cobaltAt(x,y,z,p.height,roof) || hiveAt(x,y,z,p.height) || oreAt(x,y,z) || 3;
               buf[cIdx(lx,y,lz)] = id;
             }
             const _isVolc = activeBiomeKey === 'volcanic';
@@ -1778,7 +1824,7 @@
           return t.side;
         }
         // classic 3-neighbor corner occlusion. `read` is an optional fast block
-        // reader (defaults to getBlock); buildChunkMesh passes a local 3×3 reader.
+        // reader (defaults to getBlock); buildColumnMesh passes a local 3×3 reader.
         function vertexAO(x,y,z,dir,corner,read){
           read = read || getBlock;
           const a = dir[0]? 0 : (dir[1]? 1:2);          // face axis
@@ -1882,7 +1928,7 @@
           }
         }
 
-        const scene3 = {chunks:new Map()};   // "cx,cy,cz" -> {static:Mesh, anim:Mesh, deco:Mesh}
+        const scene3 = {chunks:new Map()};   // "cx,cz" column -> {static:Mesh, anim:Mesh, glass:Mesh, water:Mesh, deco:Mesh}
         let matStatic=null, matAnim=null;
         // star-pattern decoration: three quads at 0/60/120 degrees so the tuft
         // reads as a volume from every angle instead of a flat X
@@ -1923,8 +1969,12 @@
           const b = blockById(id);
           return (b && b.deco && !getBlock(x,y+1,z))? b : null;
         }
-        function buildChunkMesh(cx,cy,cz){
-          const key=`${cx},${cy},${cz}`;
+        // One merged mesh per material per COLUMN (16×H×16), not per 16³ sub-chunk.
+        // A column used to be 3-6 sub-chunk meshes × up to 5 materials; at a far view
+        // radius that put tens of thousands of Object3Ds in the scene, and the per-object
+        // matrix/culling/draw overhead — not triangle count — was what dropped frames.
+        function buildColumnMesh(cx,cz){
+          const key=colKey(cx,cz);
           const old = scene3.chunks.get(key);
           if(old){ ['static','anim','glass','water','deco'].forEach(k=>{ if(old[k]){ scene.remove(old[k]); old[k].geometry.dispose(); } }); }
 
@@ -1953,9 +2003,10 @@
           // surface water present at this column (topmost water cell sits at SEA_LEVEL)
           const isSurfWater = (cellX,cellZ) => localBlock(cellX, SEA_LEVEL, cellZ) === WATER;
 
-          for(let lx=0;lx<CH;lx++) for(let ly=0;ly<CH;ly++) for(let lz=0;lz<CH;lz++){
-            const x=cx*CH+lx, y=cy*CH+ly, z=cz*CH+lz;
-            if(y<0||y>=H) continue;                 // x/z unbounded (streaming world)
+          // only walk up to the filled height — skip the empty sky above
+          const topY = Math.min(H-1, colMaxY.get(key) || (H-1));
+          for(let lx=0;lx<CH;lx++) for(let y=0;y<=topY;y++) for(let lz=0;lz<CH;lz++){
+            const x=cx*CH+lx, z=cz*CH+lz;
             const id = localBlock(x,y,z);
             if(!id) continue;
             const block = blockById(id);
@@ -2017,7 +2068,10 @@
             }
           }
 
-          if(GREEDY) greedyStatic(cx,cy,cz, buf, localBlock);
+          if(GREEDY){                     // greedy pass works per 16³ cell — run it up the stack
+            const topCy = Math.floor(topY/CH);
+            for(let cy=0; cy<=topCy; cy++) greedyStatic(cx,cy,cz, buf, localBlock);
+          }
 
           const out = {};
           const mk = (b, mat) => {
@@ -2033,6 +2087,8 @@
             g.setIndex(b.idx);
             const m = new THREE.Mesh(g, mat);
             m.position.copy(WORLD_OFFSET);
+            m.matrixAutoUpdate = false;   // chunks never move — skip per-frame matrix recompose
+            m.updateMatrix();
             scene.add(m);
             return m;
           };
@@ -2045,7 +2101,7 @@
         }
         function rebuildChunkAt(x,y,z){
           if(y<0||y>=H) return;
-          buildChunkMesh(Math.floor(x/CH), Math.floor(y/CH), Math.floor(z/CH));
+          buildColumnMesh(Math.floor(x/CH), Math.floor(z/CH));
         }
         // Re-mesh every currently-resident column (e.g. after the biome theme changes).
         function rebuildWorld(){
@@ -2056,29 +2112,23 @@
         }
 
         // ---------- chunk streaming: keep a disc of columns around the player ----------
-        const VCH = H/CH;                       // vertical sub-chunks per column
         const meshedCols = new Set();           // "cx,cz" columns claimed (generated/meshing)
         let buildQueue = [];                    // pending columns to GENERATE, nearest first
-        let meshQueue = [];                     // pending per-sub-chunk MESH jobs {cx,cy,cz}
+        let meshQueue = [];                     // pending column MESH jobs {cx,cz}
         let editQueue = [];                     // high-priority rebuilds from player edits (mine/place/flood)
-        const _editQueued = new Set();          // dedup keys "cx,cy,cz" for editQueue
+        const _editQueued = new Set();          // dedup keys "cx,cz" for editQueue
         let _streamCx = null, _streamCz = null;
 
         function meshColumn(cx,cz){
           // ensure this column + its 8 neighbours are buffered so border faces/AO read
           // real data (not the tree-less single-voxel fallback)
           for(let dx=-1;dx<=1;dx++) for(let dz=-1;dz<=1;dz++) ensureCol(cx+dx, cz+dz);
-          // only mesh up to the filled height — skip the empty sky sub-chunks above
-          const topCy = Math.min(VCH-1, Math.floor((colMaxY.get(colKey(cx,cz)) || (H-1))/CH));
-          for(let cy=0; cy<=topCy; cy++) buildChunkMesh(cx,cy,cz);
+          buildColumnMesh(cx,cz);
           meshedCols.add(colKey(cx,cz));
         }
         function unloadColumn(cx,cz){
-          for(let cy=0; cy<VCH; cy++){
-            const key = `${cx},${cy},${cz}`;
-            const o = scene3.chunks.get(key);
-            if(o){ ['static','anim','glass','water','deco'].forEach(k=>{ if(o[k]){ scene.remove(o[k]); o[k].geometry.dispose(); } }); scene3.chunks.delete(key); }
-          }
+          const o = scene3.chunks.get(colKey(cx,cz));
+          if(o){ ['static','anim','glass','water','deco'].forEach(k=>{ if(o[k]){ scene.remove(o[k]); o[k].geometry.dispose(); } }); scene3.chunks.delete(colKey(cx,cz)); }
           meshedCols.delete(colKey(cx,cz));
         }
         // Recompute the desired disc of loaded chunks around the player's column.
@@ -2087,15 +2137,25 @@
           if(ccx===_streamCx && ccz===_streamCz) return;
           _streamCx = ccx; _streamCz = ccz;
           // (buffers are generated lazily by meshColumn, which ensures its neighbours)
-          // rebuild the mesh queue (nearest first) for un-meshed columns within VIEW_R
+          // Rebuild the queue of un-meshed columns within VIEW_R, ordered by TRAVEL
+          // priority, not plain distance: while moving, columns in front of the player
+          // build first (the edge you can catch is always ahead), columns behind wait.
           buildQueue = [];
           const view2 = VIEW_R*VIEW_R;
+          const moving = _playerSpeed > 4;
           for(let dx=-VIEW_R;dx<=VIEW_R;dx++) for(let dz=-VIEW_R;dz<=VIEW_R;dz++){
             const d2 = dx*dx+dz*dz; if(d2>view2) continue;
             const cx=ccx+dx, cz=ccz+dz;
-            if(!meshedCols.has(colKey(cx,cz))) buildQueue.push({cx,cz,d2});
+            if(meshedCols.has(colKey(cx,cz))) continue;
+            let p = d2;
+            if(moving && d2 > 0){
+              const d = Math.sqrt(d2);
+              const fwd = (dx*_spdX + dz*_spdZ) / d;      // +1 dead ahead … -1 behind
+              p = d2 * (1.2 - 0.7*fwd);                   // ahead ≈ half price, behind ≈ double
+            }
+            buildQueue.push({cx,cz,d2,p});
           }
-          buildQueue.sort((a,b)=>a.d2-b.d2);
+          buildQueue.sort((a,b)=>a.p-b.p);
           // unload meshes + buffers that drifted out of range
           const un2 = UNLOAD_R*UNLOAD_R, drop2 = (UNLOAD_R+2)*(UNLOAD_R+2);
           for(const k of [...meshedCols]){
@@ -2110,20 +2170,18 @@
           }
         }
         // Generation step for the streamed path: buffer the column + its 8 neighbours,
-        // claim it (so streamAround won't re-enqueue), then queue its non-empty
-        // sub-chunks for meshing. Cheaper, bounded unit than meshing a whole column.
+        // claim it (so streamAround won't re-enqueue), then queue it for meshing.
         function genColumnJob(cx,cz){
           for(let dx=-1;dx<=1;dx++) for(let dz=-1;dz<=1;dz++) ensureCol(cx+dx, cz+dz);
           meshedCols.add(colKey(cx,cz));
-          const topCy = Math.min(VCH-1, Math.floor((colMaxY.get(colKey(cx,cz)) || (H-1))/CH));
-          for(let cy=0; cy<=topCy; cy++) meshQueue.push({cx,cy,cz});
+          meshQueue.push({cx,cz});
         }
         // Drain the streaming queues under a per-frame TIME budget (ms) so work spreads
         // across frames instead of hitching. The budget is checked between each unit
-        // (one sub-chunk mesh, or one column generation), never spanning a whole column.
+        // (one column mesh, or one column generation).
         // Mesh jobs run first so claimed columns finish before new ones generate.
         function processBuildQueue(maxMs){
-          if(!editQueue.length && !meshQueue.length && !buildQueue.length) return;
+          if(!editQueue.length && !meshQueue.length && !buildQueue.length) return 0;
           const now = (typeof performance!=='undefined' && performance.now) ? ()=>performance.now() : ()=>Date.now();
           // player edits are urgent — give them a little more headroom so a dig/build
           // flushes within a frame or two without ever spiking a whole 7-chunk rebuild.
@@ -2132,30 +2190,102 @@
           do {
             if(editQueue.length){
               const j = editQueue.shift(); _editQueued.delete(j.k);
-              if(meshedCols.has(colKey(j.cx,j.cz))) buildChunkMesh(j.cx,j.cy,j.cz);
+              if(meshedCols.has(colKey(j.cx,j.cz))) buildColumnMesh(j.cx,j.cz);
             } else if(meshQueue.length){
               const j = meshQueue.shift();
               // skip stale jobs whose column drifted out of range before meshing
-              if(meshedCols.has(colKey(j.cx,j.cz))) buildChunkMesh(j.cx,j.cy,j.cz);
+              if(meshedCols.has(colKey(j.cx,j.cz))) buildColumnMesh(j.cx,j.cz);
             } else {
               const job = buildQueue.shift();
               if(job && !meshedCols.has(colKey(job.cx,job.cz))) genColumnJob(job.cx,job.cz);
             }
           } while((editQueue.length || meshQueue.length || buildQueue.length) && now()-t0 < cap);
+          return now() - t0;   // actual ms spent, so adaptQuality can discount deliberate build sprints
         }
-        // Queue a single sub-chunk remesh from a player edit (deduped, async). Border
-        // edits touch neighbour chunks; spreading those over a couple frames kills the
-        // synchronous 7-chunk rebuild hitch while the directly-edited chunk stays instant.
-        function queueRebuildChunk(cx,cy,cz){
-          if(cy<0 || cy>=VCH) return;
+        // Queue a column remesh from a player edit (deduped, async). Border edits touch
+        // neighbour columns; spreading those over a couple frames kills the synchronous
+        // multi-column rebuild hitch while the directly-edited column stays instant.
+        function queueRebuildCol(cx,cz){
           if(!meshedCols.has(colKey(cx,cz))) return;   // not resident; it'll mesh when streamed
-          const k = cx+','+cy+','+cz;
+          const k = colKey(cx,cz);
           if(_editQueued.has(k)) return;
-          _editQueued.add(k); editQueue.push({cx,cy,cz,k});
+          _editQueued.add(k); editQueue.push({cx,cz,k});
         }
         function queueRebuildAt(x,y,z){
           if(y<0 || y>=H) return;
-          queueRebuildChunk(Math.floor(x/CH), Math.floor(y/CH), Math.floor(z/CH));
+          queueRebuildCol(Math.floor(x/CH), Math.floor(z/CH));
+        }
+
+        // ---------- location-aware streaming ----------
+        // The world must be built based on where the player IS and is HEADING, not on a
+        // flat time trickle — otherwise sustained travel (especially ship flight) outruns
+        // the builder and the player reaches the raw edge of the meshed world.
+        // Two mechanisms:
+        //   1) The stream center leads the player along their velocity, so the queue is
+        //      always sorted "in front of you first" instead of a symmetric disc.
+        //   2) The per-frame meshing budget scales with time-to-edge: seconds until the
+        //      player would reach the nearest unbuilt column at current speed. Minutes
+        //      away -> background trickle; seconds away -> spend real frame time.
+        let _spdX = 0, _spdZ = 0, _playerSpeed = 0, _lastPX = null, _lastPZ = null;
+        function trackPlayerVelocity(frameDt){
+          if(_lastPX !== null && frameDt > 0.001){
+            const vx = (player.pos.x - _lastPX)/frameDt, vz = (player.pos.z - _lastPZ)/frameDt;
+            const sp = Math.hypot(vx, vz);
+            if(sp < 150){                                   // ignore teleports (gate travel, respawn)
+              _playerSpeed += (sp - _playerSpeed) * 0.25;   // smooth so the lead doesn't jitter
+              if(sp > 0.5){ _spdX = vx/sp; _spdZ = vz/sp; }
+            } else { _playerSpeed = 0; }
+          }
+          _lastPX = player.pos.x; _lastPZ = player.pos.z;
+        }
+        // Distance from the player to the nearest column still waiting to be built.
+        // Queues are kept nearest-first, so the head is a good enough proxy.
+        function nearestPendingDist(){
+          const q = meshQueue.length ? meshQueue[0] : (buildQueue.length ? buildQueue[0] : null);
+          if(!q) return Infinity;
+          return Math.hypot(q.cx*CH + CH/2 - player.pos.x, q.cz*CH + CH/2 - player.pos.z);
+        }
+        function streamBudgetMs(){
+          if(!meshQueue.length && !buildQueue.length) return 4;
+          const tte = nearestPendingDist() / Math.max(2, _playerSpeed);  // seconds to the edge
+          // Continuous ramp, not tiers: tiers found an equilibrium hovering barely a
+          // second ahead of a fast ship — technically ahead, visibly at the edge. Aim
+          // to keep the unbuilt front ≥12s of travel away; spend up to most of a frame
+          // when it gets close (a brief fps dip beats flying into the void).
+          const urgency = Math.max(0, Math.min(1, 1 - tte/12));
+          return 4 + Math.round(urgency * 24);            // 4 … 28 ms
+        }
+        function streamCenterAhead(){
+          // lead the stream center along the velocity, capped so the disc always still
+          // covers the player with a wide margin (unload radius is measured from this
+          // same center, so terrain just behind stays resident too).
+          const lead = Math.min(_playerSpeed * 3, (VIEW_R - 5) * CH);
+          return { x: player.pos.x + _spdX * lead, z: player.pos.z + _spdZ * lead };
+        }
+
+        // ---------- seamless horizon: fog hugs the BUILT frontier ----------
+        // Minecraft-style rule: a column may only become visible if it was meshed while
+        // still hidden behind the fog wall. So the fog doesn't track VIEW_R (the build
+        // TARGET) — it tracks how far the world is actually built right now, minus a
+        // margin. Fully caught up -> fog rests at the full view distance; builder busy
+        // (fast travel, radius growth) -> fog eases inward ahead of the raw edge and
+        // breathes back out as columns finish. Pop-in becomes literally invisible.
+        function minPendingDistAll(){
+          let best = Infinity;
+          const px = player.pos.x, pz = player.pos.z;
+          for(const q of meshQueue){ const dx=q.cx*CH+CH/2-px, dz=q.cz*CH+CH/2-pz; const d2=dx*dx+dz*dz; if(d2<best) best=d2; }
+          for(const q of buildQueue){ const dx=q.cx*CH+CH/2-px, dz=q.cz*CH+CH/2-pz; const d2=dx*dx+dz*dz; if(d2<best) best=d2; }
+          return best === Infinity ? Infinity : Math.sqrt(best);
+        }
+        function updateFogFrontier(frameDt){
+          if(_preloading) return;                        // loading screen covers the initial build
+          const pend = minPendingDistAll();
+          // stay 20 blocks behind the nearest unbuilt column, never closer than 10 chunks
+          const target = Math.max(10*CH, Math.min(VIEW_R*CH, pend - 20));
+          const k = target < FOG_FAR ? 2.2 : 0.55;       // close in quickly, breathe out slowly
+          FOG_FAR += (target - FOG_FAR) * (1 - Math.exp(-k * frameDt));
+          FOG_NEAR = FOG_FAR * 0.55;
+          // scene.fog itself is written every frame by updateSky (altitude-aware)
         }
 
         // ---------- adaptive draw distance ----------
@@ -2163,33 +2293,57 @@
         // allows: raise VIEW_R when frames are cheap + streaming has caught up, shed it
         // fast when they aren't. updateSky() (per frame) propagates VIEW_R -> fog + camera
         // far-plane, so changing these globals + forcing one stream pass is all we need.
-        const VR_MIN = 16, VR_MAX = 48;         // column-chunk radius bounds (×16 blocks)
-        const VR_SEED = 28;                     // distance to jump to on entry, before fine-tuning
-        let _frameMsEMA = 16, _qCooldown = 0, _qHoldUp = 0, _qSeeded = false;
+        const VR_MIN = 20, VR_MAX = 48;         // column-chunk radius bounds (×16 blocks)
+        const VR_SEED = 36;                     // distance to jump to on entry, before fine-tuning
+        // (the ring beyond the loading-screen preload builds invisibly behind the
+        // frontier fog, so a big seed costs nothing in pop-in — only build time)
+        let _frameMsEMA = 16, _qCooldown = 0, _qSeeded = false;
         let _adaptive = true;                   // auto-tune view distance to frame rate
         let _preloading = false;                // true while prewarmHorizon builds — freeze auto-tune
+
+        // Real rendered-frame clock. tick() runs on the FIXED timestep (dt is always
+        // 1/60), and the catch-up accumulator calls it several times per rendered frame
+        // once the game slows down — so tick's dt can never measure lag, and per-frame
+        // work done in tick multiplies exactly when frames are already expensive. This
+        // tiny rAF loop counts true rendered frames (gate: run heavy work once per
+        // frame) and their true duration (feed: adaptQuality sees real milliseconds).
+        let _rafFrame = 0, _rafFrameMs = 16.7, _rafPrevT = 0, _rafId = null, _lastTickFrame = -1;
+        function _frameClock(t){
+          if(_rafPrevT) _rafFrameMs = Math.min(100, t - _rafPrevT);
+          _rafPrevT = t; _rafFrame++;
+          _rafId = requestAnimationFrame(_frameClock);
+        }
+        function startFrameClock(){ if(_rafId === null){ _rafPrevT = 0; _rafId = requestAnimationFrame(_frameClock); } }
+        function stopFrameClock(){ if(_rafId !== null){ cancelAnimationFrame(_rafId); _rafId = null; } }
+
         function setLiveViewR(r){
           r = Math.max(VR_MIN, Math.min(VR_MAX, r|0));
           if(r === VIEW_R) return;
           VIEW_R = r; KEEP_R = VIEW_R + 2; UNLOAD_R = VIEW_R + 4;
-          FOG_FAR = VIEW_R * CH; FOG_NEAR = FOG_FAR * 0.55;
-          if(g.scene && g.scene.fog){ g.scene.fog.near = FOG_NEAR; g.scene.fog.far = FOG_FAR; }
+          // fog is NOT snapped here — updateFogFrontier eases it toward the built
+          // frontier, so radius changes drift in/out invisibly instead of jumping
           _streamCx = _streamCz = null;         // force streamAround to re-evaluate load/unload now
         }
-        function adaptQuality(dt){
+        function adaptQuality(frameDt, buildMsSpent){
           if(!_adaptive || _preloading) return;   // don't shrink the horizon while pre-building it
           if(!_qSeeded){ _qSeeded = true; setLiveViewR(Math.max(VIEW_R, VR_SEED)); }  // start far, then tune
-          const ms = Math.min(100, dt*1000);    // clamp outliers (streaming spikes, tab stalls)
+          // _rafFrameMs is the true frame-to-frame time from the rAF clock — NOT tick's
+          // fixed-step dt, which is constant 16.7ms and once made this tuner blind
+          // (EMA pinned under the grow threshold, so it maxed VIEW_R on every machine).
+          // Deliberate build-sprint ms are discounted: they're temporary travel catch-up,
+          // and shedding VIEW_R for them would UNLOAD terrain right in front of a moving
+          // player — a feedback loop that drags the world edge in toward them.
+          const ms = Math.min(100, _rafFrameMs) - Math.min(buildMsSpent||0, _rafFrameMs);
           _frameMsEMA += (ms - _frameMsEMA) * 0.1;
-          _qCooldown -= dt;
+          _qCooldown -= frameDt;
           if(_qCooldown > 0) return;
-          if(_frameMsEMA > 28){                 // < ~36 fps: only pull back when genuinely choppy
-            setLiveViewR(VIEW_R - 2); _qHoldUp = 0; _qCooldown = 0.7; return;
+          if(_frameMsEMA > 33){                 // < ~30 fps: only pull back when genuinely choppy
+            setLiveViewR(VIEW_R - 2); _qCooldown = 0.7; return;
           }
-          // running OK (> ~52 fps) AND streaming has caught up: push the horizon out, eagerly
-          if(_frameMsEMA < 19 && meshQueue.length < 12 && buildQueue.length < 80){
-            setLiveViewR(VIEW_R + 3); _qCooldown = 0.8;
-          } else { _qHoldUp = 0; _qCooldown = 0.5; }
+          // running smoothly AND streaming has caught up: push the horizon out gently
+          if(_frameMsEMA < 22 && meshQueue.length < 4 && buildQueue.length < 80){
+            setLiveViewR(VIEW_R + 2); _qCooldown = 1.2;
+          } else { _qCooldown = 0.5; }
         }
         // Dispose all chunks + buffers (used when entering / changing planet).
         function resetStreaming(){
@@ -2203,6 +2357,7 @@
           _editQueued.clear();
           _qSeeded = false;                     // re-seed the far view distance on next entry
           _streamCx = _streamCz = null;
+          _lastPX = _lastPZ = null; _playerSpeed = 0; _spdX = _spdZ = 0;   // world jump = no stale velocity lead
         }
         // Build the spawn area up front; the rest streams in over the next frames.
         function streamInit(){
@@ -2408,6 +2563,7 @@ ${waveConsts}
         
         // stub: engine's rebuildWorld() calls this; we update the tri readout
         let _hudTriFrame = 0, _hudTriCached = 0;
+        let _hudShownTri = null, _hudShownSeed = null;
         function updateHUD(){
           // The tri-count is a debug readout — walking every chunk's geometry each frame is
           // wasteful. Recompute it only every 30 calls; cache the value in between.
@@ -2417,8 +2573,15 @@ ${waveConsts}
               if(c[k]) tris += c[k].geometry.index.count/3; }));
             _hudTriCached = tris|0;
           }
-          document.getElementById('voxel-tri-count').textContent = _hudTriCached;
-          document.getElementById('voxel-seed-label').textContent = 'seed '+(SEED>>>0).toString(16);
+          // only touch the DOM when the value actually changed
+          if(_hudShownTri !== _hudTriCached){
+            _hudShownTri = _hudTriCached;
+            document.getElementById('voxel-tri-count').textContent = _hudTriCached;
+          }
+          if(_hudShownSeed !== SEED){
+            _hudShownSeed = SEED;
+            document.getElementById('voxel-seed-label').textContent = 'seed '+(SEED>>>0).toString(16);
+          }
         }
         
         // ---------- compact voxel character (the creator's rig, trimmed) ----------
@@ -2984,6 +3147,7 @@ ${waveConsts}
             if (!av || firstPerson) return;
             av.group.position.copy(player.pos);
             av.group.rotation.y = player.yaw;
+            av.group.scale.y = 1 - crouchBlend * 0.28;   // squash toward feet while crouched
             const VC = getVC();
             if (VC && av.anim && av.j) {
                 const aim = computeAimOffsets();
@@ -3170,10 +3334,11 @@ ${waveConsts}
         }
         
         // ---------- player physics: AABB vs voxel grid ----------
+        const PLAYER_STAND_H = 1.85, PLAYER_CROUCH_H = 1.15;
         const player = {
           pos:new THREE.Vector3(), vel:new THREE.Vector3(),
-          half:{x:.32,z:.32}, height:1.85,
-          grounded:false, yaw:0, state:'idle',
+          half:{x:.32,z:.32}, height:PLAYER_STAND_H,
+          grounded:false, yaw:0, state:'idle', crouch:false,
           // combat (forgiving by design — see the kid-first audience note)
           health:100, maxHealth:100, invuln:0, hurtFlash:0, _noHitT:0,
           knock:new THREE.Vector3(),   // decaying horizontal knockback impulse
@@ -3215,6 +3380,14 @@ ${waveConsts}
                 if(solidAt(x+.5,y+.5,z+.5)) return true;
           return false;
         }
+        // Any solid ground under the player footprint at (px,pz)? Used by crouch-sneak
+        // to stop the player walking off a ledge (kid-friendly, Minecraft-style).
+        function hasGroundBelow(px, py, pz){
+          const {x:hx2, z:hz2} = player.half, y = py - 0.1;
+          return solidAt(px-hx2, y, pz-hz2) || solidAt(px+hx2, y, pz-hz2)
+              || solidAt(px-hx2, y, pz+hz2) || solidAt(px+hx2, y, pz+hz2)
+              || solidAt(px, y, pz);
+        }
         function moveAxis(axis, amt){
           if(!amt) return;
           const p=player.pos;
@@ -3238,7 +3411,9 @@ ${waveConsts}
         const orbit = { theta: 0.6, phi: 0.92, dist: 2.35 };
         const MOVE_RUN_SPEED = 6.4;
         const MOVE_ADS_SPEED = 1.7;
+        const MOVE_CROUCH_MULT = 0.45;   // crouch walk speed factor
         let focusAimBlend = 0;
+        let crouchBlend = 0;             // eased 0→1 while crouched (camera/avatar dip)
         let tpCamPos = null;
         let tpCamReady = false;
         let dragging = false, moved = 0, px = 0, py = 0, downBtn = 0;
@@ -3259,7 +3434,7 @@ ${waveConsts}
 
         function getFpEyeWorld(out) {
             const c = getFpCam();
-            return out.copy(player.pos).add(_fpEyeOff.set(c.eyeX || 0, c.eyeH, c.eyeZ || 0));
+            return out.copy(player.pos).add(_fpEyeOff.set(c.eyeX || 0, c.eyeH - crouchBlend * 0.55, c.eyeZ || 0));
         }
 
         function applyFpCamToOrbit() {
@@ -8530,10 +8705,15 @@ ${waveConsts}
         function _resetInput() {
             const codes = [
                 'KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space',
-                'ShiftLeft', 'ShiftRight',
+                'ShiftLeft', 'ShiftRight', 'ControlLeft', 'ControlRight', 'MetaLeft', 'MetaRight',
                 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'
             ];
             codes.forEach((code) => { keys[code] = false; });
+            if (player.crouch) {            // release crouch, but only stand with headroom
+                player.height = PLAYER_STAND_H;
+                if (boxCollides(player.pos.x, player.pos.y, player.pos.z)) player.height = PLAYER_CROUCH_H;
+                else { player.crouch = false; crouchBlend = 0; }
+            }
             if (g.keys) codes.forEach((code) => { g.keys[code] = false; });
             dragging = false;
             moved = 0;
@@ -9329,17 +9509,19 @@ ${waveConsts}
             if(o.material){ if(o.material.map)o.material.map.dispose(); o.material.dispose(); } });
           trainingField=null;
         }
+        let _trainHudShown = null;
         function updateTrainHud(){
           const el=document.getElementById('voxel-train-hud'); if(!el) return;
-          if(!trainingField || !weaponDef){ el.hidden=true; return; }
+          if(!trainingField || !weaponDef){ el.hidden=true; _trainHudShown=null; return; }
           const gp=weaponGameplayFor(weaponDef.id);
           const mineR=currentAimReach().toFixed(1);
           const combR=Math.max(currentAimReach(),3.2).toFixed(1);
           el.hidden=false;
-          el.innerHTML='<b>🎯 TRAINING</b> · '+weaponDef.name+' '+TIER_NAME[weaponTierOf(weaponDef.id)]
+          const html='<b>🎯 TRAINING</b> · '+weaponDef.name+' '+TIER_NAME[weaponTierOf(weaponDef.id)]
             +'<br>combat reach <b>'+combR+'m</b> · mine reach <b>'+mineR+'m</b>'
             +'<br>damage <b>'+weaponDamage()+'</b> · mining <b>'+(gp.mining||0).toFixed(1)+'</b>/s · range '+(gp.range).toFixed(2)
             +'<br>scan range <b>'+scannerRange()+'m</b>';
+          if(html !== _trainHudShown){ _trainHudShown = html; el.innerHTML = html; }   // rebuild DOM only on change
         }
 
         /* ===================== COMBAT ===================== *
@@ -9629,17 +9811,31 @@ ${waveConsts}
         }
 
         function tick(dt) {
+            // The fixed-step accumulator can call tick() several times inside ONE
+            // rendered frame when frames run long. Heavy / idempotent per-frame work
+            // (streaming, the meshing budget, DOM writes, aim visuals) must run once
+            // per RENDERED frame, or its cost multiplies exactly when the game is
+            // already struggling. `newFrame` is true only on the first tick of a frame.
+            const newFrame = _rafId === null || _rafFrame !== _lastTickFrame;
+            if (newFrame) _lastTickFrame = _rafFrame;
+            const frameDt = Math.min(0.1, _rafFrameMs / 1000);   // real seconds since last rendered frame
             if (g.keys) Object.assign(keys, g.keys);
-            _hideLegacyEnvironment();
-            if (g._hideLegacyPlayUI) g._hideLegacyPlayUI();
-            // stream chunks around the player (load ahead, unload behind)
-            streamAround(player.pos.x, player.pos.z);
-            processBuildQueue(4);              // ms/frame — granular (per sub-chunk) so it spreads without spiking
-            adaptQuality(dt);                  // auto-tune view distance to hold a smooth frame rate
-            updateDayNight(dt);
-            updateSky(dt);
-            updateClouds(dt);
-            updateWater(dt);
+            if (newFrame) {
+                _hideLegacyEnvironment();
+                if (g._hideLegacyPlayUI) g._hideLegacyPlayUI();
+                // stream chunks from where the player is heading; build harder the
+                // closer they are (in seconds, at current speed) to unbuilt land
+                trackPlayerVelocity(frameDt);
+                const sc = streamCenterAhead();
+                streamAround(sc.x, sc.z);
+                const buildMs = processBuildQueue(streamBudgetMs());
+                adaptQuality(frameDt, buildMs);   // auto-tune view distance to hold a smooth frame rate
+                updateFogFrontier(frameDt);       // fog wall tracks the built frontier (hides all pop-in)
+                updateSky(frameDt);
+                updateClouds(frameDt);
+                updateWater(frameDt);
+            }
+            updateDayNight(dt);                // integrates game time — keep per fixed step
             elapsed += dt;
             if(flying){ updateFlight(dt); }
             else {
@@ -9651,7 +9847,23 @@ ${waveConsts}
             if(keys.KeyD||keys.ArrowRight) ix+=1;
             const shiftHeld = !!(keys.ShiftLeft || keys.ShiftRight);
             focusAimBlend += ((shiftHeld ? 1 : 0) - focusAimBlend) * (1 - Math.exp(-12 * dt));
-            const speed = THREE.MathUtils.lerp(MOVE_RUN_SPEED, MOVE_ADS_SPEED, focusAimBlend);
+            // --- crouch (⌘ Cmd / Ctrl / X): shorter hitbox, slower walk, sneak edge-guard ---
+            const ctrlHeld = !!(keys.MetaLeft || keys.MetaRight || keys.ControlLeft || keys.ControlRight || keys.KeyX);
+            const wasCrouch = player.crouch;
+            if (ctrlHeld) {
+                player.crouch = true;
+            } else if (player.crouch) {
+                player.height = PLAYER_STAND_H;    // only stand back up with headroom
+                if (boxCollides(player.pos.x, player.pos.y, player.pos.z)) player.height = PLAYER_CROUCH_H;
+                else player.crouch = false;
+            }
+            if (player.crouch) player.height = PLAYER_CROUCH_H;
+            if (player.crouch !== wasCrouch && g.showMessage) {
+                g.showMessage(player.crouch ? '🦆 Sneak on' : 'Sneak off', 900);
+            }
+            crouchBlend += ((player.crouch ? 1 : 0) - crouchBlend) * (1 - Math.exp(-14 * dt));
+            const speed = THREE.MathUtils.lerp(MOVE_RUN_SPEED, MOVE_ADS_SPEED, focusAimBlend)
+                * THREE.MathUtils.lerp(1, MOVE_CROUCH_MULT, crouchBlend);
             const len=Math.hypot(ix,iz);
             let mvx=0,mvz=0;
             if(len){
@@ -9694,6 +9906,12 @@ ${waveConsts}
             const hv=new THREE.Vector3(mvx+player.knock.x,0,mvz+player.knock.z);
             player.knock.x -= player.knock.x*Math.min(1,6*dt);   // decay knockback shove
             player.knock.z -= player.knock.z*Math.min(1,6*dt);
+            // sneak edge-guard: while crouched on the ground you can't walk off a ledge
+            if (player.crouch && wasGrounded && !inWater) {
+                const p = player.pos;
+                if (hv.x && !hasGroundBelow(p.x + hv.x*dt, p.y, p.z)) hv.x = 0;
+                if (hv.z && !hasGroundBelow(p.x + hv.x*dt, p.y, p.z + hv.z*dt)) hv.z = 0;
+            }
             moveAxis('x', hv.x*dt);
             moveAxis('z', hv.z*dt);
             moveAxis('y', player.vel.y*dt);
@@ -9727,12 +9945,13 @@ ${waveConsts}
                 const p=0.9+0.1*Math.sin(elapsed*4); matAnim.color.setRGB(p,p,p);
             }
             if(decoMat&&decoMat.userData.shader) decoMat.userData.shader.uniforms.uTime.value=elapsed;
+            if (newFrame) {                    // crosshair pick + aim/scan visuals: once per rendered frame
             const t = pickTarget();
             updateAimEdgeHighlight(t);
             updateMineBlockAnim();
             updatePlaceGhost(t);
             updateBlockScan(t);
-            updateFormulaViewer(dt);
+            updateFormulaViewer(frameDt);
             const targetNameEl = document.getElementById('voxel-target-name');
             if (targetNameEl) {
                 const scanOpen = scanExpanded || (canScanBlocks() && focusAimBlend > 0.35
@@ -9748,6 +9967,7 @@ ${waveConsts}
                     targetNameEl.textContent = '';
                 }
             }
+            }
             }  // end on-foot update (skipped while piloting a ship)
             stepParts(dt);
             stepShotVfx(dt);
@@ -9756,11 +9976,13 @@ ${waveConsts}
             updateStarGate(dt);       // Ancient gate glow + proximity hint
             updatePlayerCombat(dt);   // health regen / i-frames / hurt flash + hearts HUD
             updateVolcanicHazard(dt);  // Ember: lava burns + radiant heat
-            updateTrainHud();         // training-field live weapon readout
             if(_AC) _AC.stepFx(dt);   // creature breath / spore / ember particles
             stepEmberFx(dt);          // Ember: falling ash + rising embers
-            updateHUD();
-            updateWaypointHud();      // off-screen beacon guiding to a map waypoint
+            if (newFrame) {           // DOM HUD writes: once per rendered frame
+                updateTrainHud();     // training-field live weapon readout
+                updateHUD();
+                updateWaypointHud();  // off-screen beacon guiding to a map waypoint
+            }
             updateCamera(dt);
             setUnderwaterTint(eyeInWater());
             updateTpAimVisuals();
@@ -9854,6 +10076,7 @@ ${waveConsts}
             _saveScene();
             _setupScene();
             _active = true;
+            startFrameClock();                     // real-frame gate + ms for adaptQuality
             if (g.keys) Object.assign(keys, g.keys);
             loadOwnedWeapons();
             loadDrawerTab();
@@ -10153,6 +10376,7 @@ ${waveConsts}
             }
             flushProfileState();
             _active = false;
+            stopFrameClock();
             hideVoxelLoading();
             setUnderwaterTint(false);
             disposeGearViewer();

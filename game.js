@@ -8899,9 +8899,11 @@ class Game3D {
                 return;
             }
 
-            if (event.code === 'ShiftLeft' || event.code === 'ShiftRight') {
+            if (event.code === 'ShiftLeft' || event.code === 'ShiftRight'
+                || event.code === 'ControlLeft' || event.code === 'ControlRight'
+                || event.code === 'MetaLeft' || event.code === 'MetaRight') {
                 if (this.gameMode === 'create') {
-                    this.createMode.isShiftHeld = true;
+                    if (event.code === 'ShiftLeft' || event.code === 'ShiftRight') this.createMode.isShiftHeld = true;
                 } else {
                     this.player.ducked = true;
                 }
@@ -9085,14 +9087,34 @@ class Game3D {
         document.addEventListener('keyup', (event) => {
             this.keys[event.code] = false;
 
-            if (event.code === 'ShiftLeft' || event.code === 'ShiftRight') {
+            // macOS quirk: keys released while ⌘ is held never fire keyup — clear the
+            // movement keys when ⌘ comes up so nothing stays stuck down.
+            if (event.code === 'MetaLeft' || event.code === 'MetaRight') {
+                ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space',
+                 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].forEach((k) => { this.keys[k] = false; });
+            }
+
+            if (event.code === 'ShiftLeft' || event.code === 'ShiftRight'
+                || event.code === 'ControlLeft' || event.code === 'ControlRight'
+                || event.code === 'MetaLeft' || event.code === 'MetaRight') {
                 if (this.gameMode === 'create') {
-                    this.createMode.isShiftHeld = false;
-                    this.createMode.startLinePos = null;
+                    if (event.code === 'ShiftLeft' || event.code === 'ShiftRight') {
+                        this.createMode.isShiftHeld = false;
+                        this.createMode.startLinePos = null;
+                    }
                 } else {
-                    this.player.ducked = false;
+                    const otherDuckHeld = (this.keys['ShiftLeft'] || this.keys['ShiftRight']
+                        || this.keys['ControlLeft'] || this.keys['ControlRight']
+                        || this.keys['MetaLeft'] || this.keys['MetaRight']);
+                    if (!otherDuckHeld) this.player.ducked = false;
                 }
             }
+        });
+
+        // Losing focus (⌘Tab, clicking away) swallows keyups — release everything.
+        window.addEventListener('blur', () => {
+            Object.keys(this.keys).forEach((k) => { this.keys[k] = false; });
+            if (this.player) this.player.ducked = false;
         });
 
         // Mouse behavior depends on control scheme + view mode
