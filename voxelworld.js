@@ -3505,11 +3505,12 @@ ${waveConsts}
 
         // Mouse-fly: horizontal steers the ship, vertical points the nose (flight-stick:
         // pull back = nose up). The attitude HOLDS until the mouse moves it again.
+        // Unclamped: keep pulling and the ship loops — full 360° in every direction.
         function applyFlightMouse(mx, my) {
             if (!ship) return;
             const s = vxSettings.sens;
             ship.yaw -= mx * 0.0024 * s * (ship.turnMul || 1);
-            ship.pitchCmd = THREE.MathUtils.clamp((ship.pitchCmd || 0) + my * 0.0030 * s, -0.85, 0.85);
+            ship.pitchCmd = (ship.pitchCmd || 0) + my * 0.0030 * s;
         }
 
         function isViewPointerLocked() {
@@ -9087,8 +9088,9 @@ ${waveConsts}
          * auto-hover, soft terrain lift instead of crashes. The ship is
          * the player's vehicle — while piloting, player.pos rides the
          * ship so chunk streaming / wildlife / camera all follow.
-         *   Mouse points the nose (pull back = up, attitude holds) · W/S thrust
-         *   Space+W afterburner · Space/Shift hover up/down · G to land        */
+         *   Mouse points the nose (pull back = up, attitude holds, full 360° —
+         *   loops allowed) · W/S thrust · Space+W afterburner · Space/Shift
+         *   hover up/down · G to land                                          */
         // Arcade flight tuning — momentum-based; the nose flies where you point.
         const SHIP_TURN = 2.0;                   // keyboard yaw rate (rad/s)
         const SHIP_MAX  = 38;                    // top cruise speed
@@ -9143,6 +9145,24 @@ ${waveConsts}
           scene.remove(old.group); old.dispose();
           ship=next;
           if(g.showMessage) g.showMessage('Swapped to '+sel.name, 1500);
+        }
+        // F: half-roll on the spot — when inverted, swap to the equivalent upright
+        // attitude (yaw+180°, pitch mirrored keeps the nose pointing the exact same
+        // way; only "which way is up" changes). The chase cam's eased up-vector
+        // renders it as the ship rolling over its own center.
+        function flipShipUpright(){
+          if(!flying || !ship) return;
+          if(Math.cos(ship.pitchCmd||0) >= 0){ if(g.showMessage) g.showMessage('Already right-side up!',1200); return; }
+          const p=ship.pitchCmd;
+          ship.pitchCmd = (p>0? Math.PI : -Math.PI) - p;
+          ship.pitch = ship.pitchCmd;                    // snap the hull — the camera ease sells the roll
+          ship.yaw += Math.PI; ship._prevYaw = ship.yaw; // heading jump must not read as a hard turn
+          ship.roll = 0;
+          // start the camera roll through the ship's side (also keeps the 180° up-lerp
+          // from passing through zero length)
+          if(_flyCamUp) _flyCamUp.set(Math.cos(ship.yaw), 0, -Math.sin(ship.yaw));
+          if(_shipTrails) for(const tr of _shipTrails) tr.pts.length=0;  // wingtips swapped sides
+          if(g.showMessage) g.showMessage('🔄 Rolled upright!', 1400);
         }
         function landShip(){
           if(!flying) return;
@@ -9237,14 +9257,23 @@ ${waveConsts}
           ship.vel.y += (tvy-ship.vel.y)*r;
           // integrate
           ship.pos.x += ship.vel.x*dt; ship.pos.z += ship.vel.z*dt; ship.pos.y += ship.vel.y*dt;
-          // soft terrain lift — rise over hills instead of crashing; a nose-down
+          // soft terrain lift — rise over hills instead of crashing; a descending
           // attitude relaxes to level so the ship pulls up instead of grinding
           const minY=shipGroundY(ship.pos.x, ship.pos.z)+1.6;
           if(ship.pos.y < minY){ ship.pos.y = minY; if(ship.vel.y<0) ship.vel.y=0;
-            if((ship.pitchCmd||0) < 0) ship.pitchCmd *= Math.exp(-6*dt); }
+            if(Math.sin(ship.pitchCmd||0) < 0) ship.pitchCmd *= Math.exp(-6*dt); }
           if(ship.pos.y > SHIP_CEILING){ ship.pos.y = SHIP_CEILING; if(ship.vel.y>0) ship.vel.y=0; }
           // ---- orientation: nose tracks the COMMANDED attitude (mouse-held pitch) ----
           ship.pitch += ((ship.pitchCmd||0) - ship.pitch)*(1-Math.exp(-10*dt));
+          // wrap a completed loop back into ±π (shift cmd+display together — no visual snap)
+          if(ship.pitchCmd > Math.PI){ ship.pitchCmd -= 2*Math.PI; ship.pitch -= 2*Math.PI; }
+          else if(ship.pitchCmd < -Math.PI){ ship.pitchCmd += 2*Math.PI; ship.pitch += 2*Math.PI; }
+          // flying inverted for a while → teach the flip key (once per inversion)
+          if(Math.cos(ship.pitchCmd) < 0){
+            ship._invT=(ship._invT||0)+dt;
+            if(ship._invT>2.5 && !ship._invHint){ ship._invHint=true;
+              if(g.showMessage) g.showMessage('🙃 Upside down — press F to roll upright', 2600); }
+          } else { ship._invT=0; ship._invHint=false; }
           // bank into the turn from the real yaw rate (keyboard + mouse)
           const yawRate=(ship.yaw-(ship._prevYaw!=null?ship._prevYaw:ship.yaw))/Math.max(dt,1e-4);
           ship._prevYaw=ship.yaw;
@@ -9379,7 +9408,9 @@ ${waveConsts}
           if(!_flyCamPos) _flyCamPos=_fcDesired.clone();
           if(!_flyCamUp)  _flyCamUp=_fcUp.clone();
           _flyCamPos.lerp(_fcDesired, 1-Math.exp(-12*dt));
-          _flyCamUp.lerp(_fcUp, 1-Math.exp(-10*dt)).normalize();
+          _flyCamUp.lerp(_fcUp, 1-Math.exp(-10*dt));
+          if(_flyCamUp.lengthSq() < 1e-4) _flyCamUp.copy(_fcUp);  // antiparallel lerp degenerated
+          _flyCamUp.normalize();
           camera.position.copy(_flyCamPos);
           camera.up.copy(_flyCamUp);
           _fcLook.copy(ship.pos).addScaledVector(_fcFwd,6).addScaledVector(_fcUp,0.6);
@@ -10205,6 +10236,10 @@ ${waveConsts}
                 if (e.code === 'KeyV') {
                     if (!flying) setFirstPerson(!firstPerson);
                 }
+                if (e.code === 'KeyF' && flying && !voxelPanelOpen()) {
+                    flipShipUpright();
+                    return;
+                }
                 if (e.code === 'KeyG' && !voxelPanelOpen()) {
                     boardShip();
                     return;
@@ -10271,7 +10306,11 @@ ${waveConsts}
 
             function onCanvasPointerDown(e) {
                 if (voxelPanelOpen()) return;
-                if (flying) return;        // piloting: no mining / placing / firing
+                if (flying) {              // piloting: no mining / placing / firing,
+                    // but a click re-captures the mouse if the lock was dropped (Esc etc.)
+                    if (e.button === 0) requestViewPointerLock();
+                    return;
+                }
                 dragging = true;
                 moved = 0;
                 px = e.clientX;
