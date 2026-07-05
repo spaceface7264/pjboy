@@ -4,7 +4,7 @@
  */
 (function () {
     'use strict';
-    console.log('[pjboy] voxelworld v213 — longer horizon + altitude-safe fog (slant-capped to built edge)');
+    console.log('[pjboy] voxelworld v215 — flight-sim mouse: held nose attitude, thrust along the nose');
 
     class VoxelWorld {
         constructor(game) {
@@ -3503,12 +3503,13 @@ ${waveConsts}
             orbit.phi = Math.max(tc.pitchMin, Math.min(tc.pitchMax, orbit.phi - dy * tc.orbitSens * s));
         }
 
-        // Mouse-fly: horizontal steers the ship, vertical sets nose attitude (up = climb).
+        // Mouse-fly: horizontal steers the ship, vertical points the nose (flight-stick:
+        // pull back = nose up). The attitude HOLDS until the mouse moves it again.
         function applyFlightMouse(mx, my) {
             if (!ship) return;
             const s = vxSettings.sens;
-            ship.yaw -= mx * 0.0024 * s;
-            ship.climbCmd = THREE.MathUtils.clamp((ship.climbCmd || 0) - my * 0.006 * s, -1, 1);
+            ship.yaw -= mx * 0.0024 * s * (ship.turnMul || 1);
+            ship.pitchCmd = THREE.MathUtils.clamp((ship.pitchCmd || 0) + my * 0.0030 * s, -0.85, 0.85);
         }
 
         function isViewPointerLocked() {
@@ -8854,7 +8855,7 @@ ${waveConsts}
                     // if you flew here, arrive in the upper sky still piloting — descend to explore
                     if (flying && ship) {
                         ship.pos.set(player.pos.x, SPACE_ARRIVE_Y, player.pos.z);
-                        ship.vel.set(0,0,0); ship.pitch=0; ship.roll=0; ship.climbCmd=0;
+                        ship.vel.set(0,0,0); ship.pitch=0; ship.roll=0; ship.pitchCmd=0;
                         player.pos.copy(ship.pos); player.yaw = ship.yaw;
                     }
                     flushProfileState();
@@ -9086,7 +9087,8 @@ ${waveConsts}
          * auto-hover, soft terrain lift instead of crashes. The ship is
          * the player's vehicle — while piloting, player.pos rides the
          * ship so chunk streaming / wildlife / camera all follow.
-         *   WASD steer+thrust · Space up · Shift down · G to land        */
+         *   Mouse points the nose (pull back = up, attitude holds) · W/S thrust
+         *   Space+W afterburner · Space/Shift hover up/down · G to land        */
         // Arcade flight tuning — momentum-based; the nose flies where you point.
         const SHIP_TURN = 2.0;                   // keyboard yaw rate (rad/s)
         const SHIP_MAX  = 38;                    // top cruise speed
@@ -9110,9 +9112,9 @@ ${waveConsts}
           ship.pos = player.pos.clone(); ship.pos.y += 1.4;
           ship.vel = new THREE.Vector3();
           ship.yaw = player.yaw; ship.pitch = 0; ship.roll = 0;
-          ship.climbCmd = 0; ship._prevYaw = player.yaw; ship._speed = 0; ship._boost = 0;
+          ship.pitchCmd = 0; ship._prevYaw = player.yaw; ship._speed = 0; ship._boost = 0;
           ship.group.position.copy(ship.pos);
-          ship.group.rotation.set(0, ship.yaw, 0);
+          ship.group.rotation.set(0, ship.yaw, 0, 'YXZ');   // yaw→pitch→roll, or pitch reads as bank off-axis
           scene.add(ship.group);
           flying = true; _flyCamPos = null;
           makeShipTrails();
@@ -9120,7 +9122,7 @@ ${waveConsts}
           if(av && av.group) av.group.visible = false;
           if(fpPivot) fpPivot.visible = false;
           playSfx('jetpack');
-          if(g.showMessage) g.showMessage('🚀 Liftoff! '+sel.name+' · WASD+mouse fly · Space up · C swap ship · G land', 3600);
+          if(g.showMessage) g.showMessage('🚀 Liftoff! '+sel.name+' · W thrust · mouse points the nose · C swap ship · G land', 3600);
         }
         // Swap which Hero ship you fly (C). On the ground it just selects; in flight
         // it hot-swaps the hull, carrying your position/velocity onto the new ship.
@@ -9134,7 +9136,7 @@ ${waveConsts}
           if(!next) return;
           next.name=sel.name; next.speedMul=sel.speed; next.turnMul=sel.turn; next.scale=sel.scale; next.wing=sel.wing;
           next.pos=old.pos; next.vel=old.vel; next.yaw=old.yaw; next.pitch=old.pitch; next.roll=old.roll;
-          next.climbCmd=old.climbCmd||0; next._prevYaw=old._prevYaw!=null?old._prevYaw:old.yaw;
+          next.pitchCmd=old.pitchCmd||0; next._prevYaw=old._prevYaw!=null?old._prevYaw:old.yaw;
           next._speed=old._speed||0; next._boost=0;
           next.group.position.copy(old.group.position); next.group.rotation.copy(old.group.rotation);
           scene.add(next.group);
@@ -9216,40 +9218,41 @@ ${waveConsts}
           const k=keys;
           const yawIn=(k.KeyA||k.ArrowLeft?1:0)-(k.KeyD||k.ArrowRight?1:0);
           const thr=(k.KeyW||k.ArrowUp?1:0)-(k.KeyS||k.ArrowDown?1:0);
-          const upIn=(k.Space?1:0)-((k.ShiftLeft||k.ShiftRight)?1:0);
+          // Space is the afterburner while thrusting — only lifts when hovering
+          const upIn=((k.Space && !(thr>0))?1:0)-((k.ShiftLeft||k.ShiftRight)?1:0);
           // heading: keyboard yaw (mouse yaw is applied live in applyFlightMouse)
           ship.yaw += yawIn*SHIP_TURN*(ship.turnMul||1)*dt;
           const boosting = (thr>0 && k.Space);             // afterburner: Space + W
           const inSpace = ship.pos.y > SPACE_ENTER_Y;      // open space — worlds are far apart
           const spd = SHIP_MAX*(ship.speedMul||1)*(boosting?SHIP_BOOST:1)*(inSpace?1.7:1);
-          _shipFwd.set(Math.sin(ship.yaw),0,Math.cos(ship.yaw));
-          // vertical command: Space/Shift + a decaying mouse climb nudge
-          const climb = THREE.MathUtils.clamp(upIn + (ship.climbCmd||0), -1, 1);
-          ship.climbCmd = (ship.climbCmd||0)*Math.exp(-4*dt);
+          // thrust along the NOSE (yaw + held mouse pitch) — the ship flies where you point
+          const cp=Math.cos(ship.pitchCmd||0), sp=Math.sin(ship.pitchCmd||0);
+          _shipFwd.set(Math.sin(ship.yaw)*cp, sp, Math.cos(ship.yaw)*cp);
           // momentum: ease velocity toward the commanded target (gives weight + glide)
-          const tvx=_shipFwd.x*thr*spd, tvz=_shipFwd.z*thr*spd, tvy=climb*SHIP_LIFT;
+          const tvx=_shipFwd.x*thr*spd, tvz=_shipFwd.z*thr*spd;
+          const tvy=_shipFwd.y*thr*spd + upIn*SHIP_LIFT;
           const r=1-Math.exp(-SHIP_RESP*dt);
           ship.vel.x += (tvx-ship.vel.x)*r;
           ship.vel.z += (tvz-ship.vel.z)*r;
           ship.vel.y += (tvy-ship.vel.y)*r;
           // integrate
           ship.pos.x += ship.vel.x*dt; ship.pos.z += ship.vel.z*dt; ship.pos.y += ship.vel.y*dt;
-          // soft terrain lift — rise over hills instead of crashing
+          // soft terrain lift — rise over hills instead of crashing; a nose-down
+          // attitude relaxes to level so the ship pulls up instead of grinding
           const minY=shipGroundY(ship.pos.x, ship.pos.z)+1.6;
-          if(ship.pos.y < minY){ ship.pos.y = minY; if(ship.vel.y<0) ship.vel.y=0; }
+          if(ship.pos.y < minY){ ship.pos.y = minY; if(ship.vel.y<0) ship.vel.y=0;
+            if((ship.pitchCmd||0) < 0) ship.pitchCmd *= Math.exp(-6*dt); }
           if(ship.pos.y > SHIP_CEILING){ ship.pos.y = SHIP_CEILING; if(ship.vel.y>0) ship.vel.y=0; }
-          // ---- orientation derived from MOTION so it reads as real flight ----
-          const hsp=Math.hypot(ship.vel.x,ship.vel.z);
-          // nose pitches to match the actual climb/dive angle
-          const pitchTarget=THREE.MathUtils.clamp(Math.atan2(ship.vel.y, Math.max(4,hsp)), -0.9, 0.9);
-          ship.pitch += (pitchTarget - ship.pitch)*(1-Math.exp(-7*dt));
+          // ---- orientation: nose tracks the COMMANDED attitude (mouse-held pitch) ----
+          ship.pitch += ((ship.pitchCmd||0) - ship.pitch)*(1-Math.exp(-10*dt));
           // bank into the turn from the real yaw rate (keyboard + mouse)
           const yawRate=(ship.yaw-(ship._prevYaw!=null?ship._prevYaw:ship.yaw))/Math.max(dt,1e-4);
           ship._prevYaw=ship.yaw;
           const rollTarget=THREE.MathUtils.clamp(-yawRate*0.14, -0.75, 0.75);
           ship.roll += (rollTarget - ship.roll)*(1-Math.exp(-5*dt));
           ship.group.position.copy(ship.pos);
-          ship.group.rotation.set(ship.pitch, ship.yaw, ship.roll);
+          // negative X: +X rotation dips the +z nose, but positive pitch = climb
+          ship.group.rotation.set(-ship.pitch, ship.yaw, ship.roll, 'YXZ');
           ship._speed=Math.hypot(ship.vel.x,ship.vel.y,ship.vel.z); ship._boost=boosting?1:0;
           ship.anim(elapsed, (thr>0||upIn>0||boosting)?'alert':'idle', dt);  // throttle drives flames/glow
           updateShipTrails();
