@@ -1467,6 +1467,7 @@
         // Ore / deep-rock variant for a sub-surface voxel; 0 → plain stone.
         function oreAt(x, y, z){
           if(y<4) return 17;                                     // basalt floor
+          if(y<=7 && pvnoise3(x*0.14,y*0.14,z*0.14,96,511)>0.82) return 11;  // energy: raw plasma trapped deep near the molten core
           const n = pvnoise3(x*0.16, y*0.16, z*0.16, 96, 210);
           const thr = 1 - 0.14*_oreRich;                         // richer planet → lower threshold → more ore
           if(n>thr){
@@ -1527,6 +1528,18 @@
           return 37;
         }
 
+        // Acid pools settle on cave FLOORS underground (codex: "in pools on cave floors").
+        // Called for a carved cave cell (would be air): true → fill it with Acid (39)
+        // instead of leaving it open. Only the bottom cell of a cave (solid rock beneath)
+        // pools, so it reads as a shallow puddle, not a filled shaft. Clustered + periodic.
+        function acidPool(x, y, z, height, roof){
+          if(y > height-8) return false;                           // deep caves only, not shallow mouths
+          const yb = y-1, ya = y+1;
+          if(yb <= height-roof && caveAt(x, yb, z)) return false;  // open cave below → not a floor
+          if(!(ya <= height-roof && caveAt(x, ya, z))) return false; // need open headroom above → a real pool, never a plugged 1-cell tunnel
+          return pvnoise3(x*0.10, y*0.10, z*0.10, 64, 811) > 0.84; // pool patches on the floor
+        }
+
         // A grass column above water, sparsely chosen by a periodic hash.
         function isTreeRoot(x, z){
           if(ihash(pmod(x), 999, pmod(z)) > 0.012) return false;
@@ -1561,7 +1574,7 @@
           if(y > p.height) return (p.height < SEA_LEVEL && y <= SEA_LEVEL) ? WATER : 0;
           if(y === p.height) return p.top;
           const roof = caveRoof(x,z,p.height);
-          if(y < p.height && y <= p.height-roof && caveAt(x,y,z)) return 0;  // caves / cliff mouths
+          if(y < p.height && y <= p.height-roof && caveAt(x,y,z)) return acidPool(x,y,z,p.height,roof) ? 39 : 0;  // acid puddle or open cave
           if(y >= p.height-4) return 2;
           return crystalAt(x,y,z,p.height,roof) || cobaltAt(x,y,z,p.height,roof) || hiveAt(x,y,z,p.height) || oreAt(x,y,z) || 3;
         }
@@ -1578,7 +1591,10 @@
             for(let y=0;y<=p.height;y++){
               let id;
               if(y===p.height) id=p.top;
-              else if(y<=p.height-roof && caveAt(x,y,z)) continue;   // caves / cliff mouths
+              else if(y<=p.height-roof && caveAt(x,y,z)){
+                if(!acidPool(x,y,z,p.height,roof)) continue;        // open cave
+                id = 39;                                            // acid puddle on the cave floor
+              }
               else if(y>=p.height-4) id=2;
               else id = crystalAt(x,y,z,p.height,roof) || cobaltAt(x,y,z,p.height,roof) || hiveAt(x,y,z,p.height) || oreAt(x,y,z) || 3;
               buf[cIdx(lx,y,lz)] = id;
@@ -1804,6 +1820,28 @@
             if(hot(getBlock(vx+dx, vy+dy, vz+dz))) near = true;
           if(near){ _heatStingT += dt; if(_heatStingT >= 1.2){ _heatStingT = 0; player.health = Math.max(0, player.health-2); player.hurtFlash = Math.max(player.hurtFlash, 0.35); updateHealthHud(); } }
           else _heatStingT = 0;
+        }
+
+        // Cave hazards on ANY world: standing in Energy (raw plasma) or Acid (a floor pool)
+        // stings — forgiving, on its own cooldown like the lava burn, and you can always
+        // just mine the block away. Mirrors updateVolcanicHazard but biome-agnostic.
+        let _caveBurnT = 0;
+        function updateContactHazard(dt){
+          if(flying || player.health <= 0) return;
+          const vx = Math.floor(player.pos.x - WORLD_OFFSET.x);
+          const vy = Math.floor(player.pos.y - WORLD_OFFSET.y);
+          const vz = Math.floor(player.pos.z - WORLD_OFFSET.z);
+          const bad = (id)=> id === 11 || id === 39;   // Energy or Acid
+          const touching = bad(getBlock(vx,vy,vz)) || bad(getBlock(vx,vy+1,vz)) || bad(getBlock(vx,vy-1,vz));
+          if(touching){
+            _caveBurnT += dt; player.hurtFlash = Math.max(player.hurtFlash, 0.6); player._noHitT = 0;
+            if(_caveBurnT >= 0.5){
+              _caveBurnT = 0;
+              player.health = Math.max(0, player.health - 5);
+              updateHealthHud();
+              if(player.health <= 0) respawnPlayer();
+            }
+          } else _caveBurnT = 0;
         }
 
         // ---------- chunk meshing: merged geometry, face culling, vertex AO ----------
@@ -9976,6 +10014,7 @@ ${waveConsts}
             updateStarGate(dt);       // Ancient gate glow + proximity hint
             updatePlayerCombat(dt);   // health regen / i-frames / hurt flash + hearts HUD
             updateVolcanicHazard(dt);  // Ember: lava burns + radiant heat
+            updateContactHazard(dt);   // any world: Energy/Acid contact sting
             if(_AC) _AC.stepFx(dt);   // creature breath / spore / ember particles
             stepEmberFx(dt);          // Ember: falling ash + rising embers
             if (newFrame) {           // DOM HUD writes: once per rendered frame

@@ -77,6 +77,26 @@
             inputs: [{ id: 22, count: 2 }, { id: 32, count: 1 }]
         },
         {
+            // Titanium fused with steel — "mixing metals changes everything". A premium
+            // structural block; costs the deep-mined titanium. Previously unobtainable.
+            id: 'forge_alloy',
+            name: 'Forge Alloy',
+            desc: '2× Titanium Ore + 1× Metal → 1× Alloy',
+            output: 31,
+            outputCount: 1,
+            inputs: [{ id: 25, count: 2 }, { id: 7, count: 1 }]
+        },
+        {
+            // Ship-grade armor plating layered up from Alloy — the toughest buildable
+            // block. Previously unobtainable (no recipe, never spawned).
+            id: 'press_hull',
+            name: 'Press Hull',
+            desc: '2× Alloy + 1× Metal → 1× Hull',
+            output: 35,
+            outputCount: 1,
+            inputs: [{ id: 31, count: 2 }, { id: 7, count: 1 }]
+        },
+        {
             // Crystals power the Star Gates — craft a key to reactivate a dormant gate.
             id: 'craft_gatekey',
             name: 'Star Gate Key',
