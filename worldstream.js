@@ -5,7 +5,10 @@
  *
  * Streaming: only a window of chunks around the player is ever live. Walk far
  * enough and chunks ahead are built while chunks behind are freed, so total
- * world size is unbounded at constant cost.
+ * world size is unbounded at constant cost. Beyond the voxel window, two LOD
+ * rings of quantized heightfield tiles carry the terrain out to the fog wall
+ * (~1.5km), so the horizon is mountains and coastline instead of haze — see
+ * the LOD constants + "LOD horizon rings" section.
  *
  * Biomes (beach → grassland → meadow → forest) are assigned by a low-frequency
  * value-noise field over chunk coords, so they form large contiguous regions
@@ -16,8 +19,10 @@
  *   - this.walls + this.wallHash → collision is already broad-phased, works at
  *     any coordinate. Collidable props (trees/rocks) are pushed as wall AABBs.
  *   - y=0 is a global floor clamp (game.js), so streamed ground is cosmetic.
- *   - this.sky / scene.fog → the sky sphere sits beyond the fog, so fog color
- *     is effectively the sky color. We drive both for a blue sky.
+ *   - this.sky / scene.fog → fog color tracks the sky's horizon color, so
+ *     terrain dissolves into sky at the fog wall. The 500-radius sky sphere is
+ *     CLOSER than the fog wall now, but it follows the player (depth sorts it
+ *     first) and writes no depth, so far terrain still draws over it.
  *
  * GLTF props are loaded once and cloned per placement (mirroring openworld.js).
  * Loading is async; chunks rebuild once the assets arrive.
@@ -36,11 +41,37 @@
     // Pulled in for 1×1 voxels (4× the cubes) to keep the load reasonable.
     const TERRAIN_RADIUS = 6;
     const PROP_RADIUS = 5;
+    // LOD rings past the full-detail voxel window, so the horizon is terrain
+    // instead of fog. Each ring is a grid of heightfield tiles (one Mesh /
+    // 1 draw call per tile) sampling the same terrain noise, with heights
+    // quantized to VOXEL_STEP so silhouettes stay terraced like the voxels.
+    // Ring 1: fine tiles (2u grid). Ring 2: coarse tiles (8u grid) out to the
+    // fog wall. Geometry density falls off with distance at the same rate
+    // screen resolution does, so total cost stays roughly constant.
+    // Tiles sink DROP units below the true surface: in the overlap bands the
+    // finer layer (voxels over ring 1, ring 1 over ring 2) hides the coarser
+    // one, which makes every LOD seam self-covering. SKIRT curtains hang from
+    // tile edges so density changes never open see-through cracks.
+    const LOD1_TILE = 4;                   // chunks per ring-1 tile side (128u)
+    const LOD2_TILE = 16;                  // chunks per ring-2 tile side (512u)
+    const LOD1_STEP = 2;                   // ring-1 sample spacing (world units)
+    const LOD2_STEP = 8;                   // ring-2 sample spacing
+    const LOD1_RADIUS = 14;                // ring-1 reach (chunks ≈ 450u)
+    const LOD2_RADIUS = 48;                // ring-2 reach (chunks ≈ 1540u)
+    const LOD1_DROP = 0.45;                // below voxel tops (they're ≥1u tall)
+    const LOD2_DROP = 1.35;                // below ring 1 in their overlap band
+    const LOD1_SKIRT = 4;                  // edge-curtain depth (world units)
+    const LOD2_SKIRT = 14;
+    const LOD_GRASS_TINT = 0x5c9a3a;       // pull biome greens toward the near grass texture
+    const LOD_BUILD_MS = 3;                // per-frame tile-build budget (ms)
     const EDGE_MARGIN = 3;                 // open cells kept around chunk edges
     const CHUNK_MID = (CHUNK_CELLS - 1) * CELL / 2;
     const GROUND_SIZE = (TERRAIN_RADIUS * 2 + 3) * CHUNK_SIZE;
-    const FOG_NEAR = 60;
-    const FOG_FAR = 185;
+    // Fog now sits just inside the ring-2 frontier (not at the voxel edge) —
+    // the LOD rings carry the eye out to it. Ring 2 guarantees coverage to
+    // ≈1540u, so 1250 leaves margin for tiles still in the build queue.
+    const FOG_NEAR = 80;
+    const FOG_FAR = 1250;
     const BIOME_SCALE = 5;                 // ~5 chunks per biome patch
     const BIOME_SEED = 1337;
     // Blocky terrain: multi-octave signed noise (continents → mountains and
@@ -383,6 +414,14 @@
         constructor(game) {
             this.game = game;
             this.chunks = new Map(); // "cx,cz" → { entries:[wall], meshes:[obj] }
+            // LOD heightfield rings (see the constants above). Tiles build from
+            // a distance-sorted queue on a per-frame time budget so streaming
+            // never hitches; the first fill at enter() drains synchronously.
+            this._lodTiles = new Map();  // "lvl:tx,tz" → Mesh
+            this._lodQueue = [];         // pending {key,lvl,tx,tz,d} builds
+            this._lodWanted = null;      // Set of currently-wanted tile keys
+            this._lodInit = false;       // first full drain done
+            this._lodMat = null;         // shared vertex-colored material
             this._lastCX = null;
             this._lastCZ = null;
             this._initialized = false;
@@ -473,6 +512,7 @@
             const g = this.game;
             this.chunks = new Map();
             this._initialized = false;
+            this._lodInit = false;
             this._lastCX = this._lastCZ = null;
 
             for (const key in BIOMES) {
@@ -518,6 +558,7 @@
             if (this.nether) { g.scene.remove(this.nether.group); this.nether = null; }
             for (const key of Array.from(this.chunks.keys())) this._unloadChunk(key);
             this.chunks.clear();
+            this._clearLod();
             this.animals = [];
             this.fish = [];
             if (this._pickaxeVM && this._pickaxeVM.parent) this._pickaxeVM.parent.remove(this._pickaxeVM);
@@ -559,6 +600,10 @@
             this._updatePickaxeVM(dt || 0);
             this._updateClouds(dt || 0);
             this._updateNetherPortal(dt || 0);
+            // Build queued LOD tiles a few per frame (nearest first). After a
+            // long jump/teleport the queue is deep — spend more per frame so
+            // the horizon fills in quickly, still without a single big hitch.
+            this._drainLodQueue(this._lodQueue.length > 40 ? 8 : LOD_BUILD_MS);
 
             const p = g.player.position;
             const ccx = Math.floor(p.x / CHUNK_SIZE);
@@ -591,6 +636,9 @@
                 }
             }
             this._onChunkChanged(ccx, ccz);
+            // First stream of a session: build the whole LOD horizon now, while
+            // we're still behind the mode transition, so it never pops in live.
+            if (!this._lodInit) { this._lodInit = true; this._drainLodQueue(Infinity); }
         }
 
         // ---- asset loading ----
@@ -1206,6 +1254,169 @@
             }
             chunk.tiles = this._makeVoxelChunk(cx, cz, chunk.biome);
             for (const t of chunk.tiles) this.game.scene.add(t);
+        }
+
+        // ---- LOD horizon rings (heightfield tiles past the voxel window) ----
+
+        _ensureLodAssets() {
+            if (this._lodMat) return;
+            // DoubleSide so the edge skirts read from any angle; fog on so
+            // tiles dissolve into the horizon haze like everything else.
+            this._lodMat = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
+            this._lodColor = new THREE.Color();
+        }
+
+        // Map color for a distant sample — the same palette the voxel buckets
+        // use, with grass pulled toward the near grass-texture green so the
+        // ring-0 → ring-1 seam reads as a soft focus change, not a color line.
+        _lodColorAt(wx, wz, top) {
+            if (top >= SNOW_LEVEL) return 0xeaf2f7;                       // snow
+            if (top >= SNOW_LEVEL - 6) return 0x8a8d92;                   // rock
+            if (top <= WATER_Y - 8) return 0x5a4a30;                      // ocean floor
+            if (top <= WATER_Y + VOXEL_STEP) return 0xd9c48f;             // beach/shallows
+            const ground = biomeAt(Math.floor(wx / CHUNK_SIZE), Math.floor(wz / CHUNK_SIZE)).ground;
+            return lerpHex(ground, LOD_GRASS_TINT, 0.45);
+        }
+
+        // One heightfield tile: a (n+1)² grid of block-quantized terrain samples
+        // in ABSOLUTE world coords (mesh stays at the origin, so the bounding
+        // sphere is right and Three.js frustum-culls it for free), plus a skirt
+        // ring hanging from the border to seal cracks against coarser neighbors.
+        _buildLodTile(lvl, tx, tz) {
+            this._ensureLodAssets();
+            const spanC = lvl === 1 ? LOD1_TILE : LOD2_TILE;
+            const step = lvl === 1 ? LOD1_STEP : LOD2_STEP;
+            const drop = lvl === 1 ? LOD1_DROP : LOD2_DROP;
+            const skirt = lvl === 1 ? LOD1_SKIRT : LOD2_SKIRT;
+            const size = spanC * CHUNK_SIZE;
+            const n = (size / step) | 0;      // quads per side
+            const vs = n + 1;                 // verts per side
+            const x0 = tx * size, z0 = tz * size;
+            const gridCount = vs * vs;
+            const pos = new Float32Array((gridCount + vs * 4) * 3);
+            const col = new Float32Array((gridCount + vs * 4) * 3);
+            const c = this._lodColor;
+            for (let j = 0; j < vs; j++) {
+                for (let i = 0; i < vs; i++) {
+                    const wx = x0 + i * step, wz = z0 + j * step;
+                    const top = naturalTop(wx / CELL, wz / CELL); // cached quantized surface
+                    const o = (j * vs + i) * 3;
+                    pos[o] = wx; pos[o + 1] = top - drop; pos[o + 2] = wz;
+                    c.setHex(this._lodColorAt(wx, wz, top));
+                    col[o] = c.r; col[o + 1] = c.g; col[o + 2] = c.b;
+                }
+            }
+            const idx = new Uint32Array(n * n * 6 + n * 4 * 6);
+            let w = 0;
+            for (let j = 0; j < n; j++) {
+                for (let i = 0; i < n; i++) {
+                    const a = j * vs + i, b = a + 1, d = a + vs, e = d + 1;
+                    idx[w++] = a; idx[w++] = d; idx[w++] = b;
+                    idx[w++] = b; idx[w++] = d; idx[w++] = e;
+                }
+            }
+            // Skirts: each border edge gets a duplicate row pushed down `skirt`
+            // units, stitched to the border with quads.
+            const edges = [
+                (k) => k,                 // north row (j=0)
+                (k) => n * vs + k,        // south row (j=n)
+                (k) => k * vs,            // west column (i=0)
+                (k) => k * vs + n,        // east column (i=n)
+            ];
+            for (let e = 0; e < 4; e++) {
+                const base = gridCount + e * vs;
+                for (let k = 0; k < vs; k++) {
+                    const src = edges[e](k) * 3, dst = (base + k) * 3;
+                    pos[dst] = pos[src]; pos[dst + 1] = pos[src + 1] - skirt; pos[dst + 2] = pos[src + 2];
+                    col[dst] = col[src]; col[dst + 1] = col[src + 1]; col[dst + 2] = col[src + 2];
+                }
+                for (let k = 0; k < n; k++) {
+                    const gA = edges[e](k), gB = edges[e](k + 1), sA = base + k, sB = base + k + 1;
+                    idx[w++] = gA; idx[w++] = sA; idx[w++] = gB;
+                    idx[w++] = gB; idx[w++] = sA; idx[w++] = sB;
+                }
+            }
+            const geo = new THREE.BufferGeometry();
+            geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+            geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+            geo.setIndex(new THREE.BufferAttribute(idx, 1));
+            geo.computeVertexNormals();
+            const mesh = new THREE.Mesh(geo, this._lodMat);
+            mesh.receiveShadow = true;
+            mesh.matrixAutoUpdate = false;
+            return mesh;
+        }
+
+        // Recompute which tiles each ring wants around the player's chunk,
+        // queue the missing ones nearest-first, and free the out-of-range ones.
+        // A ring keeps tiles that OVERLAP the finer layer inward of it (only
+        // tiles fully interior are excluded) — that overlap is what hides the
+        // seams. Mining stays safe: dig reach lives within chunk distance ~1,
+        // and every tile touching it is always in the excluded interior.
+        _refreshLod(ccx, ccz) {
+            const wanted = new Set();
+            const queue = [];
+            const collect = (lvl) => {
+                const spanC = lvl === 1 ? LOD1_TILE : LOD2_TILE;
+                const outer = lvl === 1 ? LOD1_RADIUS : LOD2_RADIUS;
+                const inner = lvl === 1 ? TERRAIN_RADIUS - 1 : LOD1_RADIUS - LOD1_TILE;
+                const t0x = Math.floor((ccx - outer) / spanC), t1x = Math.floor((ccx + outer) / spanC);
+                const t0z = Math.floor((ccz - outer) / spanC), t1z = Math.floor((ccz + outer) / spanC);
+                for (let tz = t0z; tz <= t1z; tz++) {
+                    for (let tx = t0x; tx <= t1x; tx++) {
+                        const ax = tx * spanC, bx = ax + spanC - 1;
+                        const az = tz * spanC, bz = az + spanC - 1;
+                        // Chebyshev distance from the player's chunk to the
+                        // tile's nearest and farthest chunks.
+                        const minCheb = Math.max(
+                            ccx < ax ? ax - ccx : (ccx > bx ? ccx - bx : 0),
+                            ccz < az ? az - ccz : (ccz > bz ? ccz - bz : 0));
+                        const maxCheb = Math.max(
+                            Math.max(Math.abs(ax - ccx), Math.abs(bx - ccx)),
+                            Math.max(Math.abs(az - ccz), Math.abs(bz - ccz)));
+                        if (minCheb > outer || maxCheb <= inner) continue;
+                        const key = lvl + ':' + tx + ',' + tz;
+                        wanted.add(key);
+                        if (!this._lodTiles.has(key)) queue.push({ key, lvl, tx, tz, d: minCheb });
+                    }
+                }
+            };
+            collect(1);
+            collect(2);
+            queue.sort((a, b) => a.d - b.d);
+            this._lodQueue = queue;
+            this._lodWanted = wanted;
+            for (const key of Array.from(this._lodTiles.keys())) {
+                if (!wanted.has(key)) this._unloadLodTile(key);
+            }
+        }
+
+        // Build queued tiles until the time budget runs out (≥1 per call).
+        _drainLodQueue(budgetMs) {
+            if (!this._lodQueue.length) return;
+            const t0 = performance.now();
+            do {
+                const job = this._lodQueue.shift();
+                if (!this._lodWanted || !this._lodWanted.has(job.key) || this._lodTiles.has(job.key)) continue;
+                const mesh = this._buildLodTile(job.lvl, job.tx, job.tz);
+                this.game.scene.add(mesh);
+                this._lodTiles.set(job.key, mesh);
+            } while (this._lodQueue.length && performance.now() - t0 < budgetMs);
+        }
+
+        _unloadLodTile(key) {
+            const mesh = this._lodTiles.get(key);
+            if (!mesh) return;
+            this.game.scene.remove(mesh);
+            if (mesh.geometry) mesh.geometry.dispose(); // material is shared
+            this._lodTiles.delete(key);
+        }
+
+        _clearLod() {
+            for (const key of Array.from(this._lodTiles.keys())) this._unloadLodTile(key);
+            this._lodQueue = [];
+            this._lodWanted = null;
+            this._lodInit = false;
         }
 
         // Is the voxel block (cx,k,cz) solid? Public for game.js collision.
@@ -2415,8 +2626,12 @@
         // once; recolored when the player crosses a chunk (not per frame).
         _ensureWater() {
             if (this._water) return;
-            const size = (FOG_FAR + 80) * 2;
-            const seg = Math.max(8, Math.round(size / 16));
+            // Reaches the fog wall so distant ocean on the LOD rings is wet.
+            // 20u vertex spacing keeps the recolor loop ~20k samples; those
+            // land on a 4u lattice as the plane recenters (gcd of spacing and
+            // chunk size), so the naturalTop cache absorbs repeat crossings.
+            const size = (FOG_FAR + 170) * 2;
+            const seg = Math.max(8, Math.round(size / 20));
             this._waterGeo = new THREE.PlaneGeometry(size, size, seg, seg);
             const cols = new Float32Array(this._waterGeo.attributes.position.count * 3);
             this._waterGeo.setAttribute('color', new THREE.BufferAttribute(cols, 3));
@@ -2440,7 +2655,7 @@
             for (let i = 0; i < pos.count; i++) {
                 const wx = centerX + pos.getX(i);
                 const wz = centerZ - pos.getY(i); // plane is rotated -90° about X
-                const depth = WATER_Y - surfaceY(wx, wz);
+                const depth = WATER_Y - naturalTop(cellOf(wx), cellOf(wz)); // cached surfaceY
                 const f = depth <= 0 ? 0 : Math.min(1, depth / WATER_MAX_DEPTH);
                 this._waterTmp.copy(this._waterShallow).lerp(this._waterDeep, f);
                 colAttr.setXYZ(i, this._waterTmp.r, this._waterTmp.g, this._waterTmp.b);
@@ -2480,8 +2695,16 @@
                 fogFar: g.scene.fog ? g.scene.fog.far : null,
                 groundColor: g.ground && g.ground.material ? g.ground.material.color.getHex() : null,
                 roofY: g.roofY, // restore so other modes rebuild the ceiling correctly
+                camFar: g.camera ? g.camera.far : null,
             };
             g.roofY = null; // open sky — no ceiling cap on jumps/flight
+
+            // The maze camera clips at 1000; the LOD horizon reaches past the
+            // fog wall, so push the far plane out (restored on exit).
+            if (g.camera && g.camera.far < FOG_FAR + 500) {
+                g.camera.far = FOG_FAR + 500;
+                g.camera.updateProjectionMatrix();
+            }
 
 
 
@@ -2551,6 +2774,10 @@
                 if (s.fogFar != null) g.scene.fog.far = s.fogFar;
             }
             if (s.groundColor != null && g.ground && g.ground.material) g.ground.material.color.setHex(s.groundColor);
+            if (s.camFar != null && g.camera && g.camera.far !== s.camFar) {
+                g.camera.far = s.camFar;
+                g.camera.updateProjectionMatrix();
+            }
         }
 
         _tickVisuals(dt) {
@@ -2619,6 +2846,7 @@
 
         _onChunkChanged(ccx, ccz) {
             const g = this.game;
+            this._refreshLod(ccx, ccz);
             const biome = biomeAt(ccx, ccz);
             this._targetSky = new THREE.Color(biome.sky);
             this._targetGround = new THREE.Color(biome.ground);

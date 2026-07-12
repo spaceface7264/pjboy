@@ -9089,10 +9089,11 @@ ${waveConsts}
          * the player's vehicle — while piloting, player.pos rides the
          * ship so chunk streaming / wildlife / camera all follow.
          *   Mouse points the nose (pull back = up, attitude holds, full 360° —
-         *   loops allowed) · W/S thrust · Space+W afterburner · Space/Shift
-         *   hover up/down · G to land                                          */
+         *   loops allowed) · W/S thrust · A/D barrel roll · arrows yaw/thrust
+         *   Space+W afterburner · Space/Shift hover up/down · G to land        */
         // Arcade flight tuning — momentum-based; the nose flies where you point.
-        const SHIP_TURN = 2.0;                   // keyboard yaw rate (rad/s)
+        const SHIP_TURN = 2.0;                   // keyboard yaw rate (rad/s, arrow keys)
+        const SHIP_ROLL = 3.2;                   // manual barrel-roll rate (rad/s, A/D)
         const SHIP_MAX  = 38;                    // top cruise speed
         const SHIP_BOOST = 1.7;                  // afterburner multiplier (Space + W)
         const SHIP_LIFT = 26;                    // vertical climb/dive speed
@@ -9114,7 +9115,7 @@ ${waveConsts}
           ship.pos = player.pos.clone(); ship.pos.y += 1.4;
           ship.vel = new THREE.Vector3();
           ship.yaw = player.yaw; ship.pitch = 0; ship.roll = 0;
-          ship.pitchCmd = 0; ship._prevYaw = player.yaw; ship._speed = 0; ship._boost = 0;
+          ship.pitchCmd = 0; ship.spin = 0; ship._prevYaw = player.yaw; ship._speed = 0; ship._boost = 0;
           ship.group.position.copy(ship.pos);
           ship.group.rotation.set(0, ship.yaw, 0, 'YXZ');   // yaw→pitch→roll, or pitch reads as bank off-axis
           scene.add(ship.group);
@@ -9138,7 +9139,7 @@ ${waveConsts}
           if(!next) return;
           next.name=sel.name; next.speedMul=sel.speed; next.turnMul=sel.turn; next.scale=sel.scale; next.wing=sel.wing;
           next.pos=old.pos; next.vel=old.vel; next.yaw=old.yaw; next.pitch=old.pitch; next.roll=old.roll;
-          next.pitchCmd=old.pitchCmd||0; next._prevYaw=old._prevYaw!=null?old._prevYaw:old.yaw;
+          next.pitchCmd=old.pitchCmd||0; next.spin=old.spin||0; next._prevYaw=old._prevYaw!=null?old._prevYaw:old.yaw;
           next._speed=old._speed||0; next._boost=0;
           next.group.position.copy(old.group.position); next.group.rotation.copy(old.group.rotation);
           scene.add(next.group);
@@ -9157,7 +9158,7 @@ ${waveConsts}
           ship.pitchCmd = (p>0? Math.PI : -Math.PI) - p;
           ship.pitch = ship.pitchCmd;                    // snap the hull — the camera ease sells the roll
           ship.yaw += Math.PI; ship._prevYaw = ship.yaw; // heading jump must not read as a hard turn
-          ship.roll = 0;
+          ship.roll = 0; ship.spin = 0;
           // start the camera roll through the ship's side (also keeps the 180° up-lerp
           // from passing through zero length)
           if(_flyCamUp) _flyCamUp.set(Math.cos(ship.yaw), 0, -Math.sin(ship.yaw));
@@ -9236,7 +9237,8 @@ ${waveConsts}
         function updateFlight(dt){
           if(!ship) { flying=false; return; }
           const k=keys;
-          const yawIn=(k.KeyA||k.ArrowLeft?1:0)-(k.KeyD||k.ArrowRight?1:0);
+          const yawIn=(k.ArrowLeft?1:0)-(k.ArrowRight?1:0);
+          const rollIn=(k.KeyD?1:0)-(k.KeyA?1:0);          // A/D barrel roll (mouse steers)
           const thr=(k.KeyW||k.ArrowUp?1:0)-(k.KeyS||k.ArrowDown?1:0);
           // Space is the afterburner while thrusting — only lifts when hovering
           const upIn=((k.Space && !(thr>0))?1:0)-((k.ShiftLeft||k.ShiftRight)?1:0);
@@ -9277,13 +9279,23 @@ ${waveConsts}
           // bank into the turn from the real yaw rate (keyboard + mouse)
           const yawRate=(ship.yaw-(ship._prevYaw!=null?ship._prevYaw:ship.yaw))/Math.max(dt,1e-4);
           ship._prevYaw=ship.yaw;
-          const rollTarget=THREE.MathUtils.clamp(-yawRate*0.14, -0.75, 0.75);
-          ship.roll += (rollTarget - ship.roll)*(1-Math.exp(-5*dt));
+          const rollTarget=THREE.MathUtils.clamp(-yawRate*0.30, -0.9, 0.9);
+          ship.roll += (rollTarget - ship.roll)*(1-Math.exp(-8*dt));
+          // manual barrel roll (A/D) rides ON TOP of the auto-bank — the camera only
+          // follows the bank, so the view stays steady while the hull spins; released,
+          // it takes the shortest path back to wings-level
+          if(rollIn){ ship.spin=(ship.spin||0)+rollIn*SHIP_ROLL*dt; }
+          else if(ship.spin){
+            ship.spin%=2*Math.PI;
+            if(ship.spin>Math.PI) ship.spin-=2*Math.PI; else if(ship.spin<-Math.PI) ship.spin+=2*Math.PI;
+            ship.spin*=Math.exp(-5*dt);
+            if(Math.abs(ship.spin)<0.01) ship.spin=0;
+          }
           ship.group.position.copy(ship.pos);
           // negative X: +X rotation dips the +z nose, but positive pitch = climb
-          ship.group.rotation.set(-ship.pitch, ship.yaw, ship.roll, 'YXZ');
+          ship.group.rotation.set(-ship.pitch, ship.yaw, ship.roll+(ship.spin||0), 'YXZ');
           ship._speed=Math.hypot(ship.vel.x,ship.vel.y,ship.vel.z); ship._boost=boosting?1:0;
-          ship.anim(elapsed, (thr>0||upIn>0||boosting)?'alert':'idle', dt);  // throttle drives flames/glow
+          ship.anim(elapsed, (thr>0||upIn>0||boosting||rollIn)?'alert':'idle', dt);  // throttle drives flames/glow
           updateShipTrails();
           // the player rides the ship (keeps streaming/creatures/camera centred)
           player.pos.copy(ship.pos); player.yaw = ship.yaw;
@@ -9393,16 +9405,20 @@ ${waveConsts}
           travelToPlanet(id);    // flying arrival drops you into the new world's upper sky
         }
         const _fcFwd=new THREE.Vector3(), _fcUp=new THREE.Vector3(), _fcDesired=new THREE.Vector3(), _fcLook=new THREE.Vector3();
+        const _fcEuler=new THREE.Euler(), _fcQuat=new THREE.Quaternion();
         function updateFlightCamera(dt){
           if(!ship || !camera) return;
           // speed-reactive FOV + pullback sell the sense of speed
           const spd01=Math.min(1, (ship._speed||0)/(SHIP_MAX*1.3));
           const fov=72 + spd01*12 + (ship._boost?4:0);
           if(Math.abs(camera.fov-fov)>0.1){ camera.fov=fov; camera.updateProjectionMatrix(); }
-          // rigid chase behind the tail in the SHIP's frame → view tilts with pitch/roll
-          const q = ship.group.quaternion;
-          _fcFwd.set(0,0,1).applyQuaternion(q);            // nose is +z
-          _fcUp.set(0,1,0).applyQuaternion(q);
+          // chase behind the tail in the ship's frame — full pitch follow (loops /
+          // inverted flight work), but only ~30% of the roll: the camera staying
+          // flatter is what makes the ship VISIBLY bank into turns on screen
+          _fcEuler.set(-ship.pitch, ship.yaw, ship.roll*0.3, 'YXZ');
+          _fcQuat.setFromEuler(_fcEuler);
+          _fcFwd.set(0,0,1).applyQuaternion(_fcQuat);      // nose is +z
+          _fcUp.set(0,1,0).applyQuaternion(_fcQuat);
           const dist=8.5 + spd01*3.4;
           _fcDesired.copy(ship.pos).addScaledVector(_fcFwd,-dist).addScaledVector(_fcUp,3.0);
           if(!_flyCamPos) _flyCamPos=_fcDesired.clone();
