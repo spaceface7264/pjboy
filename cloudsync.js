@@ -30,6 +30,22 @@ window.CloudSync = (function () {
     return _sb;
   }
 
+  // ---- status broadcasting (for the in-game HUD indicator) ----
+  // phase ∈ off | local | linked | pending | syncing | saved | error
+  var _state = { enabled: false, phase: 'off', code: '', lastSaved: 0, error: null };
+  var _listeners = [];
+  function _emit() { for (var i = 0; i < _listeners.length; i++) { try { _listeners[i](_state); } catch (_) { } } }
+  function _set(patch) { for (var k in patch) if (patch.hasOwnProperty(k)) _state[k] = patch[k]; _emit(); }
+  // Subscribe to status changes; fires once immediately with current state.
+  // Returns an unsubscribe function.
+  function subscribe(fn) {
+    if (typeof fn !== 'function') return function () { };
+    _listeners.push(fn);
+    try { fn(_state); } catch (_) { }
+    return function () { var i = _listeners.indexOf(fn); if (i >= 0) _listeners.splice(i, 1); };
+  }
+  function getState() { return _state; }
+
   // ---- code storage (which save this browser is linked to) ----
   function getCode() { try { return localStorage.getItem(CODE_KEY) || ''; } catch (_) { return ''; } }
   function setCode(c) { try { localStorage.setItem(CODE_KEY, c); } catch (_) { } }
@@ -85,14 +101,21 @@ window.CloudSync = (function () {
   // ---- debounced autosave: called by AsteroidProfile.save() ----
   var _timer = null, _pending = null;
   function onProfileSaved(profile) {
-    if (!enabled()) return;
+    if (!enabled()) { _set({ enabled: false, phase: 'off' }); return; }
     var code = getCode();
-    if (!code) return;            // not linked yet — nothing to sync to
+    if (!code) { _set({ enabled: true, code: '', phase: 'local' }); return; }  // not linked — local only
     _pending = profile;
+    _set({ enabled: true, code: code, phase: 'pending', error: null });        // edit made; push queued
     if (_timer) clearTimeout(_timer);
     _timer = setTimeout(function () {
       var p = _pending; _pending = null;
-      push(code, p).catch(function (e) { console.warn('[cloud] push failed:', e.message || e); });
+      _set({ phase: 'syncing' });
+      push(code, p).then(function () {
+        _set({ phase: 'saved', lastSaved: Date.now(), error: null });
+      }).catch(function (e) {
+        console.warn('[cloud] push failed:', e.message || e);
+        _set({ phase: 'error', error: (e && e.message) || String(e) });
+      });
     }, 1500);
   }
 
@@ -102,7 +125,12 @@ window.CloudSync = (function () {
     if (!enabled()) return Promise.reject(new Error('cloud off'));
     var code = genCode();
     var profile = window.AsteroidProfile ? window.AsteroidProfile.load() : {};
-    return push(code, profile).then(function () { setCode(code); return code; });
+    _set({ enabled: true, phase: 'syncing', error: null });
+    return push(code, profile).then(function () {
+      setCode(code);
+      _set({ code: code, phase: 'saved', lastSaved: Date.now(), error: null });
+      return code;
+    }).catch(function (e) { _set({ phase: 'error', error: (e && e.message) || String(e) }); throw e; });
   }
 
   // Pull an existing save by code and overwrite the local active profile.
@@ -110,11 +138,16 @@ window.CloudSync = (function () {
   function linkCode(code) {
     if (!enabled()) return Promise.reject(new Error('cloud off'));
     code = normalize(code);
+    _set({ enabled: true, phase: 'syncing', error: null });
     return pull(code).then(function (remote) {
-      if (!remote) throw new Error('No save found for that code.');
+      if (!remote) { _set({ phase: 'error', error: 'No save found for that code.' }); throw new Error('No save found for that code.'); }
       if (window.AsteroidProfile) window.AsteroidProfile.save(remote);
       setCode(code);
+      _set({ code: code, phase: 'saved', lastSaved: Date.now(), error: null });
       return true;
+    }).catch(function (e) {
+      if (_state.phase !== 'error') _set({ phase: 'error', error: (e && e.message) || String(e) });
+      throw e;
     });
   }
 
@@ -122,12 +155,18 @@ window.CloudSync = (function () {
     return { enabled: enabled(), code: getCode() };
   }
 
+  // Seed the initial status from persisted state (before any edit/sync).
+  _state.enabled = enabled();
+  _state.code = getCode();
+  _state.phase = _state.enabled ? (_state.code ? 'linked' : 'local') : 'off';
+
   return {
     enabled: enabled, status: status,
     getCode: getCode, setCode: setCode, clearCode: clearCode,
     genCode: genCode, normalize: normalize,
     pull: pull, push: push,
     onProfileSaved: onProfileSaved,
-    createForCurrent: createForCurrent, linkCode: linkCode
+    createForCurrent: createForCurrent, linkCode: linkCode,
+    subscribe: subscribe, getState: getState
   };
 })();

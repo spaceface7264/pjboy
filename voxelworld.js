@@ -67,6 +67,7 @@
         let _saved = null;
         let _listeners = [];
         let _active = false;
+        let _cloudUnsub = null, _cloudTimer = null;   // CloudSync HUD subscription + relative-time refresh
         let _voxelBg = null;
 
         function on(el, ev, fn, opts) {
@@ -5155,6 +5156,37 @@ ${waveConsts}
                 + '<div class="vx-quest-bar"><span style="width:' + pct + '%"></span><em>' + cur + ' / ' + tgt + '</em></div>';
         }
 
+        // Short relative time for the "last saved" label (kept kid-legible).
+        function _cloudRelTime(ms) {
+            const s = Math.max(0, (Date.now() - ms) / 1000);
+            if (s < 5) return 'just now';
+            if (s < 60) return Math.floor(s) + 's ago';
+            if (s < 3600) return Math.floor(s / 60) + 'm ago';
+            if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+            return Math.floor(s / 86400) + 'd ago';
+        }
+
+        // Paint the cloud-save pill from a CloudSync status object.
+        function renderCloudStatus(st) {
+            const el = document.getElementById('voxel-cloud');
+            if (!el) return;
+            if (!st || !st.enabled || st.phase === 'off') { el.hidden = true; return; }
+            el.hidden = false;
+            el.className = 'vx-cloud vx-cloud-' + st.phase;
+            let ico = '☁', text;
+            switch (st.phase) {
+                case 'pending':
+                case 'syncing': text = 'Saving…'; break;
+                case 'saved':   text = 'Saved' + (st.lastSaved ? ' · ' + _cloudRelTime(st.lastSaved) : ''); break;
+                case 'error':   ico = '⚠'; text = 'Save failed'; break;
+                case 'linked':  text = 'Cloud on'; break;
+                case 'local':
+                default:        ico = '⌂'; text = 'Local only'; break;
+            }
+            el.innerHTML = '<span class="vx-cloud-ico">' + ico + '</span>' + text;
+            el.title = st.code ? ('Cloud code: ' + st.code) : 'Not linked to a cloud code — edits stay on this device.';
+        }
+
         function recordJournalScan(blockId) {
             const AP = getProfileApi();
             if (!AP) return;
@@ -10173,6 +10205,16 @@ ${waveConsts}
             loadInventoryFromProfile();
             loadSettings();
             applySettings();                       // sound + view distance (VIEW_R) before streaming
+            // Cloud-save status pill: subscribe (fires immediately with current
+            // state) + a slow ticker so the "last saved" relative time stays fresh.
+            if (window.CloudSync && window.CloudSync.subscribe) {
+                _cloudUnsub = window.CloudSync.subscribe(renderCloudStatus);
+                _cloudTimer = setInterval(() => {
+                    if (window.CloudSync.getState) renderCloudStatus(window.CloudSync.getState());
+                }, 20000);
+            } else {
+                const _ce = document.getElementById('voxel-cloud'); if (_ce) _ce.hidden = true;
+            }
             setFirstPerson(vxSettings.view === 'first');   // default camera
             weaponIndex = loadCharCfg().weapon;
             // Migrate a legacy pickaxe loadout to the Laser Handgun (sole mining tool).
@@ -10473,6 +10515,9 @@ ${waveConsts}
             }
             flushProfileState();
             _active = false;
+            if (_cloudUnsub) { _cloudUnsub(); _cloudUnsub = null; }
+            if (_cloudTimer) { clearInterval(_cloudTimer); _cloudTimer = null; }
+            { const _ce = document.getElementById('voxel-cloud'); if (_ce) _ce.hidden = true; }
             stopFrameClock();
             hideVoxelLoading();
             setUnderwaterTint(false);

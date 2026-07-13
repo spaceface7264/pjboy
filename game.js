@@ -61,8 +61,16 @@ class AudioBus {
     unlock() {
         const ctx = this._ensureContext();
         if (!ctx) return;
-        if (ctx.state === 'suspended') ctx.resume();
-        this._unlocked = true;
+        if (ctx.state === 'running') { this._unlocked = true; return; }
+        // resume() is async and can reject / no-op if the triggering gesture
+        // didn't count as a user activation. Only treat audio as unlocked once
+        // the context has actually flipped to 'running', so the caller can keep
+        // retrying on later gestures instead of going permanently silent.
+        try {
+            const p = ctx.resume();
+            if (p && p.then) p.then(() => { this._unlocked = ctx.state === 'running'; }).catch(() => {});
+        } catch (_) {}
+        this._unlocked = ctx.state === 'running';
     }
 
     setVolume(v) {
@@ -142,7 +150,11 @@ class AudioBus {
     play(name) {
         if (!this.enabled) return;
         const ctx = this._ensureContext();
-        if (!ctx || ctx.state !== 'running') return; // gated until first gesture
+        if (!ctx) return;
+        // Gated until a user gesture flips the context to 'running'. If it's
+        // still suspended, kick a resume() so the next call can play — never
+        // stay silent just because the first unlock gesture didn't take.
+        if (ctx.state !== 'running') { if (ctx.state === 'suspended') { try { ctx.resume(); } catch (_) {} } return; }
         switch (name) {
             case 'shoot':
                 this._tone({ type: 'sawtooth', freq: 720, freqEnd: 180, dur: 0.09, gain: 0.32 });
@@ -774,9 +786,14 @@ class Game3D {
     _setupAudioUnlock() {
         const unlock = () => {
             this.audio.unlock();
-            window.removeEventListener('pointerdown', unlock);
-            window.removeEventListener('keydown', unlock);
-            window.removeEventListener('touchstart', unlock);
+            // Only stop listening once the context is genuinely running — a
+            // single async/failed resume() must not permanently kill audio.
+            const ctx = this.audio.ctx;
+            if (ctx && ctx.state === 'running') {
+                window.removeEventListener('pointerdown', unlock);
+                window.removeEventListener('keydown', unlock);
+                window.removeEventListener('touchstart', unlock);
+            }
         };
         window.addEventListener('pointerdown', unlock);
         window.addEventListener('keydown', unlock);
