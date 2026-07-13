@@ -949,11 +949,22 @@
             const before = curEditCount();
             CS.reconcile().then((res) => {
                 if (!_active || !res || !res.ok || !res.changed) return;
-                if (curEditCount() === before) return;   // current world unchanged — no redraw needed
-                loadProfileEdits();
-                resetStreaming(); streamInit();
-                if (typeof updateJournalHud === 'function') updateJournalHud();
-                if (g.showMessage) g.showMessage('Synced latest from the cloud', 1800);
+                // The merge may have adopted the OTHER device's inventory / hotbar /
+                // owned weapons (mergeProfiles keeps the newer document's). Reload
+                // them into the runtime so the exit flush writes the merged values
+                // back — otherwise flushProfileState() would overwrite them with this
+                // device's stale in-memory copy and silently lose the other's gains.
+                loadOwnedWeapons();
+                loadHotbarLayout();
+                loadInventoryFromProfile();
+                renderHotbar();
+                // Rebuild the world only if the CURRENT planet actually gained edits.
+                if (curEditCount() !== before) {
+                    loadProfileEdits();
+                    resetStreaming(); streamInit();
+                    if (typeof updateJournalHud === 'function') updateJournalHud();
+                    if (g.showMessage) g.showMessage('Synced latest from the cloud', 1800);
+                }
             }).catch(() => {});
         }
 
