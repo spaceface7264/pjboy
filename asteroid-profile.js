@@ -326,7 +326,13 @@
             const ps = (planets[id] && typeof planets[id] === 'object') ? planets[id] : {};
             const edits = Array.isArray(ps.edits) ? ps.edits.filter(
                 (e) => e && typeof e === 'object'
-            ).map((e) => ({ x: e.x | 0, y: e.y | 0, z: e.z | 0, id: e.id | 0 })) : [];
+            ).map((e) => {
+                const row = { x: e.x | 0, y: e.y | 0, z: e.z | 0, id: e.id | 0 };
+                // Preserve the edit timestamp (when present) so cross-device
+                // merge can pick the newest change per cell. Old edits lack it.
+                if (e.t) row.t = +e.t || 0;
+                return row;
+            }) : [];
             out.planets[id] = {
                 edits,
                 claimName: String(ps.claimName || '').slice(0, 24),
@@ -629,10 +635,93 @@
         const edits = planetState(profile).edits;
         const key = `${x | 0},${y | 0},${z | 0}`;
         const idx = edits.findIndex((e) => `${e.x},${e.y},${e.z}` === key);
-        const row = { x: x | 0, y: y | 0, z: z | 0, id: id | 0 };
+        // `t` timestamps the edit so cross-device merge can pick the newest
+        // change per cell (see mergeEdits). Old edits without `t` count as 0.
+        const row = { x: x | 0, y: y | 0, z: z | 0, id: id | 0, t: Date.now() };
         if (idx >= 0) edits[idx] = row;
         else edits.push(row);
         return profile;
+    }
+
+    // ---- cross-device merge (used by CloudSync.reconcile) ----
+    // Union two per-cell edit lists. The same cell may exist in both; the newest
+    // change wins by per-edit timestamp `t`, and on a tie / missing timestamp the
+    // newer *document* wins (via `aNewer`). A cell present on only one side is
+    // always kept — so two devices converge instead of clobbering.
+    function mergeEdits(a, b, aNewer) {
+        const pick = new Map();   // "x,y,z" -> { e, t }
+        const consume = (list, fromA) => {
+            if (!Array.isArray(list)) return;
+            for (const e of list) {
+                if (!e) continue;
+                const key = (e.x | 0) + ',' + (e.y | 0) + ',' + (e.z | 0);
+                const t = +e.t || 0;
+                const prev = pick.get(key);
+                if (!prev || t > prev.t || (t === prev.t && fromA === !!aNewer)) {
+                    pick.set(key, { e, t });
+                }
+            }
+        };
+        consume(a, true);
+        consume(b, false);
+        const out = [];
+        pick.forEach((v) => out.push(v.e));
+        return out;
+    }
+
+    // Union a journal-style discovery map (keys = things found). Numeric values
+    // take the max, boolean-ish values stay truthy. Monotonic — never un-finds.
+    function mergeDiscoveryMap(a, b) {
+        const out = {};
+        a = a && typeof a === 'object' ? a : {};
+        b = b && typeof b === 'object' ? b : {};
+        new Set(Object.keys(a).concat(Object.keys(b))).forEach((k) => {
+            const av = a[k], bv = b[k];
+            if (typeof av === 'number' || typeof bv === 'number') out[k] = Math.max((+av || 0), (+bv || 0));
+            else out[k] = av || bv || true;
+        });
+        return out;
+    }
+
+    // Reconcile a local and remote profile into one that loses NO world edits.
+    // The more-recently-played document is "primary" and supplies ambiguous
+    // mutable state (inventory, character, missions, current planet); monotonic
+    // data is always unioned so two devices converge — per-planet block edits
+    // (newest-wins per cell), charted planets, and journal discoveries.
+    function mergeProfiles(local, remote) {
+        local = normalizeProfile(local);
+        if (!remote) return local;
+        remote = normalizeProfile(remote);
+        const aNewer = (+local.lastPlayed || 0) >= (+remote.lastPlayed || 0);
+        const primary = aNewer ? local : remote;
+        const merged = JSON.parse(JSON.stringify(primary));
+
+        merged.system = merged.system || {};
+        merged.system.planets = merged.system.planets || {};
+        const lpl = (local.system && local.system.planets) || {};
+        const rpl = (remote.system && remote.system.planets) || {};
+        new Set(Object.keys(lpl).concat(Object.keys(rpl))).forEach((id) => {
+            const lp = lpl[id] || {}, rp = rpl[id] || {};
+            const base = merged.system.planets[id] || defaultPlanetState();
+            base.edits = mergeEdits(lp.edits, rp.edits, aNewer);
+            base.visited = !!(lp.visited || rp.visited || base.visited);
+            base.claimName = base.claimName || lp.claimName || rp.claimName || '';
+            merged.system.planets[id] = base;
+        });
+        // charted planets: union (never lose an unlock)
+        merged.system.unlocked = Array.from(new Set(
+            (((local.system && local.system.unlocked) || [])
+                .concat((remote.system && remote.system.unlocked) || []))));
+
+        // journal discoveries: union
+        const lj = local.journal || {}, rj = remote.journal || {};
+        merged.journal = merged.journal || {};
+        merged.journal.scanned = mergeDiscoveryMap(lj.scanned, rj.scanned);
+        merged.journal.creatures = mergeDiscoveryMap(lj.creatures, rj.creatures);
+        merged.journal.crafted = mergeDiscoveryMap(lj.crafted, rj.crafted);
+        merged.journal.places = Math.max((+lj.places || 0), (+rj.places || 0));
+
+        return normalizeProfile(merged);
     }
 
     function claimSummary(profile) {
@@ -738,6 +827,8 @@
         recordCraft,
         recordCreature,
         upsertBlockEdit,
+        mergeEdits,
+        mergeProfiles,
         claimSummary,
         syncLegacyKeys,
         planetDef,

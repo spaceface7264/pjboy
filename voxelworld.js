@@ -931,7 +931,32 @@
                 }
             }
         }
-        
+
+        // On entering a world, pull + merge the cloud save so two devices
+        // converge instead of clobbering (see AsteroidProfile.mergeProfiles).
+        // Non-blocking: the world first streams from LOCAL edits, then — if the
+        // merge added edits to the CURRENT planet — we reload + restream so they
+        // appear. The merge never drops local edits, so this can't wipe work.
+        function reconcileCloudOnEnter() {
+            const CS = window.CloudSync;
+            if (!CS || !CS.reconcile) return;
+            const AP = getProfileApi();
+            if (!AP || !AP.planetState) return;
+            const curEditCount = () => {
+                try { const st = AP.planetState(AP.load()); return (st && st.edits) ? st.edits.length : 0; }
+                catch (_) { return -1; }
+            };
+            const before = curEditCount();
+            CS.reconcile().then((res) => {
+                if (!_active || !res || !res.ok || !res.changed) return;
+                if (curEditCount() === before) return;   // current world unchanged — no redraw needed
+                loadProfileEdits();
+                resetStreaming(); streamInit();
+                if (typeof updateJournalHud === 'function') updateJournalHud();
+                if (g.showMessage) g.showMessage('Synced latest from the cloud', 1800);
+            }).catch(() => {});
+        }
+
         // ---------- multiplanetary: active planet + biome themes ----------
         // The active planet comes from AsteroidProfile (its catalog supplies the
         // seed + a biome key). A theme only re-skins the *surface* block and the
@@ -10470,6 +10495,7 @@ ${waveConsts}
             })();
             renderHotbar();
             updateJournalHud();
+            reconcileCloudOnEnter();   // pull+merge cloud so devices converge (non-blocking)
             if (!av) {
                 av = buildPlayer();
                 if (av && av.group && !av.group.parent) scene.add(av.group);

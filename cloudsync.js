@@ -151,6 +151,37 @@ window.CloudSync = (function () {
     });
   }
 
+  // Pull the cloud copy, MERGE it with local (losing no world edits), save the
+  // merged result locally, and push it back so both sides converge. The safe
+  // alternative to linkCode's overwrite — used on entering an Asteroid world.
+  // Resolves { ok, changed, seeded?, reason? }; never rejects.
+  function reconcile() {
+    if (!enabled()) return Promise.resolve({ ok: false, reason: 'off' });
+    var code = getCode();
+    if (!code) return Promise.resolve({ ok: false, reason: 'unlinked' });
+    var AP = window.AsteroidProfile;
+    if (!AP || !AP.mergeProfiles) return Promise.resolve({ ok: false, reason: 'no-merge' });
+    _set({ enabled: true, code: code, phase: 'syncing', error: null });
+    return pull(code).then(function (remote) {
+      if (!remote) {                                     // cloud empty — seed from local
+        return push(code, AP.load()).then(function () {
+          _set({ phase: 'saved', lastSaved: Date.now(), error: null });
+          return { ok: true, seeded: true, changed: false };
+        });
+      }
+      var merged = AP.mergeProfiles(AP.load(), remote);
+      AP.save(merged);                                   // persist locally (bumps lastPlayed)
+      return push(code, AP.load()).then(function () {    // converge cloud now, don't wait for debounce
+        _set({ phase: 'saved', lastSaved: Date.now(), error: null });
+        return { ok: true, changed: true };
+      });
+    }).catch(function (e) {
+      console.warn('[cloud] reconcile failed:', e.message || e);
+      _set({ phase: 'error', error: (e && e.message) || String(e) });
+      return { ok: false, reason: 'error', error: e };
+    });
+  }
+
   function status() {
     return { enabled: enabled(), code: getCode() };
   }
@@ -167,6 +198,7 @@ window.CloudSync = (function () {
     pull: pull, push: push,
     onProfileSaved: onProfileSaved,
     createForCurrent: createForCurrent, linkCode: linkCode,
+    reconcile: reconcile,
     subscribe: subscribe, getState: getState
   };
 })();
