@@ -393,6 +393,23 @@
             x.fillStyle='#e8b33b'; x.fillRect(0,28,10,4);
             x.fillStyle='#9aa6b2';
             for(let i=0;i<4;i++){ x.fillRect(3+i*8,4,3,3); x.fillRect(3+i*8,21,3,3); } },
+          tnt(x,R){ grain(x,0xb83226,.14,R,2);                                   // red charge, white label band
+            x.fillStyle='#f2f2f2'; x.fillRect(0,11,32,10);
+            x.fillStyle='rgba(0,0,0,.2)'; x.fillRect(0,11,32,1); x.fillRect(0,20,32,1);
+            x.fillStyle='#1c1c1f';                                               // blocky "TNT" glyphs
+            x.fillRect(3,13,7,2);  x.fillRect(5,13,3,6);                          // T
+            x.fillRect(12,13,2,6); x.fillRect(18,13,2,6);                         // N posts
+            x.fillRect(14,15,1,1); x.fillRect(15,16,1,1); x.fillRect(16,17,1,1); x.fillRect(17,18,1,1); // N diagonal
+            x.fillRect(22,13,7,2); x.fillRect(24,13,3,6);                         // T
+            x.fillStyle='rgba(255,255,255,.12)'; x.fillRect(0,1,32,1);           // top sheen
+            for(let i=0;i<3;i++){ x.fillStyle='rgba(0,0,0,.2)'; x.fillRect((R()*28)|0, R()<.5?4:24, 3,2); } },
+          tnt_cap(x,R){ grain(x,0x3a3a40,.16,R,2);                               // dark end plate + fuse
+            x.fillStyle='#b83226'; x.fillRect(2,2,28,28);
+            x.fillStyle='#2a2a30'; x.fillRect(6,6,20,20);
+            x.fillStyle='#4a4a52'; x.fillRect(6,6,20,1); x.fillRect(6,6,1,20);
+            x.strokeStyle='#c9a24a'; x.lineWidth=2;
+            x.beginPath(); x.moveTo(16,16); x.quadraticCurveTo(22,8,26,10); x.stroke();
+            x.fillStyle='#ffd24a'; x.fillRect(25,7,3,3); },                       // fuse spark
         
           // ---- organic ----
           fungal_top(x,R){ grain(x,0x5a4458,.28,R,2);
@@ -653,6 +670,11 @@
           { id:44, cat:'Terrain', name:'Magma Rock', tiles:{all:'magma'}, hardness:7, tags:['natural','volcanic','glows'], animated:true, glowColor:0xff6a1e,
             desc:'Half-cooled crust with fire still glowing in its cracks. Hot underfoot.',
             sci:{formula:'cooling basalt', mineral:'Magma crust', fact:'As lava hardens it grows a dark skin while molten orange rock still glows up through the cracks.'} },
+
+          // ---- Explosive ----
+          { id:45, cat:'Crafted', name:'TNT', tiles:{top:'tnt_cap', side:'tnt', bottom:'tnt_cap'}, hardness:3, tags:['crafted','explosive'],
+            desc:'Packed explosive charge. Place it, then blow it with the Remote Detonator — or shoot it. Watch out near lava!',
+            sci:{formula:'C₇H₅N₃O₆', mineral:'Trinitrotoluene (TNT)', fact:'TNT stores energy in its nitrogen–oxygen bonds. When lit it turns to gas in an instant, and that sudden expansion is the blast. Alfred Nobel made a safer cousin, dynamite, in 1867.'} },
         ];
         const blockById = id => BlockRegistry.find(b=>b.id===id);
         
@@ -794,6 +816,7 @@
           const c = ensureCol(cx,cz);
           c[cIdx(x-cx*CH, y, z-cz*CH)] = id;
           recordEdit(x,y,z,id);
+          registerTntBlock(x,y,z,id);          // keep the live-TNT set in sync for the detonator/lava
           if(id){ const k=colKey(cx,cz); if(y > (colMaxY.get(k)||0)) colMaxY.set(k, y); }
           rebuildChunkAt(x,y,z);               // instant: the column you actually touched
           // x/z borders share faces with the neighbor column — remesh those async (next
@@ -4475,7 +4498,7 @@ ${waveConsts}
             'Uranium Ore': 'Uranmalm', 'Aether Ore': 'Ætermalm',
             'Crystal': 'Krystal', 'Emerald Crystal': 'Smaragdkrystal', 'Void Crystal': 'Tomrumskrystal',
             'Metal': 'Metal', 'Alloy': 'Legering', 'Glass': 'Glas', 'Circuit': 'Kredsløb',
-            'Lamp': 'Lampe', 'Hull': 'Skrog', 'Energy': 'Energi', 'Gate Key': 'Portnøgle',
+            'Lamp': 'Lampe', 'Hull': 'Skrog', 'Energy': 'Energi', 'Gate Key': 'Portnøgle', 'TNT': 'Dynamit',
             'Lava': 'Lava', 'Acid': 'Syre', 'Water': 'Vand',
             'Lava Flow': 'Lavastrøm', 'Ash': 'Aske', 'Magma Rock': 'Magmasten', 'Ancient Ruins': 'Oldtidsruiner',
             'Volcano': 'Vulkan', 'Fire Cave': 'Ildhule',
@@ -5704,10 +5727,18 @@ ${waveConsts}
         function fireCombat() {
             if (flying) return;
             if (!weaponDef) return;
+            if (weaponDef.id === 'detonator') { detonateAllArmed(); triggerCombatAnim(); return; }
             if (isSwordEquipped() && !canStartSwordSwing()) return;
             if (isLaserRifle() && !canStartLaserFire()) return;
             const t = pickTarget();
             const hasBlock = !!(t && getBlock(t.x, t.y, t.z));
+            // shoot a placed TNT block to light its fuse (~1.5s) instead of dealing damage
+            if (hasBlock && getBlock(t.x, t.y, t.z) === TNT_ID) {
+                igniteTnt(t.x, t.y, t.z, 1.5);
+                triggerCombatAnim();
+                if (weaponDef.ranged) { playSfx('shoot'); if (firstPerson) spawnRangedShotVfxAt(false); }
+                return;
+            }
             triggerCombatAnim();
             // damage a creature under the crosshair within weapon reach (floored so melee connects)
             const cre = pickCombatCreature(Math.max(currentAimReach(), 3.2));
@@ -6836,6 +6867,10 @@ ${waveConsts}
             }
             ownedWeapons.add(start);
             ownedWeapons.add(cfg.weapon | 0);
+            // Remote Detonator is always available (free-equip, like the other tools) so
+            // the player can set off placed TNT from the weapon drawer.
+            const det = defs.findIndex((w) => w.id === 'detonator');
+            if (det >= 0) ownedWeapons.add(det);
             // Pickaxe is retired in Asteroid mode — never keep it owned.
             const px = defs.findIndex((w) => w.id === 'pickaxe');
             if (px >= 0) ownedWeapons.delete(px);
@@ -9966,6 +10001,175 @@ ${waveConsts}
           if(isNew){ updateJournalHud(); if(g.showMessage) g.showMessage('Creature discovered: '+sp.name, 1800); }
         }
 
+        // ===================== TNT / explosives =====================
+        // Placed TNT is just block id 45 in the grid (cells carry no per-instance state),
+        // so we track live charges in a Set and keep fuse state in a side Map. The primed
+        // "flash" is a separate overlay mesh, so the chunk mesher is never touched.
+        const TNT_ID = 45;
+        const FLUID_IDS = new Set([38, 39, 40, 42]);    // lava, acid, water, lava flow — spared by blasts
+        const tntBlocks = new Set();                    // "x,y,z" (voxel coords) of placed TNT
+        const primedTnt = new Map();                    // "x,y,z" -> {x,y,z,t,overlay}
+        const blastFlashes = [];                        // {m,t,life,r} expanding additive fireballs
+        let camShake = 0;                               // screen-shake magnitude, decayed in updateCamera
+        const _tntKey = (x,y,z) => x + ',' + y + ',' + z;
+
+        // A blast never removes liquids or explicitly-unminable blocks (lava lakes and
+        // bedrock-like props survive); every other solid is fair game.
+        function blastProof(id){
+          if(id===0 || FLUID_IDS.has(id)) return true;
+          const b = blockById(id);
+          return !!(b && b.tags && (b.tags.indexOf('unminable')>=0 || b.tags.indexOf('liquid')>=0));
+        }
+
+        // Track placed/removed TNT so the Remote Detonator and lava-ignition know where the
+        // charges are. Called from setBlockEvent on every world edit.
+        function registerTntBlock(x,y,z,id){
+          const k=_tntKey(x,y,z);
+          if(id===TNT_ID){ tntBlocks.add(k); return; }
+          if(tntBlocks.has(k)){
+            tntBlocks.delete(k);
+            const pr=primedTnt.get(k);
+            if(pr){ if(pr.overlay) scene.remove(pr.overlay); primedTnt.delete(k); }
+          }
+        }
+
+        // Light a placed TNT's fuse: spawn a white flash overlay that pulses for `fuse`
+        // seconds, then explodes (updateTnt drives the countdown). No-op if the cell isn't
+        // TNT or is already primed (stops a chain reaction re-lighting the same block).
+        function igniteTnt(x,y,z,fuse){
+          if(getBlock(x,y,z)!==TNT_ID) return;
+          const k=_tntKey(x,y,z);
+          if(primedTnt.has(k)) return;
+          tntBlocks.add(k);
+          const m=new THREE.Mesh(
+            new THREE.BoxGeometry(1.08,1.08,1.08),
+            new THREE.MeshBasicMaterial({color:0xffffff, transparent:true, opacity:0.0,
+              blending:THREE.AdditiveBlending, depthWrite:false}));
+          m.position.set(x+0.5+WORLD_OFFSET.x, y+0.5+WORLD_OFFSET.y, z+0.5+WORLD_OFFSET.z);
+          scene.add(m);
+          primedTnt.set(k, {x,y,z, t:(fuse||1.5), overlay:m});
+          playSfx('fuse');
+        }
+
+        // The blast. Removes every non-liquid solid within `radius` of the voxel center,
+        // salvages a little of it, chain-lights any TNT it touches, launches the player
+        // (no damage — kid-forgiving) and splash-damages creatures. Writes are batched
+        // like floodWaterAfterMine: one profile save + one mesh rebuild per column.
+        function explodeAt(cx,cy,cz,radius){
+          radius = radius || 4;
+          const rc = Math.round(radius), r2 = radius*radius;
+          const AP = getProfileApi();
+          const p = (AP && !_suppressProfileBlockSave) ? AP.load() : null;
+          const cols = new Set();
+          const addCol=(x,z)=> cols.add(_fdiv(x,CH)+','+_fdiv(z,CH));
+          let salvage = 0; const SALVAGE_CAP = 12;
+          for(let dx=-rc; dx<=rc; dx++) for(let dy=-rc; dy<=rc; dy++) for(let dz=-rc; dz<=rc; dz++){
+            if(dx*dx+dy*dy+dz*dz > r2) continue;
+            const x=cx+dx, y=cy+dy, z=cz+dz;
+            if(y<0 || y>=H) continue;
+            const id=getBlock(x,y,z);
+            if(id===0) continue;
+            const isCenter = (dx===0 && dy===0 && dz===0);
+            if(id===TNT_ID && !isCenter){ igniteTnt(x,y,z, 0.06+Math.random()*0.12); continue; }  // chain
+            if(blastProof(id)) continue;
+            if(id!==TNT_ID && salvage<SALVAGE_CAP && Math.random()<0.3){ addToInventory(id,1); salvage++; }
+            const ccx=_fdiv(x,CH), ccz=_fdiv(z,CH);
+            const c=ensureCol(ccx,ccz);
+            c[cIdx(x-ccx*CH, y, z-ccz*CH)] = 0;
+            recordEdit(x,y,z,0);
+            if(p) AP.upsertBlockEdit(p, pmod(x), y, pmod(z), 0);
+            addCol(x,z);
+            const lx=_mod(x,CH), lz=_mod(z,CH);
+            if(lx===0) addCol(x-1,z); if(lx===CH-1) addCol(x+1,z);
+            if(lz===0) addCol(x,z-1); if(lz===CH-1) addCol(x,z+1);
+          }
+          if(p) AP.save(p);
+          for(const ck of cols){ const a=ck.split(','); buildColumnMesh(+a[0], +a[1]); }
+
+          // ---- FX (render space = voxel + WORLD_OFFSET) ----
+          const wx=cx+0.5+WORLD_OFFSET.x, wy=cy+0.5+WORLD_OFFSET.y, wz=cz+0.5+WORLD_OFFSET.z;
+          const flash=new THREE.Mesh(
+            new THREE.SphereGeometry(1,10,10),
+            new THREE.MeshBasicMaterial({color:0xffca6a, transparent:true, opacity:0.9,
+              blending:THREE.AdditiveBlending, depthWrite:false}));
+          flash.position.set(wx,wy,wz); flash.scale.setScalar(0.6); scene.add(flash);
+          blastFlashes.push({m:flash, t:0, life:0.45, r:radius});
+          for(let i=0;i<5;i++) burst(wx+(Math.random()-.5)*radius, wy+(Math.random()-.5)*radius, wz+(Math.random()-.5)*radius, i%2?0xff8a2c:0x2a2a2a);
+          if(_AC) for(let k=0;k<22;k++) _AC.spark(
+            new THREE.Vector3(wx,wy,wz), k%3?0xffb347:0xff5a1e,
+            new THREE.Vector3((Math.random()-.5)*8, Math.random()*7, (Math.random()-.5)*8), 0.6+Math.random()*0.4, 0.14);
+          playSfx('explosion');
+          camShake = Math.min(0.6, camShake + 0.42);
+
+          // player: harmless launch (deliberately no applyPlayerDamage)
+          const pdx=player.pos.x-wx, pdy=player.pos.y-wy, pdz=player.pos.z-wz;
+          const pd=Math.hypot(pdx,pdy,pdz);
+          if(pd < radius+2){
+            const inv=1/(pd||1), force=(1 - pd/(radius+2))*12;
+            player.knock.x += pdx*inv*force; player.knock.z += pdz*inv*force;
+            player.vel.y = Math.max(player.vel.y, 4 + force*0.5);
+          }
+          // creatures: splash damage + knockback, falling off with distance
+          for(let i=critters.length-1; i>=0; i--){
+            const cr=critters[i]; if(!cr || !cr.pos) continue;
+            const ddx=cr.pos.x-wx, ddy=cr.pos.y-wy, ddz=cr.pos.z-wz;
+            const cd=Math.hypot(ddx,ddy,ddz);
+            if(cd < radius+1.5){
+              const inv=1/(Math.hypot(ddx,ddz)||1);
+              const dmg=Math.round((1 - cd/(radius+1.5))*60) + 10;
+              damageCreature(cr, dmg, ddx*inv, ddz*inv);
+            }
+          }
+        }
+
+        // Remote Detonator: light every placed TNT, staggered so a field of charges
+        // ripples instead of firing in one frame.
+        function detonateAllArmed(){
+          let n=0;
+          for(const k of [...tntBlocks]){
+            const a=k.split(','); const x=+a[0], y=+a[1], z=+a[2];
+            if(getBlock(x,y,z)!==TNT_ID){ tntBlocks.delete(k); continue; }
+            igniteTnt(x,y,z, 0.05 + (n++)*0.03);
+          }
+          if(n){ playSfx('shoot'); if(g.showMessage) g.showMessage('💥 Detonator armed — '+n+' charge'+(n>1?'s':'')+'!', 1100); }
+          else if(g.showMessage) g.showMessage('No TNT placed to detonate.', 1200);
+        }
+
+        // Per-frame: pulse primed overlays, count fuses down → explode; step flash spheres.
+        function updateTnt(dt){
+          for(const [k,pr] of primedTnt){
+            pr.t -= dt;
+            if(pr.overlay){
+              pr.overlay.material.opacity = 0.35 + 0.4*Math.abs(Math.sin(pr.t*18));   // flashes faster near 0
+              pr.overlay.scale.setScalar(1 + (1-Math.max(0,Math.min(1,pr.t/1.5)))*0.25);
+            }
+            if(pr.t<=0){
+              if(pr.overlay) scene.remove(pr.overlay);
+              primedTnt.delete(k); tntBlocks.delete(k);
+              explodeAt(pr.x, pr.y, pr.z, 4);
+            }
+          }
+          for(let i=blastFlashes.length-1;i>=0;i--){
+            const f=blastFlashes[i]; f.t+=dt;
+            const kf=f.t/f.life;
+            if(kf>=1){ scene.remove(f.m); blastFlashes.splice(i,1); continue; }
+            f.m.scale.setScalar(0.6 + kf*f.r*1.4);
+            f.m.material.opacity = 0.9*(1-kf);
+          }
+        }
+
+        // Auto-ignite: any placed TNT touching lava lights on its own. Cheap — tntBlocks
+        // is small — so it runs once per rendered frame.
+        function checkLavaIgnition(){
+          if(!tntBlocks.size) return;
+          const NB=[[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
+          for(const k of tntBlocks){
+            if(primedTnt.has(k)) continue;
+            const a=k.split(','); const x=+a[0], y=+a[1], z=+a[2];
+            for(const d of NB){ const b=getBlock(x+d[0],y+d[1],z+d[2]); if(b===38||b===42){ igniteTnt(x,y,z,1.0); break; } }
+          }
+        }
+
         function tick(dt) {
             // The fixed-step accumulator can call tick() several times inside ONE
             // rendered frame when frames run long. Heavy / idempotent per-frame work
@@ -10127,6 +10331,7 @@ ${waveConsts}
             }  // end on-foot update (skipped while piloting a ship)
             stepParts(dt);
             stepShotVfx(dt);
+            updateTnt(dt);            // primed-TNT fuses + explosions + fireball flashes
             updateCritters(dt);
             updateDrone(dt);          // Hero companion trails the player
             updateStarGate(dt);       // Ancient gate glow + proximity hint
@@ -10139,6 +10344,7 @@ ${waveConsts}
                 updateTrainHud();     // training-field live weapon readout
                 updateHUD();
                 updateWaypointHud();  // off-screen beacon guiding to a map waypoint
+                checkLavaIgnition();  // placed TNT touching lava lights itself
             }
             updateCamera(dt);
             setUnderwaterTint(eyeInWater());
@@ -10226,6 +10432,14 @@ ${waveConsts}
                 camera.lookAt(_tpLook);
                 if (tpTunerEl && !tpTunerEl.hidden) syncTpTunerInputs();
             }
+            // explosion screen-shake: jitter the final camera position, then decay
+            if (camShake > 0.0008) {
+                const s = camShake;
+                camera.position.x += (Math.random() - .5) * s;
+                camera.position.y += (Math.random() - .5) * s;
+                camera.position.z += (Math.random() - .5) * s;
+                camShake *= Math.exp(-9 * dt);
+            } else camShake = 0;
         }
 
         function enter() {

@@ -49,6 +49,9 @@ const WEAPONS = [
   { id:'railgun', name:'Railgun',       twoHanded:true,  ranged:true,
     desc:'Magnetic accelerator with a visible capacitor bank. Punches through anything.',
     stats:{Damage:10, Speed:2, Range:10} },
+  { id:'detonator', name:'Remote Detonator', twoHanded:false, ranged:false,
+    desc:'A handheld trigger. Fire to set off every TNT charge you have placed.',
+    stats:{Damage:0, Speed:6, Range:0} },
 ];
 const weaponIdx = id => WEAPONS.findIndex(w=>w.id===id);
 const BODY_TYPES = ['Male','Female'];
@@ -504,6 +507,25 @@ function buildWeapon(def, accent){
       prevF=f;
     };
     muzzleZ = {y:.08,z:.42}; beamColor = 0x66e8ff; flashColor = 0x9deeff;
+
+  } else if(type==='detonator'){
+    const body = box(.09,.11,.05,dark); body.position.set(0,.06,0); g.add(body);
+    const face = box(.075,.095,.012,std(0x3a3f48)); face.position.set(0,.06,.03); g.add(face);
+    const gripPad = box(.08,.05,.055,grip); gripPad.position.set(0,0,0); g.add(gripPad);
+    const btnM = glow(0xff4a3a);
+    const btn = box(.035,.035,.03,btnM); btn.position.set(0,.09,.045); g.add(btn);
+    const btnRing = box(.055,.055,.012,acc); btnRing.position.set(0,.09,.036); g.add(btnRing);
+    const ledM = glow(0x6fe3ff);
+    const led = box(.014,.014,.014,ledM); led.position.set(-.022,.03,.045); g.add(led);
+    const antenna = box(.012,.16,.012,metal); antenna.position.set(.035,.19,0); g.add(antenna);
+    const tip = box(.02,.02,.02,btnM); tip.position.set(.035,.28,0); g.add(tip);
+    g.userData.animate = (t,f)=>{
+      ledM.color.setHex((t*2)%1 < .5 ? 0x6fe3ff : 0x14303a);   // status LED blink
+      const bs = f>0? .55 : 1;                                  // plunger presses down on fire
+      btn.scale.set(1,1,bs); btn.position.z = .045 - (1-bs)*.015;
+      btnM.color.setHex(f>0? 0xffd0a0 : 0xff4a3a);
+    };
+    socket.position.set(0,.02,0);
   }
 
   // muzzle point + flash + (optional) beam for ranged weapons

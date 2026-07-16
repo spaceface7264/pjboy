@@ -38,6 +38,13 @@
             desc: 'Craft a Lamp at the refinery (Tab → Refinery) — your first base upgrade.',
             descDa: 'Byg en lampe i raffinaderiet (Tab → Refinery) — din første base-opgradering.',
             goal: { type: 'craft', itemId: 34, count: 1 }
+        },
+        {
+            id: 'craft_tnt',
+            title: 'Pack a charge', titleDa: 'Lav en sprængladning',
+            desc: 'Craft TNT at the refinery, then blow it with the Remote Detonator.',
+            descDa: 'Lav TNT i raffinaderiet, og spræng den så med fjerndetonatoren.',
+            goal: { type: 'craft', itemId: 45, count: 1 }
         }
     ];
 
@@ -104,6 +111,16 @@
             output: 41,
             outputCount: 1,
             inputs: [{ id: 10, count: 3 }, { id: 7, count: 1 }]
+        },
+        {
+            // Carbon fuel packed with silica — a stand-in for real TNT chemistry. Place
+            // the charge, then set it off with the Remote Detonator (or shoot it).
+            id: 'pack_tnt',
+            name: 'Pack TNT',
+            desc: '3× Carbon + 2× Sand → 2× TNT',
+            output: 45,
+            outputCount: 2,
+            inputs: [{ id: 27, count: 3 }, { id: 4, count: 2 }]
         }
     ];
 

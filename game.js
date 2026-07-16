@@ -269,6 +269,16 @@ class AudioBus {
                 this._noise({ dur: 0.06, gain: 0.11, lowpass: 780, highpass: 180 });
                 this._tone({ type: 'square', freq: 145, freqEnd: 88, dur: 0.07, gain: 0.09 });
                 break;
+            case 'fuse': // Asteroid TNT fuse lit — soft sizzling tick
+                this._noise({ dur: 0.06, gain: 0.06, lowpass: 6000, highpass: 2600 });
+                this._tone({ type: 'sine', freq: 1200, freqEnd: 1800, dur: 0.05, gain: 0.04 });
+                break;
+            case 'explosion': // Asteroid TNT blast — deep boom + rumble + crack
+                this._tone({ type: 'sine', freq: 220, freqEnd: 38, dur: 0.55, gain: 0.5 });
+                this._tone({ type: 'square', freq: 90, freqEnd: 28, dur: 0.38, gain: 0.22 });
+                this._noise({ dur: 0.5, gain: 0.5, lowpass: 900 });
+                this._noise({ dur: 0.09, gain: 0.3, lowpass: 4200, highpass: 1000 }); // initial crack
+                break;
         }
     }
 
