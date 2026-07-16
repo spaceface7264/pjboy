@@ -9043,7 +9043,7 @@ ${waveConsts}
         const CRIT_FLEE = 7;             // shy critters flee inside this radius
         const critters = [];
         const creatureGroups = [];       // groups for the scan raycast
-        let _critTimer = 0, _chirpTimer = 3;
+        let _critTimer = 0;
 
         // World height to stand on at a voxel column: top non-water solid, or null.
         function surfaceTopVox(vx,vz){
@@ -9886,15 +9886,6 @@ ${waveConsts}
             if(critters.length<CRIT_CAP) spawnOneCritter();
           }
           maybeSpawnHostile(dt);
-          // occasional ambient call from a nearby calm critter
-          _chirpTimer-=dt;
-          if(_chirpTimer<=0){
-            _chirpTimer=3+Math.random()*5;
-            for(const cr of critters){
-              if(cr.sp.shy) continue;
-              if(Math.hypot(cr.pos.x-player.pos.x, cr.pos.z-player.pos.z)<22){ playSfx('critterChirp'); break; }
-            }
-          }
           for(let i=critters.length-1;i>=0;i--){
             const cr=critters[i];
             if(cr.training){                          // pinned test dummy: stay put, face player, no AI/despawn
