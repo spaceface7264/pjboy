@@ -10013,6 +10013,36 @@ ${waveConsts}
         const smokePuffs = [];                          // {m,t,life,vy,grow} rising grey smoke
         const blastDebris = [];                         // {m,v,t,life,spin} tumbling block chunks
         const _dbgGeo = new THREE.BoxGeometry(1,1,1);   // shared unit cube for debris (scaled per chunk)
+
+        // Blast persistence is coalesced across a whole detonation. A chain (or a Remote
+        // Detonator field) fires many explodeAt calls within a few frames; load+saving the
+        // full profile and re-rendering the hotbar PER explosion is what makes mass
+        // detonations lag. Instead each explosion buffers its cell edits + salvage, and a
+        // short debounce commits everything with ONE profile load+save and one inventory
+        // pass. Cells are already written to the live grid immediately, so gameplay and
+        // visuals don't wait on this.
+        let _blastEditBuf = [];
+        const _blastLootBuf = new Map();
+        let _blastCommitT = null;
+        function scheduleBlastCommit(){
+          if(_blastCommitT) return;                     // first explosion of a burst arms it
+          _blastCommitT = setTimeout(commitBlast, 220);
+        }
+        function commitBlast(){
+          _blastCommitT = null;
+          const AP = getProfileApi();
+          if(AP && !_suppressProfileBlockSave && _blastEditBuf.length){
+            const p = AP.load();
+            if(AP.upsertBlockEdits) AP.upsertBlockEdits(p, _blastEditBuf);
+            else for(const e of _blastEditBuf) AP.upsertBlockEdit(p, e.x, e.y, e.z, e.id);
+            AP.save(p);
+          }
+          _blastEditBuf = [];
+          if(_blastLootBuf.size){                        // one addToInventory per block type total
+            for(const [id,n] of _blastLootBuf) addToInventory(id, n);
+            _blastLootBuf.clear();
+          }
+        }
         let camShake = 0;                               // screen-shake magnitude, decayed in updateCamera
         const _tntKey = (x,y,z) => x + ',' + y + ',' + z;
 
@@ -10063,12 +10093,9 @@ ${waveConsts}
         function explodeAt(cx,cy,cz,radius){
           radius = radius || 4;
           const rc = Math.round(radius), r2 = radius*radius;
-          const AP = getProfileApi();
-          const p = (AP && !_suppressProfileBlockSave) ? AP.load() : null;
           const cols = new Set();
           const addCol=(x,z)=> cols.add(_fdiv(x,CH)+','+_fdiv(z,CH));
-          const editList = p ? [] : null;             // batched profile edits (one upsert pass)
-          const loot = new Map();                     // block id -> count mined this blast
+          const loot = new Map();                     // block id -> count mined this blast (for debris color + salvage)
           for(let dx=-rc; dx<=rc; dx++) for(let dy=-rc; dy<=rc; dy++) for(let dz=-rc; dz<=rc; dz++){
             if(dx*dx+dy*dy+dz*dz > r2) continue;
             const x=cx+dx, y=cy+dy, z=cz+dz;
@@ -10083,23 +10110,20 @@ ${waveConsts}
             const c=ensureCol(ccx,ccz);
             c[cIdx(x-ccx*CH, y, z-ccz*CH)] = 0;
             recordEdit(x,y,z,0);
-            if(editList) editList.push({x:pmod(x), y, z:pmod(z), id:0});
+            _blastEditBuf.push({x:pmod(x), y, z:pmod(z), id:0});   // committed together after the burst
             addCol(x,z);
             const lx=_mod(x,CH), lz=_mod(z,CH);
             if(lx===0) addCol(x-1,z); if(lx===CH-1) addCol(x+1,z);
             if(lz===0) addCol(x,z-1); if(lz===CH-1) addCol(x,z+1);
-          }
-          if(p){
-            if(AP.upsertBlockEdits) AP.upsertBlockEdits(p, editList);       // O(n+m) batch
-            else for(const e of editList) AP.upsertBlockEdit(p, e.x, e.y, e.z, e.id);
-            AP.save(p);
           }
           // Remesh through the time-budgeted queue (like floodWaterAfterMine) instead of
           // synchronously — a blast can touch ~9 full columns, and rebuilding them all in
           // one frame is the explosion's main lag spike. Queuing spreads the cost across
           // frames and dedups columns hit by chained blasts.
           for(const ck of cols){ const a=ck.split(','); queueRebuildCol(+a[0], +a[1]); }
-          for(const [id,n] of loot) addToInventory(id, n);   // bank the haul, one call per block type
+          // Buffer the haul; committed once for the whole burst (see commitBlast).
+          for(const [id,n] of loot) _blastLootBuf.set(id, (_blastLootBuf.get(id)||0) + n);
+          scheduleBlastCommit();
 
           // ---- FX (render space = voxel + WORLD_OFFSET) ----
           const wx=cx+0.5+WORLD_OFFSET.x, wy=cy+0.5+WORLD_OFFSET.y, wz=cz+0.5+WORLD_OFFSET.z;
@@ -10198,7 +10222,7 @@ ${waveConsts}
           for(let i=blastFlashes.length-1;i>=0;i--){
             const f=blastFlashes[i]; f.t+=dt;
             const kf=f.t/f.life;
-            if(kf>=1){ scene.remove(f.m); blastFlashes.splice(i,1); continue; }
+            if(kf>=1){ scene.remove(f.m); f.m.geometry.dispose(); f.m.material.dispose(); blastFlashes.splice(i,1); continue; }
             f.m.scale.setScalar(0.6 + kf*f.r*1.4);
             f.m.material.opacity = 0.9*(1-kf);
           }
@@ -10825,6 +10849,8 @@ ${waveConsts}
 
         function exit() {
             if (!_active) return;
+            if (_blastCommitT) { clearTimeout(_blastCommitT); _blastCommitT = null; }
+            commitBlast();                              // persist any pending blast edits + salvage
             if (_profileFlushTimer) {
                 clearTimeout(_profileFlushTimer);
                 _profileFlushTimer = null;
