@@ -10010,6 +10010,9 @@ ${waveConsts}
         const tntBlocks = new Set();                    // "x,y,z" (voxel coords) of placed TNT
         const primedTnt = new Map();                    // "x,y,z" -> {x,y,z,t,overlay}
         const blastFlashes = [];                        // {m,t,life,r} expanding additive fireballs
+        const smokePuffs = [];                          // {m,t,life,vy,grow} rising grey smoke
+        const blastDebris = [];                         // {m,v,t,life,spin} tumbling block chunks
+        const _dbgGeo = new THREE.BoxGeometry(1,1,1);   // shared unit cube for debris (scaled per chunk)
         let camShake = 0;                               // screen-shake magnitude, decayed in updateCamera
         const _tntKey = (x,y,z) => x + ',' + y + ',' + z;
 
@@ -10101,6 +10104,35 @@ ${waveConsts}
           if(_AC) for(let k=0;k<22;k++) _AC.spark(
             new THREE.Vector3(wx,wy,wz), k%3?0xffb347:0xff5a1e,
             new THREE.Vector3((Math.random()-.5)*8, Math.random()*7, (Math.random()-.5)*8), 0.6+Math.random()*0.4, 0.14);
+
+          // rising smoke: soft grey puffs that balloon and drift up as they fade
+          const smokeN = Math.min(18, 8 + Math.round(radius*2));
+          for(let i=0;i<smokeN;i++){
+            const shade = 0x2a2a2e + ((Math.random()*0x18)|0)*0x010101;
+            const m=new THREE.Mesh(_dbgGeo, new THREE.MeshBasicMaterial({color:shade, transparent:true, opacity:0.55, depthWrite:false}));
+            const s0=0.7+Math.random()*0.9; m.scale.setScalar(s0);
+            m.position.set(wx+(Math.random()-.5)*radius*1.1, wy+(Math.random()-.2)*radius*0.7, wz+(Math.random()-.5)*radius*1.1);
+            m.rotation.set(Math.random()*3, Math.random()*3, Math.random()*3);
+            scene.add(m);
+            smokePuffs.push({m, t:0, life:0.9+Math.random()*0.8, vy:1.1+Math.random()*1.4, grow:1.6+Math.random()*1.8, s0});
+          }
+          // chunky debris: cubes flung outward, colored by whatever was blown up (tumbling, gravity)
+          const lootIds = [...loot.keys()];
+          const debrisN = Math.min(28, 12 + Math.round(radius*3));
+          for(let i=0;i<debrisN;i++){
+            const bid = lootIds.length ? lootIds[(Math.random()*lootIds.length)|0] : 0;
+            const col = bid ? blockColor(bid) : 0x6a6660;
+            const m=new THREE.Mesh(_dbgGeo, new THREE.MeshBasicMaterial({color:col}));
+            const s=0.12+Math.random()*0.22; m.scale.setScalar(s);
+            m.position.set(wx+(Math.random()-.5)*1.4, wy+(Math.random()-.3)*1.4, wz+(Math.random()-.5)*1.4);
+            m.rotation.set(Math.random()*3,Math.random()*3,Math.random()*3);
+            scene.add(m);
+            const ang=Math.random()*Math.PI*2, sp=4+Math.random()*7;
+            blastDebris.push({ m,
+              v:new THREE.Vector3(Math.cos(ang)*sp, 5+Math.random()*6, Math.sin(ang)*sp),
+              spin:new THREE.Vector3((Math.random()-.5)*12,(Math.random()-.5)*12,(Math.random()-.5)*12),
+              t:0, life:1.1+Math.random()*0.7 });
+          }
           playSfx('explosion');
           camShake = Math.min(0.6, camShake + 0.42);
 
@@ -10158,6 +10190,25 @@ ${waveConsts}
             if(kf>=1){ scene.remove(f.m); blastFlashes.splice(i,1); continue; }
             f.m.scale.setScalar(0.6 + kf*f.r*1.4);
             f.m.material.opacity = 0.9*(1-kf);
+          }
+          for(let i=smokePuffs.length-1;i>=0;i--){
+            const s=smokePuffs[i]; s.t+=dt;
+            const ks=s.t/s.life;
+            if(ks>=1){ scene.remove(s.m); s.m.material.dispose(); smokePuffs.splice(i,1); continue; }
+            s.vy *= (1 - 0.6*dt);                          // drag as it rises
+            s.m.position.y += s.vy*dt;
+            s.m.scale.setScalar(s.s0 + ks*s.grow);          // balloons outward
+            s.m.rotation.y += dt*0.4;
+            s.m.material.opacity = 0.55*(1-ks);
+          }
+          for(let i=blastDebris.length-1;i>=0;i--){
+            const d=blastDebris[i]; d.t+=dt;
+            if(d.t>=d.life){ scene.remove(d.m); d.m.material.dispose(); blastDebris.splice(i,1); continue; }
+            d.v.y -= 16*dt;                                 // gravity
+            d.m.position.addScaledVector(d.v, dt);
+            d.m.rotation.x += d.spin.x*dt; d.m.rotation.y += d.spin.y*dt; d.m.rotation.z += d.spin.z*dt;
+            const kd=d.t/d.life;
+            if(kd>0.7){ d.m.material.transparent=true; d.m.material.opacity=1-(kd-0.7)/0.3; }  // fade out at the end
           }
         }
 
