@@ -7226,6 +7226,7 @@ ${waveConsts}
             Crafted: { icon: '🔧', title: 'Engineer' }, Hazards: { icon: '☢️', title: 'Survivor' }
         };
         let codexView = null;     // null = overview, else {kind:'block',id} | {kind:'gear',idx}
+        let _drawerRenderKey = null;   // last rendered view — used to preserve scroll across same-view re-renders
         let codexSection = 'Blocks';   // 'Blocks' | 'Gear'
 
         // Codex overview: a Blocks/Gear toggle, then the chosen section.
@@ -7789,54 +7790,65 @@ ${waveConsts}
             if (drawerOpen) renderDrawer();
         }
         // One upgrade card. opts.max = top tier (default 3); opts.tierLabel formats the tier.
-        function appendUpgradeCard(body, label, curTier, cost, onUp, opts) {
+        // One upgrade card, styled like the crafting cards (thumbnail · name+tier · cost ·
+        // button). opts.thumbIdx → 3D weapon thumbnail; opts.icon → emoji badge (Drone/Scanner).
+        function appendUpgradeCard(container, label, curTier, cost, onUp, opts) {
             opts = opts || {};
             const maxT = opts.max || 3;
             const tierLabel = opts.tierLabel || ((t) => TIER_NAME[t]);
             const maxed = curTier >= maxT;
             const ok = !maxed && canAfford(cost);
             const card = document.createElement('div');
-            card.style.cssText = 'display:flex;align-items:center;gap:12px;padding:10px 12px;margin-bottom:8px;border-radius:10px;background:rgba(70,52,110,0.30);border:1px solid rgba(150,120,230,0.4);';
-            const info = document.createElement('div');
-            info.style.cssText = 'flex:1 1 auto;min-width:0;';
+            card.className = 'vx-craft-card' + (ok ? ' craftable' : '');
+            if (typeof opts.thumbIdx === 'number') {
+                const wdef = weaponList()[opts.thumbIdx];
+                card.appendChild(createThumbWrap(weaponTint(wdef), gear3DThumb(opts.thumbIdx), label));
+            } else {
+                const ic = document.createElement('div');
+                ic.className = 'vx-upgrade-ic';
+                ic.textContent = opts.icon || '⬆';
+                card.appendChild(ic);
+            }
             const title = document.createElement('div');
-            title.style.cssText = 'font-weight:700;color:#e8dcff;';
+            title.className = 'vx-craft-name';
             title.textContent = label + ' · ' + tierLabel(curTier);
-            info.appendChild(title);
+            card.appendChild(title);
             const sub = document.createElement('div');
-            sub.style.cssText = 'font-size:12px;margin-top:3px;';
+            sub.className = 'vx-craft-cost';
             sub.innerHTML = maxed ? '<span style="color:#c0b3ff">Fully upgraded</span>'
                 : cost.map((c) => { const have = getBackpackCount(c.id), col = have >= c.count ? '#9be89b' : '#ff9b9b';
                     return '<span style="color:' + col + '">' + refineryMatName(c.id) + ' ' + have + '/' + c.count + '</span>'; })
-                    .join('<span style="opacity:0.5"> · </span>');
-            info.appendChild(sub);
-            card.appendChild(info);
+                    .join('<br>');
+            card.appendChild(sub);
             const btn = document.createElement('button');
             btn.type = 'button';
             btn.className = 'vx-btn' + (ok ? ' vx-btn-on' : '');
             btn.textContent = maxed ? 'Max' : ('→ ' + tierLabel(curTier + 1));
             btn.disabled = !ok;
-            btn.style.cssText = 'flex:0 0 auto;' + (ok ? '' : 'opacity:0.45;cursor:not-allowed;');
+            if (!ok) btn.style.cssText = 'opacity:0.45;cursor:not-allowed;';
             if (ok) btn.addEventListener('click', onUp);
             card.appendChild(btn);
-            body.appendChild(card);
+            container.appendChild(card);
         }
         function renderUpgradesSection(body) {
             const head = document.createElement('div');
             head.style.cssText = 'font-weight:700;color:#c0b3ff;letter-spacing:.06em;margin:14px 0 8px;';
             head.textContent = '⬆ UPGRADES';
             body.appendChild(head);
+            const grid = document.createElement('div');
+            grid.className = 'vx-craft-grid';
             // owned weapons/tools
             [...ownedWeapons].sort((a, b) => a - b).forEach((idx) => {
                 const w = weaponList()[idx]; if (!w || w.id === 'pickaxe') return;
                 const cur = weaponTierOf(w.id);
-                appendUpgradeCard(body, w.name, cur, UPGRADE_COST[cur + 1] || [], () => upgradeWeapon(w.id), { max: 5 });
+                appendUpgradeCard(grid, w.name, cur, UPGRADE_COST[cur + 1] || [], () => upgradeWeapon(w.id), { max: 5, thumbIdx: idx });
             });
             // the Drone companion
-            appendUpgradeCard(body, 'Drone companion', _droneTierCache, DRONE_COST[_droneTierCache + 1] || [], upgradeDrone);
+            appendUpgradeCard(grid, 'Drone companion', _droneTierCache, DRONE_COST[_droneTierCache + 1] || [], upgradeDrone, { icon: '🛰' });
             // scanner range (10 → 50 m, +10 m per tier)
-            appendUpgradeCard(body, 'Scanner range', _scannerTierCache, SCANNER_COST[_scannerTierCache + 1] || [], upgradeScanner,
-                { max: 5, tierLabel: (t) => (t * 10) + ' m' });
+            appendUpgradeCard(grid, 'Scanner range', _scannerTierCache, SCANNER_COST[_scannerTierCache + 1] || [], upgradeScanner,
+                { max: 5, tierLabel: (t) => (t * 10) + ' m', icon: '📡' });
+            body.appendChild(grid);
         }
         // ---- Settings tab (Tab/M → Settings) ----
         function _settingsRow(body, label, sub, controlEl) {
@@ -7927,40 +7939,37 @@ ${waveConsts}
             intro.style.cssText = 'text-align:left;opacity:0.8;margin-bottom:8px;';
             intro.textContent = 'Smelt and assemble materials into base upgrades.';
             body.appendChild(intro);
+            const grid = document.createElement('div');
+            grid.className = 'vx-craft-grid';
             recipes.forEach((r) => {
                 const avail = AP.craftAvailability(r, backpack);
+                const outB = blockById(r.output);
                 const card = document.createElement('div');
-                card.style.cssText = 'display:flex;align-items:center;gap:12px;padding:10px 12px;margin-bottom:8px;border-radius:10px;background:rgba(36,100,118,0.30);border:1px solid rgba(90,200,230,0.35);';
-                const img = document.createElement('img');
-                img.src = thumbUrl(r.output);
-                img.width = img.height = 40;
-                img.style.cssText = 'image-rendering:pixelated;border-radius:6px;flex:0 0 auto;';
-                card.appendChild(img);
-                const info = document.createElement('div');
-                info.style.cssText = 'flex:1 1 auto;min-width:0;';
+                card.className = 'vx-craft-card' + (avail.ok ? ' craftable' : '');
+                if (outB) card.appendChild(createThumbWrap(blockTint(outB.cat), block3DThumb(outB), outB.name));
                 const title = document.createElement('div');
-                title.style.cssText = 'font-weight:700;color:#dff6ff;';
+                title.className = 'vx-craft-name';
                 title.textContent = r.name + ((r.outputCount || 1) > 1 ? ' ×' + r.outputCount : '');
-                info.appendChild(title);
+                card.appendChild(title);
                 const cost = document.createElement('div');
-                cost.style.cssText = 'font-size:12px;margin-top:3px;';
+                cost.className = 'vx-craft-cost';
                 cost.innerHTML = r.inputs.map((inp) => {
                     const have = getBackpackCount(inp.id);
                     const col = have >= inp.count ? '#9be89b' : '#ff9b9b';
                     return '<span style="color:' + col + '">' + refineryMatName(inp.id) + ' ' + have + '/' + inp.count + '</span>';
-                }).join('<span style="opacity:0.5"> · </span>');
-                info.appendChild(cost);
-                card.appendChild(info);
+                }).join('<br>');
+                card.appendChild(cost);
                 const btn = document.createElement('button');
                 btn.type = 'button';
                 btn.className = 'vx-btn' + (avail.ok ? ' vx-btn-on' : '');
                 btn.textContent = 'Craft';
                 btn.disabled = !avail.ok;
-                btn.style.cssText = 'flex:0 0 auto;' + (avail.ok ? '' : 'opacity:0.45;cursor:not-allowed;');
+                if (!avail.ok) btn.style.cssText = 'opacity:0.45;cursor:not-allowed;';
                 if (avail.ok) btn.addEventListener('click', () => craftRecipe(r));
                 card.appendChild(btn);
-                body.appendChild(card);
+                grid.appendChild(card);
             });
+            body.appendChild(grid);
             renderUpgradesSection(body);
         }
         function getBackpackCount(id) {
@@ -8657,6 +8666,12 @@ ${waveConsts}
         }
         function renderDrawer() {
             if (!drawerPanelEl) return;
+            // Preserve scroll position when re-rendering the SAME view — crafting/upgrading
+            // rebuilds the whole drawer (via addToInventory), which would otherwise snap the
+            // list back to the top on every click.
+            const renderKey = drawerTab + '|' + (codexView ? JSON.stringify(codexView) : '');
+            const prevBody = drawerPanelEl.querySelector('#voxel-drawer-body');
+            const prevScroll = (prevBody && renderKey === _drawerRenderKey) ? prevBody.scrollTop : 0;
             disposeGearViewer();   // tear down any orbiting preview before the panel is rebuilt
             syncHotbarFromBackpack();
             const ownedOnly = drawerFilter === 'owned';
@@ -8706,6 +8721,8 @@ ${waveConsts}
 
             const body = drawerPanelEl.querySelector('#voxel-drawer-body');
             renderDrawerTabBody(body, ownedOnly);
+            body.scrollTop = prevScroll;          // restore scroll for same-view re-renders
+            _drawerRenderKey = renderKey;
 
             drawerPanelEl.querySelector('[data-vx-close]').addEventListener('click', () => toggleDrawer(false));
             const clearBtn = drawerPanelEl.querySelector('[data-vx-clear-bar]');

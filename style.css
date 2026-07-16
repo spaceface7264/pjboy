@@ -3534,6 +3534,39 @@ body.mode-asteroid {
     grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
     gap: 7px;
 }
+/* Refinery crafting cards — a grid of vertical cards (3D thumb · name · cost · Craft) */
+.vx-craft-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(138px, 1fr));
+    gap: 10px;
+    margin-bottom: 12px;
+}
+.vx-craft-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    border: 2px solid var(--hud-edge);
+    border-radius: 10px;
+    background: var(--hud-bg);
+    padding: 11px 9px;
+    text-align: center;
+    transition: border-color 0.12s, transform 0.12s ease-out;
+}
+.vx-craft-card.craftable { border-color: rgba(90, 200, 230, 0.55); }
+.vx-craft-card.craftable:hover { transform: translateY(-2px); }
+.vx-craft-card .vx-thumb-wrap { width: 52px; height: 52px; }
+.vx-craft-name { font-weight: 700; color: var(--hud-text); font-size: 12px; line-height: 1.2; }
+.vx-craft-cost { font-size: 11px; line-height: 1.5; }
+.vx-craft-card .vx-btn { width: 100%; margin-top: auto; }
+/* Emoji badge for upgrade cards that have no block/gear thumbnail (Drone, Scanner) */
+.vx-upgrade-ic {
+    width: 52px; height: 52px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 26px; border-radius: 10px;
+    background: rgba(70, 52, 110, 0.35);
+    border: 1px solid rgba(150, 120, 230, 0.45);
+}
 .vx-cat-tile {
     border: 2px solid var(--hud-edge);
     border-radius: 9px;
