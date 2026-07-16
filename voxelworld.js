@@ -10052,9 +10052,11 @@ ${waveConsts}
         }
 
         // The blast. Removes every non-liquid solid within `radius` of the voxel center,
-        // salvages a little of it, chain-lights any TNT it touches, launches the player
-        // (no damage — kid-forgiving) and splash-damages creatures. Writes are batched
-        // like floodWaterAfterMine: one profile save + one mesh rebuild per column.
+        // banking 100% of it into the backpack, chain-lights any TNT it touches, launches
+        // the player (no damage — kid-forgiving) and splash-damages creatures. Writes are
+        // batched like floodWaterAfterMine: one profile save + one mesh rebuild per column,
+        // and salvage is tallied then added once per block type (not per cell) so a big
+        // blast doesn't rebuild the hotbar hundreds of times.
         function explodeAt(cx,cy,cz,radius){
           radius = radius || 4;
           const rc = Math.round(radius), r2 = radius*radius;
@@ -10062,7 +10064,7 @@ ${waveConsts}
           const p = (AP && !_suppressProfileBlockSave) ? AP.load() : null;
           const cols = new Set();
           const addCol=(x,z)=> cols.add(_fdiv(x,CH)+','+_fdiv(z,CH));
-          let salvage = 0; const SALVAGE_CAP = 12;
+          const loot = new Map();                     // block id -> count mined this blast
           for(let dx=-rc; dx<=rc; dx++) for(let dy=-rc; dy<=rc; dy++) for(let dz=-rc; dz<=rc; dz++){
             if(dx*dx+dy*dy+dz*dz > r2) continue;
             const x=cx+dx, y=cy+dy, z=cz+dz;
@@ -10072,7 +10074,7 @@ ${waveConsts}
             const isCenter = (dx===0 && dy===0 && dz===0);
             if(id===TNT_ID && !isCenter){ igniteTnt(x,y,z, 0.06+Math.random()*0.12); continue; }  // chain
             if(blastProof(id)) continue;
-            if(id!==TNT_ID && salvage<SALVAGE_CAP && Math.random()<0.3){ addToInventory(id,1); salvage++; }
+            if(id!==TNT_ID) loot.set(id, (loot.get(id)||0) + 1);   // salvage every block destroyed
             const ccx=_fdiv(x,CH), ccz=_fdiv(z,CH);
             const c=ensureCol(ccx,ccz);
             c[cIdx(x-ccx*CH, y, z-ccz*CH)] = 0;
@@ -10085,6 +10087,7 @@ ${waveConsts}
           }
           if(p) AP.save(p);
           for(const ck of cols){ const a=ck.split(','); buildColumnMesh(+a[0], +a[1]); }
+          for(const [id,n] of loot) addToInventory(id, n);   // bank the haul, one call per block type
 
           // ---- FX (render space = voxel + WORLD_OFFSET) ----
           const wx=cx+0.5+WORLD_OFFSET.x, wy=cy+0.5+WORLD_OFFSET.y, wz=cz+0.5+WORLD_OFFSET.z;
