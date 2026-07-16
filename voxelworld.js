@@ -10067,6 +10067,7 @@ ${waveConsts}
           const p = (AP && !_suppressProfileBlockSave) ? AP.load() : null;
           const cols = new Set();
           const addCol=(x,z)=> cols.add(_fdiv(x,CH)+','+_fdiv(z,CH));
+          const editList = p ? [] : null;             // batched profile edits (one upsert pass)
           const loot = new Map();                     // block id -> count mined this blast
           for(let dx=-rc; dx<=rc; dx++) for(let dy=-rc; dy<=rc; dy++) for(let dz=-rc; dz<=rc; dz++){
             if(dx*dx+dy*dy+dz*dz > r2) continue;
@@ -10082,14 +10083,22 @@ ${waveConsts}
             const c=ensureCol(ccx,ccz);
             c[cIdx(x-ccx*CH, y, z-ccz*CH)] = 0;
             recordEdit(x,y,z,0);
-            if(p) AP.upsertBlockEdit(p, pmod(x), y, pmod(z), 0);
+            if(editList) editList.push({x:pmod(x), y, z:pmod(z), id:0});
             addCol(x,z);
             const lx=_mod(x,CH), lz=_mod(z,CH);
             if(lx===0) addCol(x-1,z); if(lx===CH-1) addCol(x+1,z);
             if(lz===0) addCol(x,z-1); if(lz===CH-1) addCol(x,z+1);
           }
-          if(p) AP.save(p);
-          for(const ck of cols){ const a=ck.split(','); buildColumnMesh(+a[0], +a[1]); }
+          if(p){
+            if(AP.upsertBlockEdits) AP.upsertBlockEdits(p, editList);       // O(n+m) batch
+            else for(const e of editList) AP.upsertBlockEdit(p, e.x, e.y, e.z, e.id);
+            AP.save(p);
+          }
+          // Remesh through the time-budgeted queue (like floodWaterAfterMine) instead of
+          // synchronously — a blast can touch ~9 full columns, and rebuilding them all in
+          // one frame is the explosion's main lag spike. Queuing spreads the cost across
+          // frames and dedups columns hit by chained blasts.
+          for(const ck of cols){ const a=ck.split(','); queueRebuildCol(+a[0], +a[1]); }
           for(const [id,n] of loot) addToInventory(id, n);   // bank the haul, one call per block type
 
           // ---- FX (render space = voxel + WORLD_OFFSET) ----
@@ -10100,13 +10109,14 @@ ${waveConsts}
               blending:THREE.AdditiveBlending, depthWrite:false}));
           flash.position.set(wx,wy,wz); flash.scale.setScalar(0.6); scene.add(flash);
           blastFlashes.push({m:flash, t:0, life:0.45, r:radius});
-          for(let i=0;i<5;i++) burst(wx+(Math.random()-.5)*radius, wy+(Math.random()-.5)*radius, wz+(Math.random()-.5)*radius, i%2?0xff8a2c:0x2a2a2a);
-          if(_AC) for(let k=0;k<22;k++) _AC.spark(
+          for(let i=0;i<3;i++) burst(wx+(Math.random()-.5)*radius, wy+(Math.random()-.5)*radius, wz+(Math.random()-.5)*radius, i%2?0xff8a2c:0x2a2a2a);
+          if(_AC) for(let k=0;k<12;k++) _AC.spark(
             new THREE.Vector3(wx,wy,wz), k%3?0xffb347:0xff5a1e,
             new THREE.Vector3((Math.random()-.5)*8, Math.random()*7, (Math.random()-.5)*8), 0.6+Math.random()*0.4, 0.14);
 
-          // rising smoke: soft grey puffs that balloon and drift up as they fade
-          const smokeN = Math.min(18, 8 + Math.round(radius*2));
+          // rising smoke: soft grey puffs that balloon and drift up as they fade.
+          // Soft global cap so a chain reaction can't pile up hundreds of live meshes.
+          const smokeN = Math.min(14, Math.max(0, 60 - smokePuffs.length), 6 + Math.round(radius*2));
           for(let i=0;i<smokeN;i++){
             const shade = 0x2a2a2e + ((Math.random()*0x18)|0)*0x010101;
             const m=new THREE.Mesh(_dbgGeo, new THREE.MeshBasicMaterial({color:shade, transparent:true, opacity:0.55, depthWrite:false}));
@@ -10116,9 +10126,10 @@ ${waveConsts}
             scene.add(m);
             smokePuffs.push({m, t:0, life:0.9+Math.random()*0.8, vy:1.1+Math.random()*1.4, grow:1.6+Math.random()*1.8, s0});
           }
-          // chunky debris: cubes flung outward, colored by whatever was blown up (tumbling, gravity)
+          // chunky debris: cubes flung outward, colored by whatever was blown up (tumbling,
+          // gravity). Soft global cap so chained blasts stay smooth.
           const lootIds = [...loot.keys()];
-          const debrisN = Math.min(28, 12 + Math.round(radius*3));
+          const debrisN = Math.min(20, Math.max(0, 120 - blastDebris.length), 10 + Math.round(radius*2));
           for(let i=0;i<debrisN;i++){
             const bid = lootIds.length ? lootIds[(Math.random()*lootIds.length)|0] : 0;
             const col = bid ? blockColor(bid) : 0x6a6660;

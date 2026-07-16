@@ -660,6 +660,30 @@
         return profile;
     }
 
+    // Batch version of upsertBlockEdit. Indexing the existing edits once makes this
+    // O(n + m) instead of the per-cell findIndex's O(n * m) — a TNT blast can write
+    // hundreds of cells at once against a world with thousands of prior edits, so the
+    // single-cell path would spike the frame (and get worse with every blast).
+    function upsertBlockEdits(profile, list) {
+        if (!Array.isArray(list) || !list.length) return profile;
+        const edits = planetState(profile).edits;
+        const index = new Map();
+        for (let i = 0; i < edits.length; i++) {
+            const e = edits[i];
+            index.set((e.x | 0) + ',' + (e.y | 0) + ',' + (e.z | 0), i);
+        }
+        const now = Date.now();
+        for (const c of list) {
+            const x = c.x | 0, y = c.y | 0, z = c.z | 0;
+            const key = x + ',' + y + ',' + z;
+            const row = { x, y, z, id: c.id | 0, t: now };
+            const idx = index.get(key);
+            if (idx !== undefined) edits[idx] = row;
+            else { index.set(key, edits.length); edits.push(row); }
+        }
+        return profile;
+    }
+
     // ---- cross-device merge (used by CloudSync.reconcile) ----
     // Union two per-cell edit lists. The same cell may exist in both; the newest
     // change wins by per-edit timestamp `t`, and on a tie / missing timestamp the
@@ -844,6 +868,7 @@
         recordCraft,
         recordCreature,
         upsertBlockEdit,
+        upsertBlockEdits,
         mergeEdits,
         mergeProfiles,
         claimSummary,
