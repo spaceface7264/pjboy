@@ -7975,7 +7975,7 @@ ${waveConsts}
         }
         function thumbUrl(id) {
             const b = blockById(id);
-            return b ? thumb(b) : '';
+            return b ? block3DThumb(b) : '';   // lit 3D cube (falls back to a flat tile with no WebGL)
         }
         function syncHotbarFromBackpack() {
             for (let i = 0; i < HOTBAR_SLOTS; i++) {
@@ -8073,7 +8073,7 @@ ${waveConsts}
             if (s) {
                 const b = blockById(s.id);
                 if (b) {
-                    inner.appendChild(createThumbWrap(tint, thumb(b), b.name));
+                    inner.appendChild(createThumbWrap(tint, block3DThumb(b), b.name));
                     d.title = b.name;
                     d.draggable = true;
                 }
