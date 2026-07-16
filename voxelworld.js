@@ -3209,7 +3209,7 @@ ${waveConsts}
                 statsEl.innerHTML =
                     bar('dmg', 'DMG', dmg, 35, '', isMine)
                     + bar('mine', 'MINE', mine, 17, '/s', !isMine)
-                    + bar('rng', 'RNG', reach, 13, 'm', false);
+                    + bar('rng', 'RNG', reach, 35, 'm', false);
             }
         }
 
@@ -3897,7 +3897,7 @@ ${waveConsts}
         
         // ---------- mining / placing ----------
         const ray=new THREE.Raycaster();
-        const AIM_REACH = 6.5;
+        const AIM_REACH = 32.5;   // 5× base reach — scales shooting/mining/placement range for every weapon & tool
 
         function collectAimMeshes() {
           const meshes=[];
