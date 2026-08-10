@@ -1422,7 +1422,7 @@
         // PointLights sit at the block center, so they light the room but not the lamp's own
         // Lambert faces. A MeshBasic overlay (ignores scene lighting) makes the block itself glow.
         const LAMP_LIGHT_CAP = 8;
-        const LAMP_REACH = 32;                  // world units — was 11, which snuffed out after a few steps
+        const LAMP_REACH = 56;                  // world units — long enough to keep a base lit while exploring nearby
         const LAMP_DECAY = 1.4;                 // gentler than physical (2) so the pool stays warm farther out
         const lampPool = [];                    // { light, face }
         const lampCells = new Map();            // canonical "ex,y,ez" -> {x,y,z} (voxel)
