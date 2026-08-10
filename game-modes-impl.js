@@ -426,6 +426,23 @@
 
             this._loadPlayerProfile();
 
+            // A full storage quota would otherwise swallow a whole session of
+            // building in silence. Warn on screen, but at most once every 20
+            // seconds so a failing save can't spam a message per placed block.
+            if (!this._saveFailBound) {
+                this._saveFailBound = true;
+                this._lastSaveFailWarn = 0;
+                window.addEventListener('pjboy:saveFailed', () => {
+                    const now = Date.now();
+                    if (now - this._lastSaveFailWarn < 20000) return;
+                    this._lastSaveFailWarn = now;
+                    const msg = this.language === 'danish'
+                        ? 'Kunne ikke gemme! Din verden bliver ikke husket lige nu.'
+                        : 'Could not save! Your world is not being kept right now.';
+                    if (this.showMessage) this.showMessage(msg, 6000);
+                });
+            }
+
             document.getElementById('meta-start-btn')?.addEventListener('click', () => {
                 this.audio && this.audio.play('uiClick');
                 this._metaContinueFromTitle();
@@ -579,10 +596,28 @@
             return this._playerProfile;
         },
 
+        // The menu screens hold a profile snapshot taken when they opened, while
+        // play writes block edits, inventory and missions straight to storage.
+        // Writing the snapshot back wholesale would erase everything saved since
+        // it was taken, so rebase onto storage and carry over only the fields
+        // these screens actually own.
         _savePlayerProfile() {
             const AP = getAsteroidProfileApi();
             if (!AP || !this._playerProfile) return this._playerProfile;
-            this._playerProfile = AP.save(this._playerProfile);
+            const cached = this._playerProfile;
+            const fresh = AP.load() || cached;
+            if (fresh !== cached) {
+                if (cached.displayName !== undefined) fresh.displayName = cached.displayName;
+                if (cached.character !== undefined) fresh.character = cached.character;
+                if (cached.characterSetupDone !== undefined) fresh.characterSetupDone = cached.characterSetupDone;
+                // Weapon ownership only ever grows, so union both sides rather
+                // than letting the older list win.
+                const owned = cached.inventory && cached.inventory.ownedWeapons;
+                if (owned && fresh.inventory) {
+                    fresh.inventory.ownedWeapons = [...new Set([...(fresh.inventory.ownedWeapons || []), ...owned])];
+                }
+            }
+            this._playerProfile = AP.save(fresh);
             this._refreshMetaProfileDisplay();
             return this._playerProfile;
         },
@@ -673,7 +708,9 @@
         _openMetaCharacterEditor() {
             const AP = getAsteroidProfileApi();
             const VC = typeof VoxelCharacter !== 'undefined' ? VoxelCharacter : null;
-            if (!this._playerProfile) this._loadPlayerProfile();
+            // Reload rather than trust the cache: play can change the character too,
+            // and the draft has to start from what is actually stored.
+            this._loadPlayerProfile();
             if (!this._ensureMetaCharacterUI()) return;
             const base = this._playerProfile ? this._playerProfile.character : null;
             let cfg = base;

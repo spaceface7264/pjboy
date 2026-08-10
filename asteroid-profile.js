@@ -398,7 +398,16 @@
     let _activeId = null;
     function slotKey(id) { return 'pjboy.profile.v2.' + id; }
     function readJSON(k) { try { const r = localStorage.getItem(k); return r ? JSON.parse(r) : null; } catch (_) { return null; } }
-    function writeJSON(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (_) {} }
+    // A failed write loses whatever the player just built, so it is never swallowed:
+    // it goes to the console and to an event the game turns into an on-screen warning.
+    function writeJSON(k, v) {
+        try { localStorage.setItem(k, JSON.stringify(v)); return true; }
+        catch (err) {
+            console.error('[AsteroidProfile] could not save "' + k + '" to localStorage:', err);
+            try { window.dispatchEvent(new CustomEvent('pjboy:saveFailed', { detail: { key: k, error: err } })); } catch (_) {}
+            return false;
+        }
+    }
 
     function ensureIndex() {
         let idx = readJSON(PROFILES_KEY);
