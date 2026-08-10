@@ -121,6 +121,15 @@
             output: 45,
             outputCount: 2,
             inputs: [{ id: 27, count: 3 }, { id: 4, count: 2 }]
+        },
+        {
+            // Gives Circuit a real sink that matches its "doors" flavour text.
+            id: 'craft_door',
+            name: 'Fit Door',
+            desc: '2× Alloy + 1× Circuit → 1× Door',
+            output: 46,
+            outputCount: 1,
+            inputs: [{ id: 31, count: 2 }, { id: 33, count: 1 }]
         }
     ];
 

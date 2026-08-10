@@ -388,6 +388,17 @@
             x.fillStyle='#ffe8b0'; x.fillRect(6,6,20,20);
             x.fillStyle='#fff8e0'; x.fillRect(10,10,12,12);
             x.fillStyle='#c8d2dc'; [[2,2],[27,2],[2,27],[27,27]].forEach(([bx,by])=>x.fillRect(bx,by,3,3)); },
+          door(x,R){ grain(x,0x6a4a2a,.12,R,2);                                 // closed hatch
+            x.fillStyle='#3a2a18'; x.fillRect(2,1,28,30);
+            x.fillStyle='#8a6238'; x.fillRect(4,3,24,26);
+            x.fillStyle='#c4a06a'; x.fillRect(6,5,8,22); x.fillRect(16,5,10,22);
+            x.fillStyle='#2a2a2e'; x.fillRect(15,3,2,26);                          // seam
+            x.fillStyle='#d8e0e8'; x.fillRect(22,14,3,5); },                       // handle
+          door_open(x,R){ grain(x,0x6a4a2a,.1,R,2);                               // open — mostly see-through
+            x.clearRect(0,0,32,32);
+            x.fillStyle='rgba(58,42,24,.55)'; x.fillRect(0,0,6,32); x.fillRect(26,0,6,32);
+            x.fillStyle='#8a6238'; x.fillRect(1,1,4,30); x.fillRect(27,1,4,30);
+            x.fillStyle='#d8e0e8'; x.fillRect(2,14,2,4); },
           hull(x,R){ grain(x,0x3a4048,.1,R,4);
             x.fillStyle='rgba(0,0,0,.3)'; x.fillRect(0,15,32,2);
             x.fillStyle='#e8b33b'; x.fillRect(0,28,10,4);
@@ -507,7 +518,7 @@
             x.fillStyle=hx(shade(0xffd24a,p)); for(let i=0;i<3;i++) x.fillRect((R()*28)|0,(R()*28)|0,2,2);
           },
         };
-        const NO_BORDER = new Set(['tall_grass','flower_red','flower_yellow','water',
+        const NO_BORDER = new Set(['tall_grass','flower_red','flower_yellow','water','door_open',
           'deco_frond','deco_spore','deco_quill','deco_quill_glow','deco_plume','deco_shroom']);
         function paintTile(name, frame){
           const c=document.createElement('canvas'); c.width=c.height=TILE;
@@ -644,6 +655,13 @@
           { id:35, cat:'Crafted', name:'Hull',    tiles:{all:'hull'},    hardness:10, tags:['crafted','structural'],
             desc:'Ship-grade armor plating. If it can hold vacuum, it can hold anything.',
             sci:{formula:'Ti alloy', mineral:'Titanium plate', fact:'Spacecraft hulls must hold one atmosphere of pressure against pure vacuum.'} },
+          { id:46, cat:'Crafted', name:'Door', tiles:{all:'door'}, hardness:6, tags:['crafted','door'],
+            desc:'A hinged hatch for your base. Aim and press F to open or close it.',
+            sci:{formula:'simple machine', mineral:'Hinge + lever', fact:'A door is a lever that turns on a hinge. The handle is farther from the pivot so a small push swings a heavy panel.'} },
+          // Open state is world-only — mining always returns a Door. Hidden from backpack/catalog grids.
+          { id:47, cat:'Crafted', name:'Door Open', tiles:{all:'door_open'}, hardness:6, tags:['crafted','door'], transparent:true, hidden:true,
+            desc:'An open hatch. Walk through, then press F to close it again.',
+            sci:{formula:'simple machine', mineral:'Hinge + lever', fact:'When the door swings open the opening is clear space — just like water, it does not block you.'} },
           { id:41, cat:'Crafted', name:'Gate Key', tiles:{all:'crystal'}, hardness:6, tags:['crafted','glows','key'], glowColor:0x4a2a78,
             desc:'A crystal key humming with Ancient power. Bring it to a dormant Star Gate to wake it.',
             sci:{formula:'resonant crystal', mineral:'Tuned crystal', fact:'Crystals can store and release energy at exact frequencies — that is how quartz watches keep time.'} },
@@ -724,6 +742,11 @@
         const H=96, CH=16;
         const SEA_LEVEL = 30;                   // water fills empty cells at/below this
         const WATER = 40;                       // water block id (see BlockRegistry)
+        const LAMP_ID = 34;
+        const DOOR_CLOSED = 46;                 // placeable / inventory door
+        const DOOR_OPEN = 47;                   // non-solid open state (world only)
+        function isPassableId(b){ return !b || b === WATER || b === DOOR_OPEN; }
+        function isSolidId(b){ return !!b && b !== WATER && b !== DOOR_OPEN; }
         // Streaming, wrapping world: voxel coords are GLOBAL and unbounded in x/z; the
         // terrain is periodic with period WORLD_PERIOD, so walking that far returns you
         // to identical land ("arrive where you started") with no seam. Only the columns
@@ -1050,11 +1073,14 @@
         const _cl01 = (v)=> v<0?0 : v>1?1 : v;
 
         // ---------- day / night cycle ----------
-        const DAYNIGHT_ENABLED = false;         // master switch — flip to true to run the cycle
-        const DAY_LENGTH = 600;                 // seconds for a full day-night cycle
+        // ~6 min cycle; night window (0.60–0.85) ≈ 90s of real threat time for a 7yo session.
+        const DAYNIGHT_ENABLED = true;
+        const DAY_LENGTH = 360;                 // seconds for a full day-night cycle
         const NIGHT_SKY=0x0a1430, NIGHT_HORIZON=0x16203c, MOON=0x8a96b8, SUNSET=0xff7a3c;
         let dayTime = 0.20;                     // 0=sunrise .25=noon .5=sunset .75=midnight
         let _skyMark = -1, _dayF = 1;
+        let _dayPhase = 'day';                  // day | dusk | night | dawn
+        let _nightSpawnLeft = 0, _nightSpawnTimer = 0;
 
         // Paint the sky gradient for the current sun height; stars + sun/moon glow.
         function buildSkyBackground(sky, horizon, sun, starsA, elev){
@@ -1329,9 +1355,124 @@
         // Advance time + refresh sky each frame.
         function _dayNightOn(){ return DAYNIGHT_ENABLED || (activeSpec && activeSpec.visual && activeSpec.visual.dayNight); }
         function _dayLenSec(){ return (activeSpec && activeSpec.basics && activeSpec.basics.dayLengthMin) ? activeSpec.basics.dayLengthMin*60 : DAY_LENGTH; }
-        function updateDayNight(dt){ if(!_dayNightOn()) return; dayTime = (dayTime + dt/_dayLenSec()) % 1; applyDaySky(); }
+        function dayPhaseOf(t){
+          if(t >= 0.50 && t < 0.60) return 'dusk';
+          if(t >= 0.60 && t < 0.85) return 'night';
+          if(t >= 0.85 || t < 0.05) return 'dawn';
+          return 'day';
+        }
+        function vxLangMsg(en, da, ms){
+          if(!g.showMessage) return;
+          g.showMessage((g.language === 'danish') ? da : en, ms || 2800);
+        }
+        function onDayPhaseChange(from, to){
+          if(to === 'dusk'){
+            vxLangMsg('Night is coming — find shelter.', 'Natten nærmer sig — find ly.');
+          } else if(to === 'night'){
+            vxLangMsg('Night falls. Survive until dawn.', 'Natten falder på. Overlev til daggry.');
+            _nightSpawnLeft = 2 + ((Math.random() * 2) | 0);   // 2–3 staggered prowlers
+            _nightSpawnTimer = 0.5;
+          } else if(to === 'dawn'){
+            _nightSpawnLeft = 0;
+            if(typeof despawnHostiles === 'function') despawnHostiles();
+            if(from === 'night' || from === 'dusk'){
+              vxLangMsg('You made it through the night!', 'Du klarede natten!');
+            }
+          }
+          updateDayChip();
+        }
+        function updateDayChip(){
+          let el = document.getElementById('voxel-day-chip');
+          if(!el) return;
+          if(!_dayNightOn() || (_dayPhase !== 'dusk' && _dayPhase !== 'night' && _dayPhase !== 'dawn')){
+            el.hidden = true; return;
+          }
+          el.hidden = false;
+          const da = g.language === 'danish';
+          if(_dayPhase === 'dusk'){ el.textContent = da ? '🌆 Skumring' : '🌆 Dusk'; el.className = 'vx-day-chip vx-day-dusk'; }
+          else if(_dayPhase === 'night'){
+            // fraction of night remaining (0.60 → 0.85)
+            const left = Math.max(0, (0.85 - dayTime) * _dayLenSec());
+            const sec = Math.ceil(left);
+            el.textContent = (da ? '🌙 Nat · ' : '🌙 Night · ') + sec + 's';
+            el.className = 'vx-day-chip vx-day-night';
+          } else {
+            el.textContent = da ? '🌅 Daggry' : '🌅 Dawn';
+            el.className = 'vx-day-chip vx-day-dawn';
+          }
+        }
+        function updateDayNight(dt){
+          if(!_dayNightOn()){ _dayPhase = 'day'; updateDayChip(); return; }
+          dayTime = (dayTime + dt / _dayLenSec()) % 1;
+          applyDaySky();
+          const phase = dayPhaseOf(dayTime);
+          if(phase !== _dayPhase){ const prev = _dayPhase; _dayPhase = phase; onDayPhaseChange(prev, phase); }
+          else if(_dayPhase === 'night') updateDayChip();
+          if(typeof updateNightSpawner === 'function') updateNightSpawner(dt);
+        }
         // Forced full refresh (planet change / enter).
         function applyPlanetAtmosphere(){ _skyMark = -1; applyDaySky(); }
+
+        // ---------- placed Lamp point-lights (capped, nearest-first) ----------
+        const LAMP_LIGHT_CAP = 8;
+        const lampPool = [];
+        const _lampNear = [];
+        let _lampScanT = 0;
+        function ensureLampLights(){
+          if(!scene) return;
+          while(lampPool.length < LAMP_LIGHT_CAP){
+            const L = new THREE.PointLight(0xffe2a0, 0, 11, 2);
+            L.visible = false;
+            scene.add(L);
+            lampPool.push(L);
+          }
+        }
+        function disposeLampLights(){
+          for(const L of lampPool){ if(L.parent) L.parent.remove(L); }
+          lampPool.length = 0;
+          _lampNear.length = 0;
+        }
+        function updateLampLights(dt){
+          if(!scene || !player) return;
+          ensureLampLights();
+          _lampScanT -= dt;
+          if(_lampScanT <= 0){
+            _lampScanT = 0.4;
+            _lampNear.length = 0;
+            const ox = WORLD_OFFSET.x, oy = WORLD_OFFSET.y, oz = WORLD_OFFSET.z;
+            const px = Math.floor(player.pos.x - ox);
+            const py = Math.floor(player.pos.y - oy);
+            const pz = Math.floor(player.pos.z - oz);
+            const Rxy = 16, Ry = 10;
+            for(let y = py - Ry; y <= py + Ry; y++){
+              if(y < 0 || y >= H) continue;
+              for(let x = px - Rxy; x <= px + Rxy; x++){
+                for(let z = pz - Rxy; z <= pz + Rxy; z++){
+                  if(getBlock(x, y, z) !== LAMP_ID) continue;
+                  const dx = (x + 0.5 + ox) - player.pos.x;
+                  const dy = (y + 0.5 + oy) - player.pos.y;
+                  const dz = (z + 0.5 + oz) - player.pos.z;
+                  _lampNear.push({ x, y, z, d2: dx*dx + dy*dy + dz*dz });
+                }
+              }
+            }
+            _lampNear.sort((a, b) => a.d2 - b.d2);
+          }
+          const nightBoost = 1.05 + (1 - _dayF) * 0.9;
+          for(let i = 0; i < LAMP_LIGHT_CAP; i++){
+            const L = lampPool[i];
+            const src = _lampNear[i];
+            if(!src){ L.visible = false; L.intensity = 0; continue; }
+            L.visible = true;
+            L.intensity = nightBoost;
+            L.distance = 11;
+            L.position.set(
+              src.x + 0.5 + WORLD_OFFSET.x,
+              src.y + 0.5 + WORLD_OFFSET.y,
+              src.z + 0.5 + WORLD_OFFSET.z
+            );
+          }
+        }
 
         // ---------- drifting cloud layer ----------
         const CLOUDS_ENABLED = false;           // master switch — flip to true to show clouds
@@ -3445,7 +3586,7 @@ ${waveConsts}
         function solidAt(wx,wy,wz){       // world-space (render) coords -> voxel solid?
           const b = getBlock(Math.floor(wx-WORLD_OFFSET.x), Math.floor(wy-WORLD_OFFSET.y),
                              Math.floor(wz-WORLD_OFFSET.z));
-          return b !== 0 && b !== WATER;   // water is swimmable, not solid
+          return isSolidId(b);            // water + open doors are walk-through
         }
         // True when the player's torso is inside water (drives swim physics).
         function playerInWater(){
@@ -4498,7 +4639,8 @@ ${waveConsts}
             'Uranium Ore': 'Uranmalm', 'Aether Ore': 'Ætermalm',
             'Crystal': 'Krystal', 'Emerald Crystal': 'Smaragdkrystal', 'Void Crystal': 'Tomrumskrystal',
             'Metal': 'Metal', 'Alloy': 'Legering', 'Glass': 'Glas', 'Circuit': 'Kredsløb',
-            'Lamp': 'Lampe', 'Hull': 'Skrog', 'Energy': 'Energi', 'Gate Key': 'Portnøgle', 'TNT': 'Dynamit',
+            'Lamp': 'Lampe', 'Hull': 'Skrog', 'Door': 'Dør', 'Door Open': 'Åben dør',
+            'Energy': 'Energi', 'Gate Key': 'Portnøgle', 'TNT': 'Dynamit',
             'Lava': 'Lava', 'Acid': 'Syre', 'Water': 'Vand',
             'Lava Flow': 'Lavastrøm', 'Ash': 'Aske', 'Magma Rock': 'Magmasten', 'Ancient Ruins': 'Oldtidsruiner',
             'Volcano': 'Vulkan', 'Fire Cave': 'Ildhule',
@@ -5708,7 +5850,8 @@ ${waveConsts}
             );
             setBlockEvent(t.x, t.y, t.z, 0);
             floodWaterAfterMine(t.x, t.y, t.z);   // sea flows into the new gap if it reaches water
-            addToInventory(id);
+            // Open doors collapse back to one Door item so the backpack never holds a second id.
+            addToInventory(id === DOOR_OPEN ? DOOR_CLOSED : id);
             updateHUD();
             resetMining();
             disposeAimEdgeHighlight();
@@ -6716,6 +6859,25 @@ ${waveConsts}
         function mineBlock() {
             return tryLaserMine();
         }
+        // Aim at a door and press F to open/close. Debounced so spam can't thrash saves.
+        let _doorToggleCd = 0;
+        function tryToggleDoor() {
+            if (flying || voxelPanelOpen()) return;
+            if (_doorToggleCd > 0) return;
+            const t = pickTarget();
+            if (!t) return;
+            const id = getBlock(t.x, t.y, t.z);
+            if (id !== DOOR_CLOSED && id !== DOOR_OPEN) return;
+            setBlockEvent(t.x, t.y, t.z, id === DOOR_CLOSED ? DOOR_OPEN : DOOR_CLOSED);
+            _doorToggleCd = 0.18;
+            playSfx('voxelPlace');
+            vxLangMsg(
+                id === DOOR_CLOSED ? 'Door opened' : 'Door closed',
+                id === DOOR_CLOSED ? 'Dør åbnet' : 'Dør lukket',
+                900
+            );
+        }
+
         function placeBlock() {
             if (!isMiningTool()) {
                 showToolMsg('Equip a mining tool to place blocks (Q/E)');
@@ -7134,7 +7296,7 @@ ${waveConsts}
         function renderBackpackBody(body, ownedOnly) {
             let any = false;
             INV_CATEGORIES.forEach((cat) => {
-                const blocks = BlockRegistry.filter((b) => b.cat === cat && !b.water);
+                const blocks = BlockRegistry.filter((b) => b.cat === cat && !b.water && !b.hidden);
                 const visible = ownedOnly ? blocks.filter((b) => getBackpackCount(b.id) > 0) : blocks;
                 if (!visible.length) return;
                 any = true;
@@ -7248,7 +7410,7 @@ ${waveConsts}
             if (codexSection === 'Life') { renderCodexCreatureList(body); return; }
             const AP = getProfileApi();
             const scanned = (AP && AP.load().journal && AP.load().journal.scanned) || {};
-            const all = BlockRegistry.filter((b) => !b.water);   // water isn't a collectible block
+            const all = BlockRegistry.filter((b) => !b.water && !b.hidden);   // water / open-door state hidden
             const discovered = all.filter((b) => scanned[String(b.id)]).length;
             const total = all.length;
             const pct = Math.round(discovered / Math.max(1, total) * 100);
@@ -8916,6 +9078,7 @@ ${waveConsts}
                 g._voxelLights.forEach((l) => g.scene.remove(l));
                 g._voxelLights = null;
             }
+            disposeLampLights();
         }
 
         function _removeListeners() {
@@ -9024,7 +9187,23 @@ ${waveConsts}
                 if (g.showMessage) g.showMessage('All planets charted (dev).', 2000);
             },
             planets: () => (window.AsteroidProfile ? window.AsteroidProfile.PLANETS : []),
-            current: () => activePlanetId
+            current: () => activePlanetId,
+            // Dev helpers for night / doors (safe — does not rewrite whole profile)
+            setDay: (t) => {
+                dayTime = ((Number(t) % 1) + 1) % 1;
+                const phase = dayPhaseOf(dayTime);
+                if (phase !== _dayPhase) { const prev = _dayPhase; _dayPhase = phase; onDayPhaseChange(prev, phase); }
+                else _dayPhase = phase;
+                applyDaySky(); updateDayChip();
+                return { dayTime, phase: _dayPhase, dayF: _dayF };
+            },
+            phase: () => ({ dayTime, phase: _dayPhase, dayF: _dayF }),
+            give: (id, n) => { addToInventory(id | 0, Math.max(1, n | 0)); return backpack[id | 0] || 0; },
+            ids: () => ({ LAMP: LAMP_ID, DOOR: DOOR_CLOSED, DOOR_OPEN, TNT: 45, CIRCUIT: 33, ALLOY: 31 }),
+            setBlock: (x, y, z, id) => { setBlockEvent(x | 0, y | 0, z | 0, id | 0); return getBlock(x | 0, y | 0, z | 0); },
+            getBlock: (x, y, z) => getBlock(x | 0, y | 0, z | 0),
+            solid: (wx, wy, wz) => solidAt(wx, wy, wz),
+            surfaceTop: (vx, vz) => surfaceTopVox(vx | 0, vz | 0)
         };
 
         /* ============================ CREATURES ============================
@@ -9062,10 +9241,43 @@ ${waveConsts}
         const creatureGroups = [];       // groups for the scan raycast
         let _critTimer = 0;
 
-        // World height to stand on at a voxel column: top non-water solid, or null.
+        // World height to stand on at a voxel column: top solid (skips open doors), or
+        // null when the top non-air cell is water (no standing / spawning on sea).
         function surfaceTopVox(vx,vz){
-          for(let y=H-1;y>0;y--){ const b=getBlock(vx,y,vz); if(b){ return b===WATER ? null : y; } }
+          for(let y=H-1;y>0;y--){
+            const b=getBlock(vx,y,vz);
+            if(!b || b===DOOR_OPEN) continue;          // air / open hatch — look beneath
+            if(b===WATER) return null;
+            return y;
+          }
           return null;
+        }
+        // Creatures may step up at most one block — never teleport onto roofs.
+        const CREATURE_MAX_STEP = 1;
+        function tryCreatureStep(cr, nx, nz, easeY, dt){
+          const top = surfaceTopVox(Math.floor(nx), Math.floor(nz));
+          if(top === null) return false;
+          const standTop = Math.round(cr.pos.y - WORLD_OFFSET.y - 1);
+          if(top - standTop > CREATURE_MAX_STEP) return false;
+          cr.pos.x = nx; cr.pos.z = nz;
+          const ty = top + 1 + WORLD_OFFSET.y;
+          if(easeY) cr.pos.y += (ty - cr.pos.y) * Math.min(1, 12 * (dt || 0));
+          else cr.pos.y = ty;
+          return true;
+        }
+        // Block attacks through walls/ceilings (sample solids between creature and player).
+        function hasCreatureLineOfSight(cr){
+          const ax = cr.pos.x, ay = cr.pos.y + 0.9, az = cr.pos.z;
+          const bx = player.pos.x, by = player.pos.y + 0.9, bz = player.pos.z;
+          const dx = bx - ax, dy = by - ay, dz = bz - az;
+          const dist = Math.hypot(dx, dy, dz);
+          if(dist < 0.2) return true;
+          const steps = Math.max(2, Math.ceil(dist * 2));
+          for(let i = 1; i < steps; i++){
+            const t = i / steps;
+            if(solidAt(ax + dx * t, ay + dy * t, az + dz * t)) return false;
+          }
+          return true;
         }
 
         // Instantiate one critter from the bestiary registry via the Actor
@@ -9838,7 +10050,8 @@ ${waveConsts}
           const dy = player.pos.y - cr.pos.y;                   // vertical gap (fly up to escape)
           if(distP < aggro){                                    // aggroed: hunt the player
             cr.face=Math.atan2(-dxp,-dzp);                      // look at player
-            if(distP <= atkR && Math.abs(dy) < 2.6 && !vxSettings.peaceful){   // in reach + same level: strike (never in Peaceful)
+            // Strike only with clear line of sight — roofs and closed doors protect.
+            if(distP <= atkR && Math.abs(dy) < 2.6 && !vxSettings.peaceful && hasCreatureLineOfSight(cr)){
               if(cr.atkCd<=0){
                 const inv=1/(distP||1);
                 applyPlayerDamage(sp.dmg||10, -dxp*inv, -dzp*inv);
@@ -9848,8 +10061,7 @@ ${waveConsts}
             } else {                                            // close the distance (ground)
               const inv=1/(distP||1), step=speed*dt;
               const nx=cr.pos.x - dxp*inv*step, nz=cr.pos.z - dzp*inv*step;
-              const top=surfaceTopVox(Math.floor(nx),Math.floor(nz));
-              if(top!==null){ cr.pos.x=nx; cr.pos.z=nz; cr.pos.y=top+1+WORLD_OFFSET.y; moving=true; }
+              if(tryCreatureStep(cr, nx, nz, false, dt)) moving=true;
             }
           } else {                                              // out of range: wander like prey
             if(cr.state==='idle'){ cr.timer-=dt;
@@ -9860,27 +10072,22 @@ ${waveConsts}
               if(d<0.25){ cr.target=null; }
               else { const inv=1/d, st=Math.min(d,speed*0.6*dt);
                 const nx=cr.pos.x+dx*inv*st, nz=cr.pos.z+dz*inv*st;
-                const top=surfaceTopVox(Math.floor(nx),Math.floor(nz));
-                if(top===null) cr.target=null;
-                else { cr.pos.x=nx; cr.pos.z=nz; cr.pos.y=top+1+WORLD_OFFSET.y; cr.face=Math.atan2(dx,dz); moving=true; } }
+                if(!tryCreatureStep(cr, nx, nz, false, dt)) cr.target=null;
+                else { cr.face=Math.atan2(dx,dz); moving=true; } }
             }
           }
           return {moving, speed, aggroed:(distP<aggro)};
         }
 
         // Rare "prowling" hostile spawner — danger is special, not constant.
+        // At night, updateNightSpawner takes over with a short staggered burst instead.
         let _hostileTimer = 18;
         function countHostiles(){ let n=0; for(const c of critters) if(c.hostile) n++; return n; }
         function despawnHostiles(){ for(let i=critters.length-1;i>=0;i--) if(critters[i].hostile) despawnCritter(i); }
-        function maybeSpawnHostile(dt){
-          if(!_AC || vxSettings.peaceful) return;   // Peaceful mode: no prowlers
-          _hostileTimer-=dt;
-          if(_hostileTimer>0) return;
-          _hostileTimer = 14 + Math.random()*16;
-          if(countHostiles()>=1) return;          // at most one prowler at a time
-          if(Math.random()>0.55) return;          // ...and only sometimes
+        function spawnProwlerNearPlayer(quiet){
+          if(!_AC) return false;
           const prowlers=_AC.DEFS.filter(d=>d.prowl);
-          if(!prowlers.length) return;
+          if(!prowlers.length) return false;
           const sp=prowlers[(Math.random()*prowlers.length)|0];
           const px=Math.floor(player.pos.x), pz=Math.floor(player.pos.z);
           for(let tryN=0; tryN<8; tryN++){
@@ -9889,18 +10096,39 @@ ${waveConsts}
             const top=surfaceTopVox(vx,vz);
             if(top===null) continue;
             placeCritter(sp, vx, vz, top);
-            if(g.showMessage) g.showMessage('Something is prowling nearby…', 1800);
-            return;
+            if(!quiet) vxLangMsg('Something is prowling nearby…', 'Noget sniger sig omkring…', 1800);
+            return true;
           }
+          return false;
+        }
+        function maybeSpawnHostile(dt){
+          if(!_AC || vxSettings.peaceful) return;   // Peaceful mode: no prowlers
+          if(_dayPhase === 'night' || _dayPhase === 'dusk') return; // night queue owns this
+          _hostileTimer-=dt;
+          if(_hostileTimer>0) return;
+          _hostileTimer = 14 + Math.random()*16;
+          if(countHostiles()>=1) return;          // at most one prowler at a time by day
+          if(Math.random()>0.55) return;          // ...and only sometimes
+          spawnProwlerNearPlayer(false);
+        }
+        function updateNightSpawner(dt){
+          if(_dayPhase !== 'night' || vxSettings.peaceful || !_AC) return;
+          if(_nightSpawnLeft <= 0) return;
+          _nightSpawnTimer -= dt;
+          if(_nightSpawnTimer > 0) return;
+          _nightSpawnTimer = 1.5 + Math.random() * 1.4;
+          if(countHostiles() >= 3){ _nightSpawnLeft = 0; return; }
+          if(spawnProwlerNearPlayer(_nightSpawnLeft < 3)) _nightSpawnLeft--;
+          else _nightSpawnTimer = 0.6;             // retry sooner if no land found
         }
 
         function updateCritters(dt){
           if(!CRITTERS_ENABLED){ if(critters.length) clearCritters(); return; }
-          // maintain population
+          // maintain population — pause peaceful refill at night so prowlers use the budget
           _critTimer-=dt;
           if(_critTimer<=0){
             _critTimer=0.6;
-            if(critters.length<CRIT_CAP) spawnOneCritter();
+            if(critters.length<CRIT_CAP && _dayPhase !== 'night') spawnOneCritter();
           }
           maybeSpawnHostile(dt);
           for(let i=critters.length-1;i>=0;i--){
@@ -9950,12 +10178,8 @@ ${waveConsts}
                   else {
                     const step=Math.min(d, speed*dt), inv=1/d;
                     const nx=cr.pos.x+dx*inv*step, nz=cr.pos.z+dz*inv*step;
-                    const top=surfaceTopVox(Math.floor(nx),Math.floor(nz));
-                    if(top===null){ cr.target=null; }                 // hit water — stop
-                    else { cr.pos.x=nx; cr.pos.z=nz;
-                      const ty=top+1+WORLD_OFFSET.y;                   // ease vertical so walkers glide over slope steps
-                      cr.pos.y += (ty-cr.pos.y)*Math.min(1, 12*dt);
-                      cr.face=Math.atan2(dx,dz); moving=true; }
+                    if(!tryCreatureStep(cr, nx, nz, true, dt)) cr.target=null;  // water / wall / roof
+                    else { cr.face=Math.atan2(dx,dz); moving=true; }
                   }
                 }
               }
@@ -10113,7 +10337,10 @@ ${waveConsts}
             const isCenter = (dx===0 && dy===0 && dz===0);
             if(id===TNT_ID && !isCenter){ igniteTnt(x,y,z, 0.06+Math.random()*0.12); continue; }  // chain
             if(blastProof(id)) continue;
-            if(id!==TNT_ID) loot.set(id, (loot.get(id)||0) + 1);   // salvage every block destroyed
+            if(id!==TNT_ID){                                         // salvage every block destroyed
+              const lootId = (id === DOOR_OPEN) ? DOOR_CLOSED : id;
+              loot.set(lootId, (loot.get(lootId)||0) + 1);
+            }
             const ccx=_fdiv(x,CH), ccz=_fdiv(z,CH);
             const c=ensureCol(ccx,ccz);
             c[cIdx(x-ccx*CH, y, z-ccz*CH)] = 0;
@@ -10293,6 +10520,8 @@ ${waveConsts}
                 updateWater(frameDt);
             }
             updateDayNight(dt);                // integrates game time — keep per fixed step
+            if (_doorToggleCd > 0) _doorToggleCd = Math.max(0, _doorToggleCd - dt);
+            updateLampLights(dt);
             elapsed += dt;
             if(flying){ updateFlight(dt); }
             else {
@@ -10641,8 +10870,9 @@ ${waveConsts}
                 if (e.code === 'KeyV') {
                     if (!flying) setFirstPerson(!firstPerson);
                 }
-                if (e.code === 'KeyF' && flying && !voxelPanelOpen()) {
-                    flipShipUpright();
+                if (e.code === 'KeyF' && !voxelPanelOpen()) {
+                    if (flying) { flipShipUpright(); return; }
+                    tryToggleDoor();
                     return;
                 }
                 if (e.code === 'KeyG' && !voxelPanelOpen()) {

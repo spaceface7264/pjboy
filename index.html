@@ -10,7 +10,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>3D Second-Person Game - 128-bit Style</title>
-    <link rel="stylesheet" href="style.css?v=76">
+    <link rel="stylesheet" href="style.css?v=77">
     <link rel="stylesheet" href="style-meta.css?v=16">
 </head>
 <body>
@@ -481,6 +481,7 @@
             </div>
             <div id="voxel-hud">
                 <div class="vx-dev-line"><b id="voxel-tri-count">0</b> tris · <span id="voxel-seed-label"></span> · <span id="voxel-weapon-label">Laser Handgun</span> · <b>H</b> controls</div>
+                <div id="voxel-day-chip" class="vx-day-chip" hidden aria-live="polite"></div>
                 <div id="voxel-cloud" class="vx-cloud" hidden aria-live="polite"></div>
                 <div id="voxel-journal-hud" class="vx-journal-hud" hidden></div>
             </div>
@@ -529,6 +530,7 @@
                                 <div class="vx-ctrl-row"><kbd>LMB</kbd><span>mine (pickaxe)</span></div>
                                 <div class="vx-ctrl-row"><kbd>Hold LMB</kbd><span>mine (laser)</span></div>
                                 <div class="vx-ctrl-row"><kbd>RMB</kbd><span>place block</span></div>
+                                <div class="vx-ctrl-row"><kbd>F</kbd><span>open / close door (flip ship in flight)</span></div>
                                 <div class="vx-ctrl-row"><kbd>1–9</kbd><span>quickbar slot</span></div>
                                 <div class="vx-ctrl-row"><kbd>0</kbd><span>deselect quickbar</span></div>
                                 <div class="vx-ctrl-row"><kbd>Q</kbd><span>previous weapon</span></div>
@@ -576,11 +578,11 @@
     <script src="planet.js?v=173"></script>
     <script src="voxel-character.js?v=38"></script>
     <script src="meta-char-preview.js?v=3"></script>
-    <script src="asteroid-profile.js?v=20"></script>
+    <script src="asteroid-profile.js?v=21"></script>
     <script src="asteroid-creatures.js?v=4"></script>
     <script src="asteroid-ships.js?v=6"></script>
     <script src="asteroid-structures.js?v=4"></script>
-    <script src="voxelworld.js?v=235"></script>
+    <script src="voxelworld.js?v=236"></script>
     <script src="modes.js?v=9"></script>
     <script src="game.js?v=157"></script>
     <script src="game-modes-impl.js?v=48"></script>
