@@ -384,10 +384,13 @@
             for(let i=0;i<3;i++){ const wy=(R()*30)|0; x.fillRect(0,wy,32,2); }        // ripples
             x.fillStyle='rgba(225,245,255,.22)';
             for(let i=0;i<5;i++) x.fillRect((R()*30)|0,(R()*30)|0,2,1); },             // sparkle
-          lamp(x,R){ grain(x,0x4a4438,.15,R,2);
-            x.fillStyle='#ffe8b0'; x.fillRect(6,6,20,20);
-            x.fillStyle='#fff8e0'; x.fillRect(10,10,12,12);
-            x.fillStyle='#c8d2dc'; [[2,2],[27,2],[2,27],[27,27]].forEach(([bx,by])=>x.fillRect(bx,by,3,3)); },
+          lamp(x,R){ grain(x,0x5a5040,.12,R,2);
+            // Bright self-lit panel — reads as glowing even under MeshLambert / night sky.
+            x.fillStyle='#ffd878'; x.fillRect(5,5,22,22);
+            x.fillStyle='#fff6c8'; x.fillRect(8,8,16,16);
+            x.fillStyle='#ffffff'; x.fillRect(12,12,8,8);
+            x.fillStyle='rgba(255,255,220,.55)'; x.fillRect(4,4,24,24);
+            x.fillStyle='#d0dae4'; [[2,2],[27,2],[2,27],[27,27]].forEach(([bx,by])=>x.fillRect(bx,by,3,3)); },
           door(x,R){ grain(x,0x6a4a2a,.12,R,2);                                 // closed hatch
             x.fillStyle='#3a2a18'; x.fillRect(2,1,28,30);
             x.fillStyle='#8a6238'; x.fillRect(4,3,24,26);
@@ -1413,24 +1416,45 @@
         // Forced full refresh (planet change / enter).
         function applyPlanetAtmosphere(){ _skyMark = -1; applyDaySky(); }
 
-        // ---------- placed Lamp point-lights (capped, nearest-first) ----------
+        // ---------- placed Lamp lights + self-lit face overlays (capped, nearest-first) ----------
+        // PointLights sit at the block center, so they light the room but not the lamp's own
+        // Lambert faces. A MeshBasic overlay (ignores scene lighting) makes the block itself glow.
         const LAMP_LIGHT_CAP = 8;
-        const lampPool = [];
+        const lampPool = [];                    // { light, face }
         const _lampNear = [];
         let _lampScanT = 0;
+        let _lampFaceGeo = null, _lampFaceMat = null;
         function ensureLampLights(){
           if(!scene) return;
+          if(!_lampFaceGeo) _lampFaceGeo = new THREE.BoxGeometry(1.02, 1.02, 1.02);
+          if(!_lampFaceMat){
+            const tex = new THREE.CanvasTexture(paintTile('lamp'));
+            tex.magFilter = THREE.NearestFilter;
+            tex.minFilter = THREE.NearestFilter;
+            _lampFaceMat = new THREE.MeshBasicMaterial({ map: tex });
+          }
           while(lampPool.length < LAMP_LIGHT_CAP){
-            const L = new THREE.PointLight(0xffe2a0, 0, 11, 2);
-            L.visible = false;
-            scene.add(L);
-            lampPool.push(L);
+            const light = new THREE.PointLight(0xffe2a0, 0, 11, 2);
+            light.visible = false;
+            const face = new THREE.Mesh(_lampFaceGeo, _lampFaceMat);
+            face.visible = false;
+            face.renderOrder = 1;
+            scene.add(light, face);
+            lampPool.push({ light, face });
           }
         }
         function disposeLampLights(){
-          for(const L of lampPool){ if(L.parent) L.parent.remove(L); }
+          for(const e of lampPool){
+            if(e.light.parent) e.light.parent.remove(e.light);
+            if(e.face.parent) e.face.parent.remove(e.face);
+          }
           lampPool.length = 0;
           _lampNear.length = 0;
+          if(_lampFaceGeo){ _lampFaceGeo.dispose(); _lampFaceGeo = null; }
+          if(_lampFaceMat){
+            if(_lampFaceMat.map) _lampFaceMat.map.dispose();
+            _lampFaceMat.dispose(); _lampFaceMat = null;
+          }
         }
         function updateLampLights(dt){
           if(!scene || !player) return;
@@ -1460,17 +1484,23 @@
           }
           const nightBoost = 1.05 + (1 - _dayF) * 0.9;
           for(let i = 0; i < LAMP_LIGHT_CAP; i++){
-            const L = lampPool[i];
+            const e = lampPool[i];
             const src = _lampNear[i];
-            if(!src){ L.visible = false; L.intensity = 0; continue; }
-            L.visible = true;
-            L.intensity = nightBoost;
-            L.distance = 11;
-            L.position.set(
-              src.x + 0.5 + WORLD_OFFSET.x,
-              src.y + 0.5 + WORLD_OFFSET.y,
-              src.z + 0.5 + WORLD_OFFSET.z
-            );
+            if(!src){
+              e.light.visible = false; e.light.intensity = 0;
+              e.face.visible = false;
+              continue;
+            }
+            const wx = src.x + 0.5 + WORLD_OFFSET.x;
+            const wy = src.y + 0.5 + WORLD_OFFSET.y;
+            const wz = src.z + 0.5 + WORLD_OFFSET.z;
+            e.light.visible = true;
+            e.light.intensity = nightBoost;
+            e.light.distance = 11;
+            e.light.position.set(wx, wy, wz);
+            // Self-lit shell so the block stays bright even when the PointLight is inside it.
+            e.face.visible = true;
+            e.face.position.set(wx, wy, wz);
           }
         }
 
