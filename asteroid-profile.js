@@ -350,15 +350,21 @@
         const planets = (sys.planets && typeof sys.planets === 'object') ? sys.planets : {};
         out.unlocked.forEach((id) => {
             const ps = (planets[id] && typeof planets[id] === 'object') ? planets[id] : {};
-            const edits = Array.isArray(ps.edits) ? ps.edits.filter(
-                (e) => e && typeof e === 'object'
-            ).map((e) => {
+            // Edits may be objects {x,y,z,id,t} (local / legacy cloud) or packed
+            // arrays [x,y,z,id,t?] used by CloudSync to stay under the wire size cap.
+            const edits = Array.isArray(ps.edits) ? ps.edits.map((e) => {
+                if (Array.isArray(e)) {
+                    const row = { x: e[0] | 0, y: e[1] | 0, z: e[2] | 0, id: e[3] | 0 };
+                    if (e[4]) row.t = +e[4] || 0;
+                    return row;
+                }
+                if (!e || typeof e !== 'object') return null;
                 const row = { x: e.x | 0, y: e.y | 0, z: e.z | 0, id: e.id | 0 };
                 // Preserve the edit timestamp (when present) so cross-device
                 // merge can pick the newest change per cell. Old edits lack it.
                 if (e.t) row.t = +e.t || 0;
                 return row;
-            }) : [];
+            }).filter(Boolean) : [];
             out.planets[id] = {
                 edits,
                 claimName: String(ps.claimName || '').slice(0, 24),

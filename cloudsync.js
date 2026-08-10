@@ -82,17 +82,50 @@ window.CloudSync = (function () {
       .replace(/-+/g, '-');
   }
 
+  // Pack per-planet edits as [x,y,z,id,t?] arrays for the wire — cuts JSON size
+  // ~35–45% vs {x,y,z,id,t} objects so big builds stay under the cloud_push cap.
+  // AsteroidProfile.normalizeSystem expands both shapes on load.
+  function compactForCloud(profile) {
+    if (!profile || typeof profile !== 'object') return profile;
+    var p;
+    try { p = JSON.parse(JSON.stringify(profile)); } catch (_) { return profile; }
+    var planets = p.system && p.system.planets;
+    if (!planets) return p;
+    Object.keys(planets).forEach(function (id) {
+      var st = planets[id];
+      if (!st || !Array.isArray(st.edits)) return;
+      st.edits = st.edits.map(function (e) {
+        if (Array.isArray(e)) return e;
+        if (!e || typeof e !== 'object') return e;
+        return e.t ? [e.x | 0, e.y | 0, e.z | 0, e.id | 0, +e.t || 0]
+                   : [e.x | 0, e.y | 0, e.z | 0, e.id | 0];
+      });
+    });
+    return p;
+  }
+  function friendlyCloudError(err) {
+    var msg = (err && (err.message || err.details || err.hint)) || String(err || 'unknown');
+    if (/save too large/i.test(msg) || /too large/i.test(msg) || /413|payload/i.test(msg)) {
+      return 'Cloud save too big — local still works. Ask a grown-up to update the cloud limit.';
+    }
+    if (/Failed to fetch|NetworkError|network/i.test(msg)) {
+      return 'No network for cloud save — local still works.';
+    }
+    return msg;
+  }
+
   // ---- RPCs ----
   function pull(code) {
     var c = client(); if (!c) return Promise.reject(new Error('cloud off'));
     return c.rpc('cloud_pull', { p_code: normalize(code) }).then(function (r) {
       if (r.error) throw r.error;
-      return r.data; // stored profile JSON, or null
+      return r.data; // stored profile JSON, or null (edits may be packed arrays)
     });
   }
   function push(code, profile) {
     var c = client(); if (!c) return Promise.reject(new Error('cloud off'));
-    return c.rpc('cloud_push', { p_code: normalize(code), p_data: profile }).then(function (r) {
+    var payload = compactForCloud(profile);
+    return c.rpc('cloud_push', { p_code: normalize(code), p_data: payload }).then(function (r) {
       if (r.error) throw r.error;
       return r.data; // updated_at
     });
@@ -113,8 +146,9 @@ window.CloudSync = (function () {
       push(code, p).then(function () {
         _set({ phase: 'saved', lastSaved: Date.now(), error: null });
       }).catch(function (e) {
-        console.warn('[cloud] push failed:', e.message || e);
-        _set({ phase: 'error', error: (e && e.message) || String(e) });
+        var friendly = friendlyCloudError(e);
+        console.warn('[cloud] push failed:', friendly, e);
+        _set({ phase: 'error', error: friendly });
       });
     }, 1500);
   }
@@ -130,7 +164,7 @@ window.CloudSync = (function () {
       setCode(code);
       _set({ code: code, phase: 'saved', lastSaved: Date.now(), error: null });
       return code;
-    }).catch(function (e) { _set({ phase: 'error', error: (e && e.message) || String(e) }); throw e; });
+    }).catch(function (e) { _set({ phase: 'error', error: friendlyCloudError(e) }); throw e; });
   }
 
   // Pull an existing save by code and overwrite the local active profile.
@@ -146,7 +180,7 @@ window.CloudSync = (function () {
       _set({ code: code, phase: 'saved', lastSaved: Date.now(), error: null });
       return true;
     }).catch(function (e) {
-      if (_state.phase !== 'error') _set({ phase: 'error', error: (e && e.message) || String(e) });
+      if (_state.phase !== 'error') _set({ phase: 'error', error: friendlyCloudError(e) });
       throw e;
     });
   }
@@ -176,8 +210,9 @@ window.CloudSync = (function () {
         return { ok: true, changed: true };
       });
     }).catch(function (e) {
-      console.warn('[cloud] reconcile failed:', e.message || e);
-      _set({ phase: 'error', error: (e && e.message) || String(e) });
+      var friendly = friendlyCloudError(e);
+      console.warn('[cloud] reconcile failed:', friendly, e);
+      _set({ phase: 'error', error: friendly });
       return { ok: false, reason: 'error', error: e };
     });
   }

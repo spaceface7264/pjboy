@@ -5434,13 +5434,22 @@ ${waveConsts}
                 case 'pending':
                 case 'syncing': text = 'Saving…'; break;
                 case 'saved':   text = 'Saved' + (st.lastSaved ? ' · ' + _cloudRelTime(st.lastSaved) : ''); break;
-                case 'error':   ico = '⚠'; text = 'Save failed'; break;
+                case 'error': {
+                    ico = '⚠';
+                    // Keep the pill short; put the full reason on hover.
+                    text = /too big/i.test(st.error || '') ? 'Cloud too big' : 'Save failed';
+                    break;
+                }
                 case 'linked':  text = 'Cloud on'; break;
                 case 'local':
                 default:        ico = '⌂'; text = 'Local only'; break;
             }
             el.innerHTML = '<span class="vx-cloud-ico">' + ico + '</span>' + text;
-            el.title = st.code ? ('Cloud code: ' + st.code) : 'Not linked to a cloud code — edits stay on this device.';
+            if (st.phase === 'error' && st.error) {
+                el.title = st.error + (st.code ? (' · code ' + st.code) : '');
+            } else {
+                el.title = st.code ? ('Cloud code: ' + st.code) : 'Not linked to a cloud code — edits stay on this device.';
+            }
         }
 
         function recordJournalScan(blockId) {
