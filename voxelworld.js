@@ -843,6 +843,7 @@
           c[cIdx(x-cx*CH, y, z-cz*CH)] = id;
           recordEdit(x,y,z,id);
           registerTntBlock(x,y,z,id);          // keep the live-TNT set in sync for the detonator/lava
+          registerLampCell(x,y,z,id);          // keep the lamp light index in sync
           if(id){ const k=colKey(cx,cz); if(y > (colMaxY.get(k)||0)) colMaxY.set(k, y); }
           rebuildChunkAt(x,y,z);               // instant: the column you actually touched
           // x/z borders share faces with the neighbor column — remesh those async (next
@@ -962,6 +963,7 @@
                 if (e.y < 0 || e.y >= H) continue;
                 recordEdit(e.x | 0, e.y | 0, e.z | 0, e.id | 0);
             }
+            if (typeof rebuildLampIndexFromEdits === 'function') rebuildLampIndexFromEdits();
         }
         // Overlay any saved edits for the canonical chunk this column maps to.
         function applyEditsToCol(buf, cx, cz){
@@ -1420,10 +1422,27 @@
         // PointLights sit at the block center, so they light the room but not the lamp's own
         // Lambert faces. A MeshBasic overlay (ignores scene lighting) makes the block itself glow.
         const LAMP_LIGHT_CAP = 8;
+        const LAMP_REACH = 32;                  // world units — was 11, which snuffed out after a few steps
+        const LAMP_DECAY = 1.4;                 // gentler than physical (2) so the pool stays warm farther out
         const lampPool = [];                    // { light, face }
+        const lampCells = new Map();            // canonical "ex,y,ez" -> {x,y,z} (voxel)
         const _lampNear = [];
         let _lampScanT = 0;
         let _lampFaceGeo = null, _lampFaceMat = null;
+        function lampCellKey(x, y, z){ return pmod(x) + ',' + y + ',' + pmod(z); }
+        function registerLampCell(x, y, z, id){
+          const k = lampCellKey(x, y, z);
+          if(id === LAMP_ID) lampCells.set(k, { x: pmod(x), y: y | 0, z: pmod(z) });
+          else lampCells.delete(k);
+        }
+        function rebuildLampIndexFromEdits(){
+          lampCells.clear();
+          for(const [k, id] of editStore){
+            if(id !== LAMP_ID) continue;
+            const p = k.split(',');
+            lampCells.set(k, { x: +p[0], y: +p[1], z: +p[2] });
+          }
+        }
         function ensureLampLights(){
           if(!scene) return;
           if(!_lampFaceGeo) _lampFaceGeo = new THREE.BoxGeometry(1.02, 1.02, 1.02);
@@ -1434,7 +1453,7 @@
             _lampFaceMat = new THREE.MeshBasicMaterial({ map: tex });
           }
           while(lampPool.length < LAMP_LIGHT_CAP){
-            const light = new THREE.PointLight(0xffe2a0, 0, 11, 2);
+            const light = new THREE.PointLight(0xffe2a0, 0, LAMP_REACH, LAMP_DECAY);
             light.visible = false;
             const face = new THREE.Mesh(_lampFaceGeo, _lampFaceMat);
             face.visible = false;
@@ -1450,39 +1469,44 @@
           }
           lampPool.length = 0;
           _lampNear.length = 0;
+          lampCells.clear();
           if(_lampFaceGeo){ _lampFaceGeo.dispose(); _lampFaceGeo = null; }
           if(_lampFaceMat){
             if(_lampFaceMat.map) _lampFaceMat.map.dispose();
             _lampFaceMat.dispose(); _lampFaceMat = null;
           }
         }
+        // Map a canonical edit coord onto the period copy nearest the player so lights
+        // track correctly when the world wraps.
+        function lampWorldNearPlayer(cell, px, pz){
+          let x = cell.x, z = cell.z;
+          const dx0 = x - px, dz0 = z - pz;
+          if(dx0 > WORLD_PERIOD * 0.5) x -= WORLD_PERIOD;
+          else if(dx0 < -WORLD_PERIOD * 0.5) x += WORLD_PERIOD;
+          if(dz0 > WORLD_PERIOD * 0.5) z -= WORLD_PERIOD;
+          else if(dz0 < -WORLD_PERIOD * 0.5) z += WORLD_PERIOD;
+          return { x, y: cell.y, z };
+        }
         function updateLampLights(dt){
           if(!scene || !player) return;
           ensureLampLights();
           _lampScanT -= dt;
           if(_lampScanT <= 0){
-            _lampScanT = 0.4;
+            _lampScanT = 0.25;
             _lampNear.length = 0;
             const ox = WORLD_OFFSET.x, oy = WORLD_OFFSET.y, oz = WORLD_OFFSET.z;
-            const px = Math.floor(player.pos.x - ox);
-            const py = Math.floor(player.pos.y - oy);
-            const pz = Math.floor(player.pos.z - oz);
-            const Rxy = 16, Ry = 10;
-            for(let y = py - Ry; y <= py + Ry; y++){
-              if(y < 0 || y >= H) continue;
-              for(let x = px - Rxy; x <= px + Rxy; x++){
-                for(let z = pz - Rxy; z <= pz + Rxy; z++){
-                  if(getBlock(x, y, z) !== LAMP_ID) continue;
-                  const dx = (x + 0.5 + ox) - player.pos.x;
-                  const dy = (y + 0.5 + oy) - player.pos.y;
-                  const dz = (z + 0.5 + oz) - player.pos.z;
-                  _lampNear.push({ x, y, z, d2: dx*dx + dy*dy + dz*dz });
-                }
-              }
+            const px = player.pos.x - ox, py = player.pos.y - oy, pz = player.pos.z - oz;
+            const reach2 = LAMP_REACH * LAMP_REACH;
+            for(const cell of lampCells.values()){
+              const w = lampWorldNearPlayer(cell, px, pz);
+              const dx = (w.x + 0.5) - px, dy = (w.y + 0.5) - py, dz = (w.z + 0.5) - pz;
+              const d2 = dx*dx + dy*dy + dz*dz;
+              if(d2 > reach2) continue;
+              _lampNear.push({ x: w.x, y: w.y, z: w.z, d2 });
             }
             _lampNear.sort((a, b) => a.d2 - b.d2);
           }
-          const nightBoost = 1.05 + (1 - _dayF) * 0.9;
+          const nightBoost = 1.25 + (1 - _dayF) * 1.1;
           for(let i = 0; i < LAMP_LIGHT_CAP; i++){
             const e = lampPool[i];
             const src = _lampNear[i];
@@ -1496,7 +1520,8 @@
             const wz = src.z + 0.5 + WORLD_OFFSET.z;
             e.light.visible = true;
             e.light.intensity = nightBoost;
-            e.light.distance = 11;
+            e.light.distance = LAMP_REACH;
+            e.light.decay = LAMP_DECAY;
             e.light.position.set(wx, wy, wz);
             // Self-lit shell so the block stays bright even when the PointLight is inside it.
             e.face.visible = true;
@@ -10375,6 +10400,7 @@ ${waveConsts}
             const c=ensureCol(ccx,ccz);
             c[cIdx(x-ccx*CH, y, z-ccz*CH)] = 0;
             recordEdit(x,y,z,0);
+            registerLampCell(x,y,z,0);
             _blastEditBuf.push({x:pmod(x), y, z:pmod(z), id:0});   // committed together after the burst
             addCol(x,z);
             const lx=_mod(x,CH), lz=_mod(z,CH);
