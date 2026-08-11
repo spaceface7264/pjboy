@@ -34,6 +34,9 @@
 
   // BlockRegistry ids reused from voxelworld.js
   const BASALT = 17, OBSIDIAN = 21, LAVA = 38, FLOW = 42, ASH = 43, MAGMA = 44, AIR = 0;
+  const GRASS = 1, DIRT = 2, STONE = 3, SAND = 4, WOOD = 5, LEAVES = 6, ICE = 8;
+  const CRYSTAL = 10, SNOW = 20, FUNGAL = 36, WATER = 40, METAL = 7, GLASS = 32;
+  const REGOLITH = 16, REDROCK = 18, HIVE = 37, EMERALD = 29;
 
   const DEFS = {
     // ---- Volcano: a tall erupting stratovolcano with lava pouring down its sides.
@@ -42,6 +45,8 @@
     volcano: {
       name: 'Volcano', nameDa: 'Vulkan',
       biome: ['volcanic'], region: ['peak'], rarity: 'landmark', footprint: 44,
+      sci: { formula: 'magma', mineral: 'Landmark', fact: 'Magma is molten rock under the ground. When it erupts and cools on the surface, it becomes lava rock like basalt.' },
+      desc: 'A towering cone of basalt and glowing magma veins. Lava flows cut bright rivers down its flanks.',
       stamp(ctx){
         const g = ctx.ground;
         const R = 17 + (ctx.rng()*5|0);        // base radius — grand, deliberate
@@ -98,6 +103,8 @@
     ruin: {
       name: 'Ancient Ruins', nameDa: 'Oldtidsruiner',
       biome: ['volcanic'], region: ['ruin'], rarity: 'landmark', footprint: 22,
+      sci: { formula: 'archaeology', mineral: 'Landmark', fact: 'Ruins are leftover buildings. Studying them helps scientists learn how people — or aliens — lived long ago.' },
+      desc: 'A raised obsidian plaza ringed by broken pillars. An altar still glows with a magma heart.',
       stamp(ctx){
         const g = ctx.ground, P = 8;
         // raised plaza floor (obsidian inlay in basalt)
@@ -163,6 +170,139 @@
         for(let dx=RO-1; dx<=RO+2; dx++) for(let dy=1; dy<=3; dy++) for(let dz=-1; dz<=1; dz++)
           ctx.set(dx, floorY+dy, dz, AIR);
       }
+    },
+
+    // ---- Verdant Moss Shrine: a quiet ring of wood pillars around a crystal heart.
+    mossShrine: {
+      name: 'Moss Shrine', nameDa: 'Moshelligdom',
+      biome: ['verdant'], rarity: 'landmark', footprint: 16,
+      sci: { formula: 'habitat', mineral: 'Landmark', fact: 'A habitat is a place where living things can find food, water, and shelter. Shrines like this mark a quiet pocket of the claim.' },
+      desc: 'A ring of weathered pillars around a glowing crystal heart. Someone — or something — kept this place tidy.',
+      stamp(ctx){
+        const g = ctx.ground, R = 6;
+        for(let dx=-R; dx<=R; dx++) for(let dz=-R; dz<=R; dz++){
+          const d2 = dx*dx + dz*dz;
+          if(d2 <= R*R) ctx.set(dx, g, dz, (d2 <= 4) ? STONE : GRASS);
+        }
+        const cols = [[-4,-4],[0,-5],[4,-4],[-5,0],[5,0],[-4,4],[0,5],[4,4]];
+        for(const c of cols){
+          const ht = 3 + (ctx.rng()*2|0);
+          for(let dy=1; dy<=ht; dy++) ctx.set(c[0], g+dy, c[1], WOOD);
+          ctx.set(c[0], g+ht+1, c[1], LEAVES);
+        }
+        ctx.set(0, g+1, 0, STONE);
+        ctx.set(0, g+2, 0, CRYSTAL);
+        ctx.set(0, g+3, 0, CRYSTAL);
+      }
+    },
+
+    // ---- Frost Geyser: ice cone venting a crystal plume (teaches water phases).
+    frostGeyser: {
+      name: 'Frost Geyser', nameDa: 'Frostgejser',
+      biome: ['frost'], rarity: 'landmark', footprint: 18,
+      sci: { formula: 'H₂O phases', mineral: 'Landmark', fact: 'Water can be ice, liquid, or steam. A geyser pushes hot water up through cracks until it bursts into the cold air.' },
+      desc: 'A cracked ice cone with a crystal plume. Warm water once punched through the frozen crust here.',
+      stamp(ctx){
+        const g = ctx.ground, R = 7, Hc = 8;
+        for(let dy=0; dy<=Hc; dy++){
+          const r = Math.max(2, R * (1 - dy/(Hc+1)));
+          const rr = r*r;
+          for(let dx=-R; dx<=R; dx++) for(let dz=-R; dz<=R; dz++){
+            const d2 = dx*dx + dz*dz;
+            if(d2 > rr) continue;
+            if(dy > Hc-3 && d2 < 2.5*2.5) continue;
+            ctx.set(dx, g+dy, dz, (dy > Hc-2) ? ICE : SNOW);
+          }
+        }
+        // vent pool + crystal plume
+        ctx.set(0, g+Hc-2, 0, WATER);
+        ctx.set(0, g+Hc-1, 0, WATER);
+        for(let dy=0; dy<5; dy++) ctx.set(0, g+Hc+dy, 0, CRYSTAL);
+        ctx.set(1, g+Hc+2, 0, CRYSTAL);
+        ctx.set(-1, g+Hc+3, 0, ICE);
+        // icy apron
+        for(let dx=-R-2; dx<=R+2; dx++) for(let dz=-R-2; dz<=R+2; dz++){
+          const d2 = dx*dx + dz*dz;
+          if(d2 > R*R && d2 <= (R+2)*(R+2) && ctx.rng() < 0.55) ctx.set(dx, g, dz, ICE);
+        }
+      }
+    },
+
+    // ---- Spore Spire: stacked fungal caps — Mycelia landmark.
+    sporeSpire: {
+      name: 'Spore Spire', nameDa: 'Sporespiral',
+      biome: ['fungal'], rarity: 'landmark', footprint: 14,
+      sci: { formula: 'mycelium', mineral: 'Landmark', fact: 'Fungi grow a hidden web of threads underground called mycelium. The caps you see are just the fruiting bodies that release spores.' },
+      desc: 'A tower of stacked fungal caps pulsing with soft light. Spores drift from the crown.',
+      stamp(ctx){
+        const g = ctx.ground;
+        for(let dy=1; dy<=10; dy++) ctx.set(0, g+dy, 0, FUNGAL);
+        const caps = [[3,3],[5,5],[7,4],[9,3]];
+        for(const [y,r] of caps){
+          for(let dx=-r; dx<=r; dx++) for(let dz=-r; dz<=r; dz++){
+            if(dx*dx + dz*dz <= r*r) ctx.set(dx, g+y, dz, (Math.abs(dx)+Math.abs(dz))%3 ? FUNGAL : HIVE);
+          }
+        }
+        ctx.set(0, g+11, 0, EMERALD);
+        ctx.set(0, g+12, 0, HIVE);
+        // soft ring of fungal mats
+        for(let a=0; a<8; a++){
+          const ang = a/8*Math.PI*2, rr = 5;
+          ctx.set(Math.round(Math.cos(ang)*rr), g+1, Math.round(Math.sin(ang)*rr), FUNGAL);
+        }
+      }
+    },
+
+    // ---- Dust Beacon: rusted antenna on a regolith pad — Dustfall landmark.
+    dustBeacon: {
+      name: 'Dust Beacon', nameDa: 'Støvfyrtårn',
+      biome: ['desert'], rarity: 'landmark', footprint: 12,
+      sci: { formula: 'signal', mineral: 'Landmark', fact: 'A beacon is a signal that says “I am here.” Radio antennas send invisible waves through space so explorers can find each other.' },
+      desc: 'A lonely metal mast on a stone pad. Its tip still glows — an old signal that never switched off.',
+      stamp(ctx){
+        const g = ctx.ground, P = 4;
+        for(let dx=-P; dx<=P; dx++) for(let dz=-P; dz<=P; dz++)
+          ctx.set(dx, g, dz, ((Math.abs(dx)+Math.abs(dz))%2) ? STONE : REGOLITH);
+        for(let dy=1; dy<=9; dy++) ctx.set(0, g+dy, 0, METAL);
+        ctx.set(0, g+10, 0, CRYSTAL);
+        ctx.set(0, g+11, 0, CRYSTAL);
+        // cross-arms
+        ctx.set(-2, g+7, 0, METAL); ctx.set(-1, g+7, 0, METAL);
+        ctx.set(1, g+7, 0, METAL); ctx.set(2, g+7, 0, METAL);
+        ctx.set(0, g+7, -2, METAL); ctx.set(0, g+7, 2, METAL);
+        // fallen crates
+        ctx.set(3, g+1, 2, METAL); ctx.set(3, g+1, 3, METAL);
+        ctx.set(-3, g+1, -2, REDROCK);
+      }
+    },
+
+    // ---- Tide Arch: stone/sand arch with a water mirror — Aquaria-friendly verdant coasts.
+    tideArch: {
+      name: 'Tide Arch', nameDa: 'Tidebue',
+      biome: ['verdant'], rarity: 'landmark', footprint: 16,
+      sci: { formula: 'erosion', mineral: 'Landmark', fact: 'Waves and wind slowly wear rock away. Over a long time that carving can open an arch you can walk under.' },
+      desc: 'A stone arch worn by old tides, with a shallow pool mirroring the sky.',
+      stamp(ctx){
+        const g = ctx.ground;
+        // pool
+        for(let dx=-3; dx<=3; dx++) for(let dz=-2; dz<=2; dz++){
+          ctx.set(dx, g-1, dz, STONE);
+          ctx.set(dx, g, dz, WATER);
+        }
+        // two pillars + arch cap
+        for(let dy=1; dy<=5; dy++){ ctx.set(-4, g+dy, 0, STONE); ctx.set(4, g+dy, 0, STONE); }
+        for(let dx=-4; dx<=4; dx++){
+          ctx.set(dx, g+6, 0, STONE);
+          if(Math.abs(dx) < 3) ctx.set(dx, g+7, 0, SAND);
+        }
+        ctx.set(0, g+8, 0, GLASS);
+        // sand banks
+        for(let dx=-6; dx<=6; dx++) for(let dz=-4; dz<=4; dz++){
+          if(Math.abs(dx) > 3 || Math.abs(dz) > 2){
+            if(ctx.rng() < 0.4) ctx.set(dx, g, dz, SAND);
+          }
+        }
+      }
     }
   };
 
@@ -174,6 +314,13 @@
     const k = Object.keys(DEFS).find(k => DEFS[k].rarity === 'boss' && DEFS[k].biome.indexOf(biome) >= 0);
     return k ? DEFS[k] : null;
   }
+  // List landmark defs (id + metadata) for a biome — used by HUD / missions.
+  function landmarksFor(biome){
+    return scatterFor(biome).map((id) => Object.assign({ id }, DEFS[id]));
+  }
 
-  window.AsteroidStructures = { DEFS, get, scatterFor, lairFor, _ids:{ BASALT, OBSIDIAN, LAVA, FLOW, ASH, MAGMA } };
+  window.AsteroidStructures = {
+    DEFS, get, scatterFor, lairFor, landmarksFor,
+    _ids:{ BASALT, OBSIDIAN, LAVA, FLOW, ASH, MAGMA, GRASS, STONE, WOOD, ICE, CRYSTAL, FUNGAL, SAND }
+  };
 })();

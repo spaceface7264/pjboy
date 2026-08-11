@@ -1961,8 +1961,10 @@
         // player edits so mined/built changes always win. Each chunk paints only
         // its own slice of a structure (clipped in the setter); neighbours recompute
         // the same deterministic stamp, so multi-chunk structures assemble seamlessly.
-        const _STRUCT_SITE = 96;                    // coarse placement grid (6 chunks)
+        // Non-Ember biomes use a denser grid so shrines/geysers show up while exploring.
+        const _STRUCT_SITE = 72;
         let _lairSeedCache = null, _lairPosCache = null;
+        let _homeLmSeedCache = null, _homeLmPosCache = null;
         // One guaranteed boss lair per world, anchored deterministically near spawn.
         function bossLairPos(){
           if(_lairSeedCache === SEED) return _lairPosCache;
@@ -1971,6 +1973,70 @@
           _lairPosCache = { x: Math.round(Math.cos(ang)*dist), z: Math.round(Math.sin(ang)*dist) };
           _lairSeedCache = SEED;
           return _lairPosCache;
+        }
+        // Guaranteed starter landmark within a short walk of spawn (every biome).
+        function homeLandmarkPos(){
+          if(_homeLmSeedCache === SEED) return _homeLmPosCache;
+          const ang = ihash(17,29,43) * Math.PI * 2;
+          const dist = 52 + ihash(19,37,61) * 24;   // 52..76 blocks from origin
+          _homeLmPosCache = { x: Math.round(Math.cos(ang)*dist), z: Math.round(Math.sin(ang)*dist) };
+          _homeLmSeedCache = SEED;
+          return _homeLmPosCache;
+        }
+        function structureSiteParams(biome){
+          const isVolc = biome === 'volcanic';
+          return {
+            isVolc,
+            SITE: isVolc ? 104 : _STRUCT_SITE,
+            MARG: isVolc ? 30 : 22,
+            rollThresh: isVolc ? 0.6 : 0.28
+          };
+        }
+        function pickScatterDefId(scatter, sx, sz, regionK){
+          const eligible = scatter.filter((id) => {
+            const d = _AST.get(id);
+            return d && (!d.region || (regionK && d.region.indexOf(regionK) >= 0));
+          });
+          if(!eligible.length) return null;
+          return eligible[Math.floor(ihash(sx, 393, sz) * eligible.length)];
+        }
+        // Recompute the nearest deterministic landmark site (same grid as stampStructures).
+        // Used by scanner + mission pins — no need to store stamps per chunk.
+        function findLandmarkNear(wx, wz, maxDist){
+          if(!_AST) return null;
+          const biome = activeBiomeKey;
+          const scatter = _AST.scatterFor(biome);
+          if(!scatter.length) return null;
+          const { isVolc, SITE, rollThresh } = structureSiteParams(biome);
+          const maxD = (maxDist == null) ? 18 : maxDist;
+          const maxD2 = maxD * maxD;
+          let best = null, bestD2 = maxD2;
+          const consider = (ax, az, id) => {
+            const dx = ax - wx, dz = az - wz;
+            const d2 = dx*dx + dz*dz;
+            if(d2 > bestD2) return;
+            const def = _AST.get(id);
+            if(!def) return;
+            bestD2 = d2;
+            best = { id, def, ax, az, dist: Math.sqrt(d2) };
+          };
+          const sx0 = Math.floor((wx - maxD) / SITE) - 1, sx1 = Math.floor((wx + maxD) / SITE) + 1;
+          const sz0 = Math.floor((wz - maxD) / SITE) - 1, sz1 = Math.floor((wz + maxD) / SITE) + 1;
+          for(let sx = sx0; sx <= sx1; sx++) for(let sz = sz0; sz <= sz1; sz++){
+            if(ihash(sx*2+1, 7001, sz*2+1) >= rollThresh) continue;
+            const ax = sx*SITE + Math.floor(ihash(sx, 131, sz)*SITE);
+            const az = sz*SITE + Math.floor(ihash(sx, 262, sz)*SITE);
+            const ground = columnProfile(ax, az).height;
+            if(ground < SEA_LEVEL-2) continue;
+            const regionK = isVolc ? volcRegion(ax, az).k : null;
+            const id = pickScatterDefId(scatter, sx, sz, regionK);
+            if(id) consider(ax, az, id);
+          }
+          const hp = homeLandmarkPos();
+          const homeId = pickScatterDefId(scatter, 9001, 9002, isVolc ? volcRegion(hp.x, hp.z).k : null)
+            || scatter[Math.floor(ihash(71, 82, 93) * scatter.length)];
+          if(homeId) consider(hp.x, hp.z, homeId);
+          return best;
         }
         function stampStructures(buf, cx, cz, x0, z0, curMaxY){
           let mY = curMaxY;
@@ -1989,18 +2055,13 @@
               heightAt(dx,dz){ return columnProfile(ax+dx, az+dz).height; } };
           };
           const biome = activeBiomeKey;
-          const isVolc = biome === 'volcanic';
+          const { isVolc, SITE, MARG, rollThresh } = structureSiteParams(biome);
 
           // (1) scattered landmarks on a coarse site grid. On Ember, a structure's
           //     def.region gates it to the matching zone (volcanoes in highlands,
           //     ruins on plateaus), so each region reads as its own place.
           const scatter = _AST.scatterFor(biome);
           if(scatter.length){
-            // Ember uses a coarser grid so volcanoes stay well-separated — one grand
-            // peak per highland core rather than a cluster of small cones.
-            const SITE = isVolc ? 104 : _STRUCT_SITE;                    // closer-together Ember landmarks
-            const MARG = isVolc ? 30 : 24;                               // ≥ largest structure reach
-            const rollThresh = isVolc ? 0.6 : 0.16;                      // per qualifying (region-gated) cell
             const sx0 = Math.floor((x0 - MARG)/SITE) - 1, sx1 = Math.floor((x0+CH-1+MARG)/SITE);
             const sz0 = Math.floor((z0 - MARG)/SITE) - 1, sz1 = Math.floor((z0+CH-1+MARG)/SITE);
             for(let sx=sx0; sx<=sx1; sx++) for(let sz=sz0; sz<=sz1; sz++){
@@ -2010,12 +2071,24 @@
               const ground = columnProfile(ax, az).height;
               if(ground < SEA_LEVEL-2) continue;                          // not in a fluid sea
               const regionK = isVolc ? volcRegion(ax, az).k : null;
-              // only structures whose zone matches here (region-less defs go anywhere)
-              const eligible = scatter.filter(id => { const d = _AST.get(id); return !d.region || (regionK && d.region.indexOf(regionK) >= 0); });
-              if(!eligible.length) continue;
-              const def = _AST.get(eligible[Math.floor(ihash(sx, 393, sz)*eligible.length)]);
+              const id = pickScatterDefId(scatter, sx, sz, regionK);
+              const def = id ? _AST.get(id) : null;
               if(!def) continue;
               def.stamp(ctxFor(ax, az, ground, Math.floor(ihash(ax, 555, az)*4294967296), regionK));
+            }
+
+            // (1b) one guaranteed landmark near spawn so every claim has a walkable find.
+            const hp = homeLandmarkPos(), homeReach = 22;
+            if(hp.x+homeReach >= x0 && hp.x-homeReach <= x0+CH-1 && hp.z+homeReach >= z0 && hp.z-homeReach <= z0+CH-1){
+              const regionK = isVolc ? volcRegion(hp.x, hp.z).k : null;
+              const hid = pickScatterDefId(scatter, 9001, 9002, regionK)
+                || scatter[Math.floor(ihash(71, 82, 93) * scatter.length)];
+              const hdef = hid ? _AST.get(hid) : null;
+              if(hdef){
+                const ground = columnProfile(hp.x, hp.z).height;
+                if(ground >= SEA_LEVEL-2)
+                  hdef.stamp(ctxFor(hp.x, hp.z, ground, Math.floor(ihash(hp.x, 777, hp.z)*4294967296), regionK));
+              }
             }
           }
 
@@ -4707,6 +4780,7 @@ ${waveConsts}
         }
 
         let _scanBlockId = -1;
+        let _scanLandmarkId = null;
         let scanExpanded = false;
         let _scanSticky = null;
         const _scanWorld = new THREE.Vector3();
@@ -4778,7 +4852,7 @@ ${waveConsts}
 
             if (catEl) catEl.textContent = `${CAT_ICONS[b.cat] || '▪'} ${b.cat || ''}`;
             if (nameEl) {
-                const da = BLOCK_DA[b.name];
+                const da = b.nameDa || BLOCK_DA[b.name];
                 nameEl.innerHTML = b.name + (da
                     ? `<span class="vx-scan-da" style="display:block;font-size:0.66em;font-weight:600;letter-spacing:0;opacity:0.7;color:#7fd4ff;margin-top:2px;">🇩🇰 ${da}</span>`
                     : '');
@@ -4845,7 +4919,10 @@ ${waveConsts}
                     releasePointerLock();
                     syncViewCursor();
                 }
-                if (_scanBlockId >= 0) {
+                if (_scanLandmarkId && _AST) {
+                    const def = _AST.get(_scanLandmarkId);
+                    if (def) fillLandmarkScanContent(def, true);
+                } else if (_scanBlockId >= 0) {
                     const b = blockById(_scanBlockId);
                     if (b) fillScanPanelContent(b, _scanBlockId, 0, true);
                 }
@@ -4859,7 +4936,10 @@ ${waveConsts}
                     panel.style.height = '';
                     panel.style.maxHeight = '';
                 }
-                if (_scanBlockId >= 0) {
+                if (_scanLandmarkId && _AST) {
+                    const def = _AST.get(_scanLandmarkId);
+                    if (def) fillLandmarkScanContent(def, false);
+                } else if (_scanBlockId >= 0) {
                     const b = blockById(_scanBlockId);
                     if (b) fillScanPanelContent(b, _scanBlockId, 0, false);
                 }
@@ -5245,6 +5325,7 @@ ${waveConsts}
             hideScanFrame();
             formulaViewer.active = false;
             _scanBlockId = -1;
+            _scanLandmarkId = null;
             resizeFormulaCanvas(false);
         }
 
@@ -5550,6 +5631,7 @@ ${waveConsts}
                 if (_scanCreatureId !== cre.sp.id) {
                     _scanCreatureId = cre.sp.id;
                     _scanBlockId = -1;
+                    _scanLandmarkId = null;
                     fillCreatureScanContent(cre.sp, scanExpanded);
                     recordCreatureScan(cre.sp);
                 }
@@ -5574,6 +5656,38 @@ ${waveConsts}
             hideScanFrame();
 
             const compactActive = isScanCompactActive(t);
+            // Landmark scan when aiming near a site (Shift held or card expanded).
+            if (compactActive || scanExpanded) {
+                const sx = compactActive ? t.x : (player.pos.x - WORLD_OFFSET.x);
+                const sz = compactActive ? t.z : (player.pos.z - WORLD_OFFSET.z);
+                const lm = findLandmarkNear(sx, sz, 14);
+                if (lm) {
+                    panel.hidden = false;
+                    const lAlpha = scanExpanded ? 1 : (0.4 + focusAimBlend * 0.6);
+                    panel.style.opacity = String(lAlpha);
+                    if (_scanLandmarkId !== lm.id) {
+                        _scanLandmarkId = lm.id;
+                        _scanBlockId = -1;
+                        fillLandmarkScanContent(lm.def, scanExpanded);
+                        recordLandmarkScan(lm);
+                    }
+                    if (scanExpanded) {
+                        layoutScanExpanded();
+                        const link = document.getElementById('voxel-scan-link');
+                        const marker = document.getElementById('voxel-scan-target');
+                        if (link) link.hidden = true;
+                        if (marker) marker.hidden = true;
+                    } else {
+                        const gy = columnProfile(lm.ax, lm.az).height + 2;
+                        const screen = projectScan(lm.ax + WORLD_OFFSET.x, gy + WORLD_OFFSET.y, lm.az + WORLD_OFFSET.z);
+                        layoutScanPanel(null, screen, 48);
+                        updateScanConnector(null, lAlpha, screen, true);
+                    }
+                    return;
+                }
+            }
+            _scanLandmarkId = null;
+
             if (compactActive) {
                 _scanSticky = {
                     x: t.x, y: t.y, z: t.z,
@@ -7052,7 +7166,7 @@ ${waveConsts}
         const INV_CATEGORIES = ['Terrain', 'Life', 'Resources', 'Crystals', 'Crafted', 'Hazards'];
         const CAT_ICONS = {
             Terrain: '🪨', Life: '🌿', Resources: '⛏️',
-            Crystals: '💎', Crafted: '🔧', Hazards: '☢️', Creature: '🐾'
+            Crystals: '💎', Crafted: '🔧', Hazards: '☢️', Creature: '🐾', Landmark: '◎'
         };
         // Field Journal station — one tab per page. The six block categories live as
         // sections inside Backpack/Catalog rather than as their own tabs.
@@ -8530,18 +8644,33 @@ ${waveConsts}
         function setWaypoint(wx, wz) { waypoint = { x: pmod(wx), z: pmod(wz) }; saveWaypoint(); }
         function clearWaypoint() { waypoint = null; saveWaypoint(); }
 
-        // Auto-pin the Star Gate for missions that need travel wayfinding.
+        // Auto-pin the Star Gate / nearest landmark for missions that need wayfinding.
         function syncMissionWaypoint() {
             const AP = getProfileApi();
             if (!AP || !AP.activeMission) return;
             const m = AP.activeMission(AP.load());
-            if (!m || m.pin !== 'gate' || !starGate) return;
-            const gx = pmod(starGate.pos.x), gz = pmod(starGate.pos.z);
-            if (waypoint) {
-                const dx = _wrapDelta(waypoint.x, gx), dz = _wrapDelta(waypoint.z, gz);
-                if (Math.hypot(dx, dz) < 6) return;
+            if (!m || !m.pin) return;
+            if (m.pin === 'gate') {
+                if (!starGate) return;
+                const gx = pmod(starGate.pos.x), gz = pmod(starGate.pos.z);
+                if (waypoint) {
+                    const dx = _wrapDelta(waypoint.x, gx), dz = _wrapDelta(waypoint.z, gz);
+                    if (Math.hypot(dx, dz) < 6) return;
+                }
+                setWaypoint(gx, gz);
+                return;
             }
-            setWaypoint(gx, gz);
+            if (m.pin === 'landmark') {
+                const px = Math.floor(player.pos.x - WORLD_OFFSET.x);
+                const pz = Math.floor(player.pos.z - WORLD_OFFSET.z);
+                const hit = findLandmarkNear(px, pz, 220);
+                if (!hit) return;
+                if (waypoint) {
+                    const dx = _wrapDelta(waypoint.x, hit.ax), dz = _wrapDelta(waypoint.z, hit.az);
+                    if (Math.hypot(dx, dz) < 8) return;
+                }
+                setWaypoint(hit.ax, hit.az);
+            }
         }
 
         // Wrapped (toroidal) delta from a→b on one axis, into [-PERIOD/2, PERIOD/2).
@@ -9313,6 +9442,8 @@ ${waveConsts}
         function travelToPlanet(id) {
             const AP = getProfileApi();
             if (!AP || !AP.setCurrentPlanet) return false;
+            const before = AP.load();
+            const firstVisit = !(before.system && before.system.planets && before.system.planets[id] && before.system.planets[id].visited);
             if (!AP.setCurrentPlanet(AP.load(), id)) return false;
             const def = AP.planetDef ? AP.planetDef(id) : null;
             showVoxelLoading(def ? ('Traveling to ' + def.name) : 'Traveling…', def ? def.nameDa : '');
@@ -9333,7 +9464,16 @@ ${waveConsts}
                     }
                     flushProfileState();
                     hideVoxelLoading();
-                    if (def && g.showMessage) g.showMessage((flying?'Descending toward ':'Arrived at ') + def.name + ' · ' + def.nameDa, 2600);
+                    if (firstVisit && def) {
+                        const blurb = def.blurb || '';
+                        vxLangMsg(
+                            'First steps on ' + def.name + (blurb ? (' — ' + blurb) : ''),
+                            'Første skridt på ' + (def.nameDa || def.name) + (blurb ? (' — ' + blurb) : ''),
+                            4200
+                        );
+                    } else if (def && g.showMessage) {
+                        g.showMessage((flying?'Descending toward ':'Arrived at ') + def.name + ' · ' + def.nameDa, 2600);
+                    }
                     try {
                         const AP2 = getProfileApi();
                         if (AP2 && AP2.recordTravel) {
@@ -10469,6 +10609,30 @@ ${waveConsts}
           if(isNew){ updateJournalHud(); if(g.showMessage) g.showMessage('Creature discovered: '+sp.name, 1800); }
           else if(completed) updateJournalHud();
           if(completed && g.showMessage) g.showMessage('Survey complete: '+completed.title, 2800);
+        }
+        function fillLandmarkScanContent(def, expanded){
+          const byId = {
+            mossShrine: 10, frostGeyser: 8, sporeSpire: 36, dustBeacon: 7, tideArch: 4,
+            volcano: 44, ruin: 21, emberLair: 38
+          };
+          const scanOn = byId[_scanLandmarkId] || 10;
+          const pseudo = {
+            cat: 'Landmark', name: def.name, nameDa: def.nameDa || '',
+            desc: def.desc || '', tags: ['landmark', (def.rarity || 'site')],
+            hardness: '—', sci: def.sci || { formula: 'site', mineral: 'Landmark', fact: '' }
+          };
+          fillScanPanelContent(pseudo, scanOn, 0, expanded);
+          const badgeText = document.querySelector('.vx-scan-badge-text');
+          if (badgeText) badgeText.textContent = expanded ? 'Site Analysis' : 'Scanning';
+        }
+        function recordLandmarkScan(hit){
+          const AP = getProfileApi(); if(!AP || !AP.recordLandmark) return;
+          const { isNew, completed } = AP.recordLandmark(AP.load(), hit.id);
+          if (isNew) {
+            updateJournalHud();
+            vxLangMsg('Landmark found: ' + hit.def.name, 'Vartegn fundet: ' + (hit.def.nameDa || hit.def.name), 2200);
+          } else if (completed) updateJournalHud();
+          if (completed && g.showMessage) g.showMessage('Survey complete: ' + completed.title, 2800);
         }
 
         // ===================== TNT / explosives =====================

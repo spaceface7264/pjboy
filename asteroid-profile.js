@@ -79,6 +79,15 @@
             tip: 'Dig down / find a cave', tipDa: 'Grav ned / find en hule'
         },
         {
+            id: 'find_landmark',
+            title: 'Landmark hunt', titleDa: 'Find et vartegn',
+            desc: 'Walk the wilds until you find a landmark, then hold Shift to scan it into your journal.',
+            descDa: 'Gå i vildnisset til du finder et vartegn, og hold Shift for at scanne det ind i journalen.',
+            goal: { type: 'discover', count: 1 },
+            tip: 'Follow the pin · Hold Shift', tipDa: 'Følg markøren · Hold Shift',
+            pin: 'landmark'
+        },
+        {
             id: 'chart_frost',
             title: 'Chart Frostpeak', titleDa: 'Kortlæg Frosttinde',
             desc: 'Travel to Frostpeak through the Star Gate (E). Craft a Gate Key if the gate is dormant.',
@@ -386,6 +395,7 @@
                 places: 0,
                 crafted: {},
                 creatures: {},
+                landmarks: {},
                 nightsSurvived: 0,
                 deepestY: 999,
                 story: {}
@@ -421,11 +431,12 @@
         p.character = normalizeCharacter(p.character);
         p.characterSetupDone = !!p.characterSetupDone;
         p.system = normalizeSystem(p.system);
-        p.journal = Object.assign({ scanned: {}, places: 0, crafted: {}, creatures: {}, nightsSurvived: 0, deepestY: 999, story: {} }, p.journal || {});
+        p.journal = Object.assign({ scanned: {}, places: 0, crafted: {}, creatures: {}, landmarks: {}, nightsSurvived: 0, deepestY: 999, story: {} }, p.journal || {});
         p.journal.scanned = p.journal.scanned && typeof p.journal.scanned === 'object' ? p.journal.scanned : {};
         p.journal.places = p.journal.places | 0;
         p.journal.crafted = p.journal.crafted && typeof p.journal.crafted === 'object' ? p.journal.crafted : {};
         p.journal.creatures = p.journal.creatures && typeof p.journal.creatures === 'object' ? p.journal.creatures : {};
+        p.journal.landmarks = p.journal.landmarks && typeof p.journal.landmarks === 'object' ? p.journal.landmarks : {};
         p.journal.nightsSurvived = p.journal.nightsSurvived | 0;
         p.journal.deepestY = (p.journal.deepestY == null) ? 999 : (p.journal.deepestY | 0);
         p.journal.story = (p.journal.story && typeof p.journal.story === 'object') ? p.journal.story : {};
@@ -694,6 +705,9 @@
             current = deep <= maxY ? 1 : 0;
             label = current ? `Deepest mine: Y ${deep}` : `Mine below Y ${maxY}`;
             labelDa = current ? `Dybeste mine: Y ${deep}` : `Minér under Y ${maxY}`;
+        } else if (g.type === 'discover') {
+            current = Object.keys((profile.journal && profile.journal.landmarks) || {}).length;
+            label = `Landmarks logged: ${current} / ${g.count}`; labelDa = `Vartegn noteret: ${current} / ${g.count}`;
         } else if (g.type === 'travel') {
             if (g.planetId) {
                 const ps = profile.system && profile.system.planets && profile.system.planets[g.planetId];
@@ -759,6 +773,16 @@
         const id = String(creatureId);
         const isNew = !profile.journal.creatures[id];
         profile.journal.creatures[id] = (profile.journal.creatures[id] | 0) + 1;
+        const completed = advanceMissionIfDone(profile);
+        save(profile);
+        return { isNew, completed };
+    }
+
+    function recordLandmark(profile, landmarkId) {
+        if (!profile.journal.landmarks || typeof profile.journal.landmarks !== 'object') profile.journal.landmarks = {};
+        const id = String(landmarkId);
+        const isNew = !profile.journal.landmarks[id];
+        profile.journal.landmarks[id] = (profile.journal.landmarks[id] | 0) + 1;
         const completed = advanceMissionIfDone(profile);
         save(profile);
         return { isNew, completed };
@@ -1011,6 +1035,7 @@
         merged.journal.scanned = mergeDiscoveryMap(lj.scanned, rj.scanned);
         merged.journal.creatures = mergeDiscoveryMap(lj.creatures, rj.creatures);
         merged.journal.crafted = mergeDiscoveryMap(lj.crafted, rj.crafted);
+        merged.journal.landmarks = mergeDiscoveryMap(lj.landmarks, rj.landmarks);
         merged.journal.places = Math.max((+lj.places || 0), (+rj.places || 0));
         merged.journal.nightsSurvived = Math.max((+lj.nightsSurvived || 0), (+rj.nightsSurvived || 0));
         merged.journal.deepestY = Math.min(
@@ -1135,6 +1160,7 @@
         recordCraft,
         recordSurviveNight,
         recordCreature,
+        recordLandmark,
         recordDepth,
         recordTravel,
         recordGateStory,
