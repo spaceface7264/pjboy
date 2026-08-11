@@ -1086,6 +1086,7 @@
         let _skyMark = -1, _dayF = 1;
         let _dayPhase = 'day';                  // day | dusk | night | dawn
         let _nightSpawnLeft = 0, _nightSpawnTimer = 0;
+        let _nightProwlAnnounced = false;
 
         // Paint the sky gradient for the current sun height; stars + sun/moon glow.
         function buildSkyBackground(sky, horizon, sun, starsA, elev){
@@ -1379,9 +1380,18 @@
           } else if(to === 'night'){
             vxLangMsg('Night falls. Survive until dawn.', 'Natten falder på. Overlev til daggry.');
             _nightSpawnLeft = 2 + ((Math.random() * 2) | 0);   // 2–3 staggered prowlers
-            _nightSpawnTimer = 0.5;
+            _nightSpawnTimer = 0.35;
+            _nightProwlAnnounced = false;
+            // Clear peaceful wildlife so night threats are obvious (keeps Curator / dummies).
+            if(typeof critters !== 'undefined'){
+              for(let i = critters.length - 1; i >= 0; i--){
+                const cr = critters[i];
+                if(cr && !cr.hostile && !cr.training && !(cr.sp && cr.sp.id === 'curator')) despawnCritter(i);
+              }
+            }
           } else if(to === 'dawn'){
             _nightSpawnLeft = 0;
+            _nightProwlAnnounced = false;
             if(typeof despawnHostiles === 'function') despawnHostiles();
             if(from === 'night' || from === 'dusk'){
               vxLangMsg('You made it through the night!', 'Du klarede natten!');
@@ -10290,14 +10300,23 @@ ${waveConsts}
         let _hostileTimer = 18;
         function countHostiles(){ let n=0; for(const c of critters) if(c.hostile) n++; return n; }
         function despawnHostiles(){ for(let i=critters.length-1;i>=0;i--) if(critters[i].hostile) despawnCritter(i); }
-        function spawnProwlerNearPlayer(quiet){
+        function spawnProwlerNearPlayer(quiet, opts){
           if(!_AC) return false;
-          const prowlers=_AC.DEFS.filter(d=>d.prowl);
+          opts = opts || {};
+          let prowlers=_AC.DEFS.filter(d=>d.prowl);
           if(!prowlers.length) return false;
+          // At night prefer glowing predators so kids can spot them in the dark.
+          if(opts.preferGlow){
+            const glowing = prowlers.filter((d) => d.glow);
+            if(glowing.length) prowlers = glowing;
+          }
           const sp=prowlers[(Math.random()*prowlers.length)|0];
+          const minR = (opts.minR != null) ? opts.minR : CRIT_MIN;
+          const maxR = (opts.maxR != null) ? opts.maxR : CRIT_VIEW;
+          const span = Math.max(1, maxR - minR);
           const px=Math.floor(player.pos.x), pz=Math.floor(player.pos.z);
-          for(let tryN=0; tryN<8; tryN++){
-            const ang=Math.random()*Math.PI*2, r=CRIT_MIN+Math.random()*(CRIT_VIEW-CRIT_MIN);
+          for(let tryN=0; tryN<12; tryN++){
+            const ang=Math.random()*Math.PI*2, r=minR+Math.random()*span;
             const vx=px+Math.round(Math.cos(ang)*r), vz=pz+Math.round(Math.sin(ang)*r);
             const top=surfaceTopVox(vx,vz);
             if(top===null) continue;
@@ -10322,10 +10341,18 @@ ${waveConsts}
           if(_nightSpawnLeft <= 0) return;
           _nightSpawnTimer -= dt;
           if(_nightSpawnTimer > 0) return;
-          _nightSpawnTimer = 1.5 + Math.random() * 1.4;
+          _nightSpawnTimer = 1.2 + Math.random() * 1.2;
           if(countHostiles() >= 3){ _nightSpawnLeft = 0; return; }
-          if(spawnProwlerNearPlayer(_nightSpawnLeft < 3)) _nightSpawnLeft--;
-          else _nightSpawnTimer = 0.6;             // retry sooner if no land found
+          // Night range is close enough to see/hear from a small base (old 26–46 was invisible).
+          const ok = spawnProwlerNearPlayer(_nightProwlAnnounced, {
+            minR: 10, maxR: 24, preferGlow: true
+          });
+          if(ok){
+            _nightProwlAnnounced = true;
+            _nightSpawnLeft--;
+          } else {
+            _nightSpawnTimer = 0.45;             // retry sooner if no land found
+          }
         }
 
         function updateCritters(dt){
