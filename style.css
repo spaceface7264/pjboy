@@ -3391,6 +3391,18 @@ body.mode-asteroid {
     cursor: default;
     border-style: dashed;
 }
+.vx-item.vx-locked {
+    opacity: 0.55;
+    filter: grayscale(0.35);
+}
+.vx-item.vx-locked::after {
+    content: '🔒';
+    position: absolute;
+    right: 4px;
+    top: 4px;
+    font-size: 11px;
+    z-index: 2;
+}
 .vx-item.vx-empty:hover {
     transform: none;
     box-shadow: none;

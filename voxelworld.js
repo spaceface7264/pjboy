@@ -762,7 +762,7 @@
         // ---- Asteroid player settings (device-global, Settings tab in the drawer) ----
         const VX_SETTINGS_KEY = 'pjboy.voxelSettings.v1';
         const VIEW_DIST_R = { low: 10, med: 14, high: 18, ultra: 28, max: 40 };
-        const vxSettings = { sens: 1.0, view: 'first', sound: 0.6, muted: false, peaceful: false, dist: 'med' };
+        const vxSettings = { sens: 1.0, view: 'first', sound: 0.6, muted: false, peaceful: false, alwaysDay: false, dist: 'med' };
         function loadSettings() {
             try { const r = localStorage.getItem(VX_SETTINGS_KEY); if (r) Object.assign(vxSettings, JSON.parse(r)); } catch (_) {}
             if (!VIEW_DIST_R[vxSettings.dist]) vxSettings.dist = 'med';
@@ -1358,7 +1358,10 @@
           updateSkyColors(th.sky!=null?th.sky:0x4a90e0, dayHorizon, sunCol, dayF);
         }
         // Advance time + refresh sky each frame.
-        function _dayNightOn(){ return DAYNIGHT_ENABLED || (activeSpec && activeSpec.visual && activeSpec.visual.dayNight); }
+        function _dayNightOn(){
+          if (vxSettings.alwaysDay) return false;
+          return DAYNIGHT_ENABLED || (activeSpec && activeSpec.visual && activeSpec.visual.dayNight);
+        }
         function _dayLenSec(){ return (activeSpec && activeSpec.basics && activeSpec.basics.dayLengthMin) ? activeSpec.basics.dayLengthMin*60 : DAY_LENGTH; }
         function dayPhaseOf(t){
           if(t >= 0.50 && t < 0.60) return 'dusk';
@@ -1386,8 +1389,9 @@
               try {
                 const AP = getProfileApi();
                 if (AP && AP.recordSurviveNight) {
-                  const { completed } = AP.recordSurviveNight(AP.load());
+                  const { completed, beat } = AP.recordSurviveNight(AP.load());
                   if (typeof updateJournalHud === 'function') updateJournalHud();
+                  if (beat) vxLangMsg(beat.en, beat.da, 3600);
                   if (completed && g.showMessage) {
                     g.showMessage('Survey complete: ' + completed.title, 2800);
                   }
@@ -1418,7 +1422,13 @@
           }
         }
         function updateDayNight(dt){
-          if(!_dayNightOn()){ _dayPhase = 'day'; updateDayChip(); return; }
+          if(!_dayNightOn()){
+            if(_dayPhase !== 'day' || Math.abs(dayTime - 0.25) > 0.001){
+              dayTime = 0.25; _dayPhase = 'day'; applyDaySky();
+            }
+            updateDayChip();
+            return;
+          }
           dayTime = (dayTime + dt / _dayLenSec()) % 1;
           applyDaySky();
           const phase = dayPhaseOf(dayTime);
@@ -2092,7 +2102,8 @@
         // Cave hazards on ANY world: standing in Energy (raw plasma) or Acid (a floor pool)
         // stings — forgiving, on its own cooldown like the lava burn, and you can always
         // just mine the block away. Mirrors updateVolcanicHazard but biome-agnostic.
-        let _caveBurnT = 0;
+        // Soft uranium tick teaches "keep distance" without being scary.
+        let _caveBurnT = 0, _uraniumT = 0, _uraniumTip = false;
         function updateContactHazard(dt){
           if(flying || player.health <= 0) return;
           const vx = Math.floor(player.pos.x - WORLD_OFFSET.x);
@@ -2109,6 +2120,25 @@
               if(player.health <= 0) respawnPlayer();
             }
           } else _caveBurnT = 0;
+
+          let nearU = false;
+          for(let dx=-1; dx<=1 && !nearU; dx++) for(let dy=-1; dy<=1 && !nearU; dy++) for(let dz=-1; dz<=1 && !nearU; dz++)
+            if(getBlock(vx+dx, vy+dy, vz+dz) === 28) nearU = true;
+          if(nearU){
+            _uraniumT += dt;
+            if(!_uraniumTip){
+              _uraniumTip = true;
+              vxLangMsg('Uranium nearby — keep your distance!', 'Uranium i nærheden — hold afstand!', 2800);
+            }
+            if(_uraniumT >= 1.6){
+              _uraniumT = 0;
+              player.health = Math.max(0, player.health - 1);
+              player.hurtFlash = Math.max(player.hurtFlash, 0.25);
+              player._noHitT = 0;
+              updateHealthHud();
+              if(player.health <= 0) respawnPlayer();
+            }
+          } else { _uraniumT = 0; _uraniumTip = false; }
         }
 
         // ---------- chunk meshing: merged geometry, face culling, vertex AO ----------
@@ -3095,9 +3125,13 @@ ${waveConsts}
                 const mc = _defs.findIndex((w) => w.id === 'minecutter');
                 idx = mc >= 0 ? mc : -1;
             }
+            // Craft-gated: never unlock a weapon just by equipping it.
+            if (idx >= 0 && !ownedWeapons.has(idx)) {
+                if (!quiet && g.showMessage) g.showMessage('Locked — craft it at Tab → Refinery', 2200);
+                return;
+            }
             const cfg = saveCharCfg({ weapon: idx | 0 });
             weaponIndex = cfg.weapon;
-            if (weaponIndex >= 0) ownedWeapons.add(weaponIndex);
             attachTpWeapon(av && av.weaponGrip);
             rebuildFpWeapon();
             syncFpTunerInputs();
@@ -5427,6 +5461,7 @@ ${waveConsts}
                 + '<div class="vx-quest-goal">' + m.desc + '</div>' + (m.descDa ? da(m.descDa) : '')
                 + tip
                 + '<div class="vx-quest-bar"><span style="width:' + pct + '%"></span><em>' + cur + ' / ' + tgt + '</em></div>';
+            if (typeof syncMissionWaypoint === 'function') syncMissionWaypoint();
         }
 
         // Short relative time for the "last saved" label (kept kid-legible).
@@ -5472,12 +5507,13 @@ ${waveConsts}
         function recordJournalScan(blockId) {
             const AP = getProfileApi();
             if (!AP) return;
-            const { isNew, completed } = AP.recordScan(AP.load(), blockId);
+            const { isNew, completed, beat } = AP.recordScan(AP.load(), blockId);
             updateJournalHud();
             const b = blockById(blockId);
             const hud = document.getElementById('voxel-journal-hud');
             if (isNew && hud) hud.classList.add('vx-journal-new');
-            if (isNew && g.showMessage && b) {
+            if (beat) vxLangMsg(beat.en, beat.da, 3600);
+            else if (isNew && g.showMessage && b) {
                 g.showMessage('Cataloged: ' + b.name, 1800);
             }
             if (completed && g.showMessage) {
@@ -5933,6 +5969,14 @@ ${waveConsts}
             floodWaterAfterMine(t.x, t.y, t.z);   // sea flows into the new gap if it reaches water
             // Open doors collapse back to one Door item so the backpack never holds a second id.
             addToInventory(id === DOOR_OPEN ? DOOR_CLOSED : id);
+            try {
+                const AP = getProfileApi();
+                if (AP && AP.recordDepth) {
+                    const { completed } = AP.recordDepth(AP.load(), t.y);
+                    if (typeof updateJournalHud === 'function') updateJournalHud();
+                    if (completed && g.showMessage) g.showMessage('Survey complete: ' + completed.title, 2800);
+                }
+            } catch (_) {}
             updateHUD();
             resetMining();
             disposeAimEdgeHighlight();
@@ -7270,11 +7314,12 @@ ${waveConsts}
                 badge.textContent = TIER_NAME[tier];
                 item.appendChild(badge);
             }
-            if (owned || !ownedOnly) {
+            if (owned) {
+                item.addEventListener('click', () => setWeaponIndex(index));
+            } else if (!ownedOnly) {
+                item.classList.add('vx-locked');
                 item.addEventListener('click', () => {
-                    ownedWeapons.add(index);
-                    saveOwnedWeapons();
-                    setWeaponIndex(index);
+                    if (g.showMessage) g.showMessage('Locked — craft at Tab → Refinery', 2200);
                 });
             }
             return item;
@@ -7716,20 +7761,24 @@ ${waveConsts}
                 }
             }
             const desc = def.desc ? '<div class="vx-codex-fact"><span class="vx-codex-fact-icon">📖</span><span>' + def.desc + '</span></div>' : '';
+            const lockHint = !owned
+                ? '<div class="vx-codex-fact"><span class="vx-codex-fact-icon">🔒</span><span>Craft this at Tab → Refinery to unlock.</span></div>'
+                : '';
             page.innerHTML = '<div class="vx-gear-detail">'
                 + '<div class="vx-gear-stage"><canvas class="vx-gear-canvas" aria-label="' + def.name + '"></canvas></div>'
                 + '<div class="vx-gear-headrow"><div>'
                 + '<div class="vx-codex-name">' + def.name + (tier > 1 ? ' <span class="vx-tier-chip">' + TIER_NAME[tier] + '</span>' : '') + '</div>'
                 + '<div class="vx-codex-cat">⚔️ ' + type + '</div></div>'
-                + '<button type="button" class="vx-equip-btn' + (equipped ? ' vx-equip-on' : '') + '" data-equip' + (equipped ? ' disabled' : '') + '>'
-                + (equipped ? '✓ Equipped' : 'Equip') + '</button>'
+                + '<button type="button" class="vx-equip-btn' + (equipped ? ' vx-equip-on' : '') + '"'
+                + (equipped || !owned ? ' disabled' : '') + ' data-equip>'
+                + (equipped ? '✓ Equipped' : (owned ? 'Equip' : '🔒 Locked')) + '</button>'
                 + '</div>'
-                + stats + upRow + desc
+                + stats + upRow + lockHint + desc
                 + '</div>';
             body.appendChild(page);
             const eb = page.querySelector('[data-equip]');
-            if (eb && !equipped) eb.addEventListener('click', () => {
-                ownedWeapons.add(idx); saveOwnedWeapons(); setWeaponIndex(idx); renderDrawer();
+            if (eb && !equipped && owned) eb.addEventListener('click', () => {
+                setWeaponIndex(idx); renderDrawer();
             });
             const ub = page.querySelector('[data-upgrade]');
             if (ub && !ub.disabled) ub.addEventListener('click', () => { upgradeWeapon(def.id); renderDrawer(); });
@@ -7977,18 +8026,37 @@ ${waveConsts}
         function craftRecipe(recipe) {
             const AP = getProfileApi();
             if (!AP || !recipe) return;
-            const avail = AP.craftAvailability(recipe, backpack);
+            const avail = AP.craftAvailability(recipe, backpack, AP.load());
+            if (avail.owned) {
+                if (g.showMessage) g.showMessage('You already own that gear', 2000);
+                return;
+            }
             if (!avail.ok) {
                 if (g.showMessage) g.showMessage('Not enough materials for ' + recipe.name, 2000);
                 return;
             }
             for (const inp of recipe.inputs) spendFromInventory(inp.id, inp.count);
+            if (recipe.outputWeapon) {
+                const p = AP.load();
+                AP.grantWeapon(p, recipe.outputWeapon);
+                loadOwnedWeapons();
+                saveOwnedWeapons();
+                flushProfileState();
+                const wName = weaponNameById(recipe.outputWeapon);
+                const beat = AP.touchStoryBeat ? AP.touchStoryBeat(AP.load(), 'firstCraft') : null;
+                updateJournalHud();
+                if (drawerOpen) renderDrawer();
+                if (g.showMessage) g.showMessage('Unlocked ' + wName + '!', 2400);
+                if (beat) vxLangMsg(beat.en, beat.da, 3600);
+                return;
+            }
             const outCount = recipe.outputCount || 1;
             addToInventory(recipe.output, outCount);   // also re-renders the open drawer
-            const { completed } = AP.recordCraft(AP.load(), recipe.output, outCount);
+            const { completed, beat } = AP.recordCraft(AP.load(), recipe.output, outCount);
             updateJournalHud();
             const outName = refineryMatName(recipe.output);
             if (g.showMessage) g.showMessage('Crafted ' + outCount + '× ' + outName, 2200);
+            if (beat) vxLangMsg(beat.en, beat.da, 3600);
             if (completed && g.showMessage) g.showMessage('Survey complete: ' + completed.title, 2800);
         }
         function weaponNameById(id) {
@@ -8150,6 +8218,12 @@ ${waveConsts}
             _settingsRow(body, 'Sound', 'Music + effects volume', soundWrap);
             _settingsRow(body, 'Peaceful mode', 'No monsters or attacks — wildlife stays',
                 _toggleControl(vxSettings.peaceful, (v) => { vxSettings.peaceful = v; saveSettings(); if (v) despawnHostiles(); renderDrawer(); }));
+            _settingsRow(body, 'Always day', 'Parent toggle — keeps bright daylight (no night threats)',
+                _toggleControl(!!vxSettings.alwaysDay, (v) => {
+                    vxSettings.alwaysDay = !!v; saveSettings();
+                    if (v) { _nightSpawnLeft = 0; if (typeof despawnHostiles === 'function') despawnHostiles(); }
+                    updateDayNight(0); renderDrawer();
+                }));
             _settingsRow(body, 'Training field', 'Range markers + dummies to test gear',
                 _toggleControl(!!trainingField, (v) => { if (v) buildTrainingField(); else clearTrainingField(); renderDrawer(); }));
             _settingsRow(body, 'View distance', 'Lower = smoother · Max is very heavy',
@@ -8160,7 +8234,7 @@ ${waveConsts}
             resetBtn.type = 'button'; resetBtn.className = 'vx-btn'; resetBtn.textContent = 'Reset to defaults';
             resetBtn.style.cssText = 'margin-top:6px;';
             resetBtn.addEventListener('click', () => {
-                Object.assign(vxSettings, { sens: 1.0, view: 'first', sound: 0.6, muted: false, peaceful: false, dist: 'med' });
+                Object.assign(vxSettings, { sens: 1.0, view: 'first', sound: 0.6, muted: false, peaceful: false, alwaysDay: false, dist: 'med' });
                 saveSettings(); applySettings(); setFirstPerson(true); applyViewDistance(true); renderDrawer();
                 if (g.showMessage) g.showMessage('Settings reset', 1400);
             });
@@ -8185,27 +8259,36 @@ ${waveConsts}
             const grid = document.createElement('div');
             grid.className = 'vx-craft-grid';
             recipes.forEach((r) => {
-                const avail = AP.craftAvailability(r, backpack);
-                const outB = blockById(r.output);
+                const avail = AP.craftAvailability(r, backpack, AP.load());
+                const outB = r.outputWeapon ? null : blockById(r.output);
+                const wIdx = r.outputWeapon ? weaponList().findIndex((w) => w.id === r.outputWeapon) : -1;
                 const card = document.createElement('div');
                 card.className = 'vx-craft-card' + (avail.ok ? ' craftable' : '');
                 if (outB) card.appendChild(createThumbWrap(blockTint(outB.cat), block3DThumb(outB), outB.name));
+                else if (wIdx >= 0) {
+                    const wdef = weaponList()[wIdx];
+                    card.appendChild(createThumbWrap(weaponTint(wdef), gear3DThumb(wIdx), wdef.name));
+                }
                 const title = document.createElement('div');
                 title.className = 'vx-craft-name';
                 title.textContent = r.name + ((r.outputCount || 1) > 1 ? ' ×' + r.outputCount : '');
                 card.appendChild(title);
                 const cost = document.createElement('div');
                 cost.className = 'vx-craft-cost';
-                cost.innerHTML = r.inputs.map((inp) => {
-                    const have = getBackpackCount(inp.id);
-                    const col = have >= inp.count ? '#9be89b' : '#ff9b9b';
-                    return '<span style="color:' + col + '">' + refineryMatName(inp.id) + ' ' + have + '/' + inp.count + '</span>';
-                }).join('<br>');
+                if (avail.owned) {
+                    cost.innerHTML = '<span style="color:#9be89b">Already owned</span>';
+                } else {
+                    cost.innerHTML = r.inputs.map((inp) => {
+                        const have = getBackpackCount(inp.id);
+                        const col = have >= inp.count ? '#9be89b' : '#ff9b9b';
+                        return '<span style="color:' + col + '">' + refineryMatName(inp.id) + ' ' + have + '/' + inp.count + '</span>';
+                    }).join('<br>');
+                }
                 card.appendChild(cost);
                 const btn = document.createElement('button');
                 btn.type = 'button';
                 btn.className = 'vx-btn' + (avail.ok ? ' vx-btn-on' : '');
-                btn.textContent = 'Craft';
+                btn.textContent = avail.owned ? 'Owned' : (r.outputWeapon ? 'Unlock' : 'Craft');
                 btn.disabled = !avail.ok;
                 if (!avail.ok) btn.style.cssText = 'opacity:0.45;cursor:not-allowed;';
                 if (avail.ok) btn.addEventListener('click', () => craftRecipe(r));
@@ -8435,6 +8518,20 @@ ${waveConsts}
         }
         function setWaypoint(wx, wz) { waypoint = { x: pmod(wx), z: pmod(wz) }; saveWaypoint(); }
         function clearWaypoint() { waypoint = null; saveWaypoint(); }
+
+        // Auto-pin the Star Gate for missions that need travel wayfinding.
+        function syncMissionWaypoint() {
+            const AP = getProfileApi();
+            if (!AP || !AP.activeMission) return;
+            const m = AP.activeMission(AP.load());
+            if (!m || m.pin !== 'gate' || !starGate) return;
+            const gx = pmod(starGate.pos.x), gz = pmod(starGate.pos.z);
+            if (waypoint) {
+                const dx = _wrapDelta(waypoint.x, gx), dz = _wrapDelta(waypoint.z, gz);
+                if (Math.hypot(dx, dz) < 6) return;
+            }
+            setWaypoint(gx, gz);
+        }
 
         // Wrapped (toroidal) delta from a→b on one axis, into [-PERIOD/2, PERIOD/2).
         function _wrapDelta(a, b) {
@@ -9226,7 +9323,15 @@ ${waveConsts}
                     flushProfileState();
                     hideVoxelLoading();
                     if (def && g.showMessage) g.showMessage((flying?'Descending toward ':'Arrived at ') + def.name + ' · ' + def.nameDa, 2600);
+                    try {
+                        const AP2 = getProfileApi();
+                        if (AP2 && AP2.recordTravel) {
+                            const { completed } = AP2.recordTravel(AP2.load(), id);
+                            if (completed && g.showMessage) g.showMessage('Survey complete: ' + completed.title, 2800);
+                        }
+                    } catch (_) {}
                     if (typeof updateJournalHud === 'function') updateJournalHud();
+                    if (typeof syncMissionWaypoint === 'function') syncMissionWaypoint();
                 });
             });
             return true;
@@ -9884,6 +9989,18 @@ ${waveConsts}
           actor.group.rotation.y=Math.atan2(player.pos.x-ox, player.pos.z-oz);  // ring faces spawn
           scene.add(actor.group);
           starGate={ actor, pos:new THREE.Vector3(ox,gy,oz), dest };
+          spawnCuratorNearGate();
+          if (typeof syncMissionWaypoint === 'function') syncMissionWaypoint();
+        }
+        function spawnCuratorNearGate(){
+          if(!_AC || !starGate) return;
+          const sp=_AC.get('curator');
+          if(!sp) return;
+          for(let i=critters.length-1;i>=0;i--) if(critters[i].sp && critters[i].sp.id==='curator') despawnCritter(i);
+          const gx=Math.round(starGate.pos.x)-3, gz=Math.round(starGate.pos.z)+2;
+          const top=surfaceTopVox(gx,gz);
+          if(top===null) return;
+          placeCritter(sp, gx, gz, top);
         }
         function updateStarGate(dt){
           if(!starGate) return;
@@ -9913,6 +10030,10 @@ ${waveConsts}
             spendFromInventory(GATE_KEY_ID, 1);
             AP.grantPlanet(prof, dest.id); AP.save(prof);
             if(g.showMessage) g.showMessage('Gate Key spent — the Star Gate roars to life!', 1800);
+            try {
+              const { beat } = AP.recordGateStory ? AP.recordGateStory(AP.load()) : {};
+              if (beat) vxLangMsg(beat.en, beat.da, 3600);
+            } catch (_) {}
           }
           // activation burst at the ring, then ride the travel chain
           if(_AC){ const p=starGate.pos;
@@ -10310,8 +10431,10 @@ ${waveConsts}
         }
         function recordCreatureScan(sp){
           const AP=getProfileApi(); if(!AP || !AP.recordCreature) return;
-          const { isNew }=AP.recordCreature(AP.load(), sp.id);
+          const { isNew, completed }=AP.recordCreature(AP.load(), sp.id);
           if(isNew){ updateJournalHud(); if(g.showMessage) g.showMessage('Creature discovered: '+sp.name, 1800); }
+          else if(completed) updateJournalHud();
+          if(completed && g.showMessage) g.showMessage('Survey complete: '+completed.title, 2800);
         }
 
         // ===================== TNT / explosives =====================

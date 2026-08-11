@@ -61,6 +61,31 @@
             descDa: 'Overlev til daggry når natten falder på. Byg vægge, luk døren, hold en lampe tændt.',
             goal: { type: 'survive_night', count: 1 },
             tip: 'Shelter + Lamp', tipDa: 'Ly + Lampe'
+        },
+        {
+            id: 'scan_creature',
+            title: 'Wildlife log', titleDa: 'Dyrejournal',
+            desc: 'Hold Shift and scan any creature to add it to your field journal.',
+            descDa: 'Hold Shift og scan et dyr for at tilføje det til feltjournalen.',
+            goal: { type: 'creature', count: 1 },
+            tip: 'Aim + Hold Shift', tipDa: 'Sigt + Hold Shift'
+        },
+        {
+            id: 'dig_deep',
+            title: 'Deep reading', titleDa: 'Dyb aflæsning',
+            desc: 'Mine a block deep underground (below height 40) — caves hide rare ores.',
+            descDa: 'Minér en blok dybt under jorden (under højde 40) — huler gemmer sjældne malme.',
+            goal: { type: 'depth', maxY: 40, count: 1 },
+            tip: 'Dig down / find a cave', tipDa: 'Grav ned / find en hule'
+        },
+        {
+            id: 'chart_frost',
+            title: 'Chart Frostpeak', titleDa: 'Kortlæg Frosttinde',
+            desc: 'Travel to Frostpeak through the Star Gate (E). Craft a Gate Key if the gate is dormant.',
+            descDa: 'Rejs til Frosttinde gennem Stjerneporten (E). Byg en portnøgle hvis porten sover.',
+            goal: { type: 'travel', planetId: 'frost_tinde', count: 1 },
+            tip: 'Follow the ◎ gate pin', tipDa: 'Følg ◎ port-markøren',
+            pin: 'gate'
         }
     ];
     // Tips for the first five (kept out of the objects above so legacy ids stay tidy)
@@ -69,6 +94,26 @@
     MISSIONS[2].tip = 'Right-click to place'; MISSIONS[2].tipDa = 'Højreklik for at placere';
     MISSIONS[3].tip = 'Tab → Refinery'; MISSIONS[3].tipDa = 'Tab → Raffinaderi';
     MISSIONS[4].tip = 'Tab → Refinery'; MISSIONS[4].tipDa = 'Tab → Raffinaderi';
+
+    // Curator bilingual story beats — one-shot lines that frame the claim as chapter one.
+    const STORY_BEATS = {
+        firstScan: {
+            en: 'Curator: Good. Look closely — every reading teaches.',
+            da: 'Kurator: Godt. Se godt efter — hver aflæsning lærer dig noget.'
+        },
+        firstCraft: {
+            en: 'Curator: You shaped raw ore into tools. That is how a claim begins.',
+            da: 'Kurator: Du formede rå malm til værktøj. Sådan begynder et claim.'
+        },
+        firstNight: {
+            en: 'Curator: Dawn returns. Walls, light, and patience keep explorers safe.',
+            da: 'Kurator: Daggry vender tilbage. Mure, lys og tålmodighed holder opdagere sikre.'
+        },
+        firstGate: {
+            en: 'Curator: The gate remembers other skies. Chart them when you are ready.',
+            da: 'Kurator: Porten husker andre himle. Kortlæg dem, når du er klar.'
+        }
+    };
 
     const CRAFT_RECIPES = [
         {
@@ -152,6 +197,42 @@
             output: 46,
             outputCount: 1,
             inputs: [{ id: 31, count: 2 }, { id: 33, count: 1 }]
+        },
+        // Gear unlocks — Equip no longer grants ownership; kids craft (or start with) tools.
+        {
+            id: 'assemble_wrench',
+            name: 'Forge Wrench',
+            desc: '2× Metal → Wrench',
+            outputWeapon: 'wrench',
+            inputs: [{ id: 7, count: 2 }]
+        },
+        {
+            id: 'assemble_sword',
+            name: 'Forge Energy Sword',
+            desc: '2× Alloy + 1× Crystal → Energy Sword',
+            outputWeapon: 'sword',
+            inputs: [{ id: 31, count: 2 }, { id: 10, count: 1 }]
+        },
+        {
+            id: 'assemble_blaster',
+            name: 'Assemble Blaster',
+            desc: '1× Alloy + 1× Circuit + 1× Metal → Blaster Rifle',
+            outputWeapon: 'blaster',
+            inputs: [{ id: 31, count: 1 }, { id: 33, count: 1 }, { id: 7, count: 1 }]
+        },
+        {
+            id: 'assemble_laser',
+            name: 'Assemble Laser Rifle',
+            desc: '1× Alloy + 2× Circuit + 1× Glass → Laser Rifle',
+            outputWeapon: 'laser',
+            inputs: [{ id: 31, count: 1 }, { id: 33, count: 2 }, { id: 32, count: 1 }]
+        },
+        {
+            id: 'assemble_railgun',
+            name: 'Assemble Railgun',
+            desc: '2× Alloy + 2× Circuit + 1× Uranium → Railgun',
+            outputWeapon: 'railgun',
+            inputs: [{ id: 31, count: 2 }, { id: 33, count: 2 }, { id: 28, count: 1 }]
         }
     ];
 
@@ -305,7 +386,9 @@
                 places: 0,
                 crafted: {},
                 creatures: {},
-                nightsSurvived: 0
+                nightsSurvived: 0,
+                deepestY: 999,
+                story: {}
             },
             inventory: {
                 backpack: {},
@@ -338,12 +421,14 @@
         p.character = normalizeCharacter(p.character);
         p.characterSetupDone = !!p.characterSetupDone;
         p.system = normalizeSystem(p.system);
-        p.journal = Object.assign({ scanned: {}, places: 0, crafted: {}, creatures: {}, nightsSurvived: 0 }, p.journal || {});
+        p.journal = Object.assign({ scanned: {}, places: 0, crafted: {}, creatures: {}, nightsSurvived: 0, deepestY: 999, story: {} }, p.journal || {});
         p.journal.scanned = p.journal.scanned && typeof p.journal.scanned === 'object' ? p.journal.scanned : {};
         p.journal.places = p.journal.places | 0;
         p.journal.crafted = p.journal.crafted && typeof p.journal.crafted === 'object' ? p.journal.crafted : {};
         p.journal.creatures = p.journal.creatures && typeof p.journal.creatures === 'object' ? p.journal.creatures : {};
         p.journal.nightsSurvived = p.journal.nightsSurvived | 0;
+        p.journal.deepestY = (p.journal.deepestY == null) ? 999 : (p.journal.deepestY | 0);
+        p.journal.story = (p.journal.story && typeof p.journal.story === 'object') ? p.journal.story : {};
         p.inventory = Object.assign({}, base.inventory, p.inventory || {});
         p.inventory.backpack = p.inventory.backpack && typeof p.inventory.backpack === 'object' ? p.inventory.backpack : {};
         p.inventory.hotbar = Array.isArray(p.inventory.hotbar) ? p.inventory.hotbar.slice(0, 9) : Array(9).fill(null);
@@ -600,6 +685,32 @@
         } else if (g.type === 'survive_night') {
             current = (profile.journal && profile.journal.nightsSurvived) | 0;
             label = `Nights survived: ${current} / ${g.count}`; labelDa = `Nætter overlevet: ${current} / ${g.count}`;
+        } else if (g.type === 'creature') {
+            current = Object.keys((profile.journal && profile.journal.creatures) || {}).length;
+            label = `Creatures logged: ${current} / ${g.count}`; labelDa = `Dyr noteret: ${current} / ${g.count}`;
+        } else if (g.type === 'depth') {
+            const deep = (profile.journal && profile.journal.deepestY != null) ? (profile.journal.deepestY | 0) : 999;
+            const maxY = (g.maxY != null) ? (g.maxY | 0) : 40;
+            current = deep <= maxY ? 1 : 0;
+            label = current ? `Deepest mine: Y ${deep}` : `Mine below Y ${maxY}`;
+            labelDa = current ? `Dybeste mine: Y ${deep}` : `Minér under Y ${maxY}`;
+        } else if (g.type === 'travel') {
+            if (g.planetId) {
+                const ps = profile.system && profile.system.planets && profile.system.planets[g.planetId];
+                current = (ps && ps.visited) ? 1 : 0;
+                const def = planetDef(g.planetId);
+                const nm = def ? def.name : g.planetId;
+                label = current ? `Visited ${nm}` : `Travel to ${nm}`;
+                labelDa = current ? `Besøgt ${def && def.nameDa ? def.nameDa : nm}` : `Rejs til ${def && def.nameDa ? def.nameDa : nm}`;
+            } else {
+                const visited = unlockedPlanets(profile).filter((pl) => {
+                    if (pl.id === HOME_PLANET_ID) return false;
+                    const ps = profile.system.planets[pl.id];
+                    return !!(ps && ps.visited);
+                }).length;
+                current = visited;
+                label = `Worlds visited: ${current} / ${g.count}`; labelDa = `Verdener besøgt: ${current} / ${g.count}`;
+            }
         }
         return { done: current >= g.count, current, target: g.count, label, labelDa, mission: m };
     }
@@ -614,6 +725,15 @@
         return prog.mission;
     }
 
+    function takeStoryBeat(profile, key) {
+        if (!profile.journal.story || typeof profile.journal.story !== 'object') profile.journal.story = {};
+        if (profile.journal.story[key]) return null;
+        const beat = STORY_BEATS[key];
+        if (!beat) return null;
+        profile.journal.story[key] = Date.now();
+        return beat;
+    }
+
     function recordScan(profile, blockId) {
         const id = String(blockId | 0);
         const entry = profile.journal.scanned[id] || { firstAt: Date.now(), count: 0 };
@@ -621,9 +741,10 @@
         entry.count += 1;
         if (isNew) entry.firstAt = Date.now();
         profile.journal.scanned[id] = entry;
+        const beat = takeStoryBeat(profile, 'firstScan');
         const completed = advanceMissionIfDone(profile);
         save(profile);
-        return { isNew, completed };
+        return { isNew, completed, beat };
     }
 
     function recordPlace(profile) {
@@ -638,8 +759,9 @@
         const id = String(creatureId);
         const isNew = !profile.journal.creatures[id];
         profile.journal.creatures[id] = (profile.journal.creatures[id] | 0) + 1;
+        const completed = advanceMissionIfDone(profile);
         save(profile);
-        return { isNew };
+        return { isNew, completed };
     }
 
     function recordCraft(profile, itemId, count) {
@@ -647,16 +769,72 @@
         const n = Math.max(1, count | 0);
         if (!profile.journal.crafted || typeof profile.journal.crafted !== 'object') profile.journal.crafted = {};
         profile.journal.crafted[id] = ((profile.journal.crafted[id] | 0) + n);
+        const beat = takeStoryBeat(profile, 'firstCraft');
+        const completed = advanceMissionIfDone(profile);
+        save(profile);
+        return { completed, beat };
+    }
+
+    function recordSurviveNight(profile) {
+        profile.journal.nightsSurvived = (profile.journal.nightsSurvived | 0) + 1;
+        const beat = takeStoryBeat(profile, 'firstNight');
+        const completed = advanceMissionIfDone(profile);
+        save(profile);
+        return { completed, nights: profile.journal.nightsSurvived, beat };
+    }
+
+    function recordDepth(profile, y) {
+        const yy = y | 0;
+        const prev = (profile.journal.deepestY == null) ? 999 : (profile.journal.deepestY | 0);
+        if (yy < prev) profile.journal.deepestY = yy;
+        const completed = advanceMissionIfDone(profile);
+        save(profile);
+        return { completed, deepestY: profile.journal.deepestY };
+    }
+
+    function recordTravel(profile, planetId) {
+        const ps = planetState(profile, planetId);
+        ps.visited = true;
         const completed = advanceMissionIfDone(profile);
         save(profile);
         return { completed };
     }
 
-    function recordSurviveNight(profile) {
-        profile.journal.nightsSurvived = (profile.journal.nightsSurvived | 0) + 1;
-        const completed = advanceMissionIfDone(profile);
+    function recordGateStory(profile) {
+        const beat = takeStoryBeat(profile, 'firstGate');
+        if (beat) save(profile);
+        return { beat };
+    }
+
+    function touchStoryBeat(profile, key) {
+        const beat = takeStoryBeat(profile, key);
+        if (beat) save(profile);
+        return beat;
+    }
+
+    function weaponIndexById(weaponId) {
+        try {
+            if (typeof VoxelCharacter !== 'undefined' && VoxelCharacter.weaponIdx) {
+                return VoxelCharacter.weaponIdx(weaponId);
+            }
+        } catch (_) {}
+        return -1;
+    }
+
+    function ownsWeapon(profile, weaponId) {
+        const i = weaponIndexById(weaponId);
+        if (i < 0) return false;
+        const list = (profile.inventory && profile.inventory.ownedWeapons) || [];
+        return list.indexOf(i) >= 0;
+    }
+
+    function grantWeapon(profile, weaponId) {
+        const i = weaponIndexById(weaponId);
+        if (i < 0) return false;
+        if (!Array.isArray(profile.inventory.ownedWeapons)) profile.inventory.ownedWeapons = [];
+        if (profile.inventory.ownedWeapons.indexOf(i) < 0) profile.inventory.ownedWeapons.push(i);
         save(profile);
-        return { completed, nights: profile.journal.nightsSurvived };
+        return true;
     }
 
     // ---- Planet system accessors ----
@@ -834,6 +1012,18 @@
         merged.journal.creatures = mergeDiscoveryMap(lj.creatures, rj.creatures);
         merged.journal.crafted = mergeDiscoveryMap(lj.crafted, rj.crafted);
         merged.journal.places = Math.max((+lj.places || 0), (+rj.places || 0));
+        merged.journal.nightsSurvived = Math.max((+lj.nightsSurvived || 0), (+rj.nightsSurvived || 0));
+        merged.journal.deepestY = Math.min(
+            (lj.deepestY == null ? 999 : (+lj.deepestY || 999)),
+            (rj.deepestY == null ? 999 : (+rj.deepestY || 999))
+        );
+        merged.journal.story = Object.assign({}, rj.story || {}, lj.story || {});
+
+        // Owned weapons: union so craft unlocks from either device stick.
+        const low = (local.inventory && local.inventory.ownedWeapons) || [];
+        const row = (remote.inventory && remote.inventory.ownedWeapons) || [];
+        merged.inventory = merged.inventory || {};
+        merged.inventory.ownedWeapons = Array.from(new Set([].concat(low, row).map((i) => i | 0)));
 
         return normalizeProfile(merged);
     }
@@ -896,8 +1086,12 @@
     }
 
     // Pure check: can `recipe` be crafted given a {itemId: count} materials map?
-    function craftAvailability(recipe, counts) {
+    // Weapon recipes also refuse when the tool is already owned.
+    function craftAvailability(recipe, counts, profile) {
         if (!recipe || !Array.isArray(recipe.inputs)) return { ok: false, missing: [] };
+        if (recipe.outputWeapon && profile && ownsWeapon(profile, recipe.outputWeapon)) {
+            return { ok: false, missing: [], owned: true };
+        }
         const missing = [];
         for (const inp of recipe.inputs) {
             const have = countOf(counts, inp.id);
@@ -941,6 +1135,13 @@
         recordCraft,
         recordSurviveNight,
         recordCreature,
+        recordDepth,
+        recordTravel,
+        recordGateStory,
+        touchStoryBeat,
+        grantWeapon,
+        ownsWeapon,
+        STORY_BEATS,
         upsertBlockEdit,
         upsertBlockEdits,
         mergeEdits,
