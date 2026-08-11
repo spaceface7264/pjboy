@@ -682,6 +682,162 @@
       }};
   }
 
+  // ---- 13. GLOOMWICK — night stalker with a living lantern ----
+  function buildGloomwick(){
+    const cloakM=std(0x1a1e2e,{rough:.9}), boneM=std(0x3a4258),
+          lampM=std(0x7ec8ff,{emissive:0x4aa0ff,ei:1.5}), wickM=std(0xffe08a,{emissive:0xffc04a,ei:1.8});
+    const g=new THREE.Group(); const core=new THREE.Group(); core.position.y=1.05; g.add(core);
+    const torso=pbox(.42,.7,.34,cloakM); core.add(torso);
+    const hood=pbox(.48,.28,.4,cloakM); hood.position.set(0,.42,.02); core.add(hood);
+    const face=pbox(.28,.22,.16,boneM); face.position.set(0,.36,.2); core.add(face);
+    eyePair(core,0x7ec8ff,.09,.38,.28,.07,.09);
+    const lamp=new THREE.Group(); lamp.position.set(0,.1,-.28); core.add(lamp);
+    const bowl=pbox(.28,.16,.28,boneM); lamp.add(bowl);
+    const flame=pbox(.14,.22,.14,wickM); flame.position.y=.2; flame.userData.noOutline=true; lamp.add(flame);
+    const glow=pbox(.2,.12,.2,lampM); glow.position.y=.08; glow.userData.noOutline=true; lamp.add(glow);
+    const light=new THREE.PointLight(0x6ab0ff,0.9,6); light.position.set(0,.25,0); lamp.add(light);
+    const arms=[];
+    [-1,1].forEach(s=>{
+      const sh=new THREE.Group(); sh.position.set(s*.28,.2,0); core.add(sh);
+      const up=pbox(.1,.36,.1,cloakM); up.position.y=-.16; sh.add(up);
+      const el=new THREE.Group(); el.position.y=-.34; sh.add(el);
+      const lo=pbox(.08,.3,.08,boneM); lo.position.y=-.12; el.add(lo);
+      const claw=pbox(.12,.08,.16,lampM); claw.position.y=-.28; claw.userData.noOutline=true; el.add(claw);
+      arms.push({sh,el,s});
+    });
+    const legs=[];
+    [-1,1].forEach(s=>{
+      const hip=new THREE.Group(); hip.position.set(s*.12,-.34,0); core.add(hip);
+      const up=pbox(.12,.34,.12,cloakM); up.position.y=-.16; hip.add(up);
+      const knee=new THREE.Group(); knee.position.y=-.32; hip.add(knee);
+      const lo=pbox(.1,.3,.1,boneM); lo.position.y=-.14; knee.add(lo);
+      const foot=pbox(.14,.08,.2,cloakM); foot.position.set(0,-.3,.04); knee.add(foot);
+      legs.push({hip,knee,s});
+    });
+    addOutlines(g);
+    const st={move:0,alert:0};
+    return {group:g, st,
+      anim(t,state,dt){
+        ease(st,'move',state==='move'?1:0,6,dt);
+        ease(st,'alert',state==='alert'?1:0,10,dt);
+        const pulse=1.2+Math.sin(t*5)*.35+st.alert*1.1;
+        wickM.emissiveIntensity=pulse; lampM.emissiveIntensity=.9+st.alert*.8;
+        light.intensity=.7+pulse*.4;
+        flame.scale.setScalar(.85+Math.sin(t*9)*.15);
+        core.position.y=1.05+Math.sin(t*2.4)*.03;
+        core.rotation.y=(1-st.alert)*Math.sin(t*.7)*.08;
+        arms.forEach(a=>{
+          a.sh.rotation.z=a.s*(.15+st.alert*.35);
+          a.el.rotation.x=-.2-st.move*.3-st.alert*.4;
+        });
+        const f=t*(5+st.move*4);
+        legs.forEach(L=>{
+          const s=Math.sin(f+(L.s>0?0:Math.PI))*st.move;
+          L.hip.rotation.x=s*.55; L.knee.rotation.x=-Math.max(0,-s)*.7-.15;
+        });
+      }};
+  }
+
+  // ---- 14. THORNPAW — bristling night runner ----
+  function buildThornpaw(){
+    const hideM=std(0x2a2430,{rough:.85}), bellyM=std(0x4a3a48),
+          quillM=std(0x8a6ab0,{emissive:0x5a2a90,ei:.7}), tipM=std(0xe8c0ff,{emissive:0xc080ff,ei:1.4});
+    const g=new THREE.Group(); const core=new THREE.Group(); core.position.y=.55; g.add(core);
+    const body=pbox(.9,.42,.7,hideM); core.add(body);
+    const belly=pbox(.7,.2,.55,bellyM); belly.position.y=-.18; core.add(belly);
+    for(let i=0;i<9;i++){
+      const q=pbox(.06,.22+((i*37)%8)/40,.06,quillM);
+      q.position.set(((i%3)-1)*.22,.28,((i/3)|0)*.18-.18);
+      q.rotation.x=-.35-(i%3)*.08; q.rotation.z=((i%3)-1)*.2; core.add(q);
+      const tip=pbox(.04,.08,.04,tipM); tip.position.copy(q.position); tip.position.y+=.2;
+      tip.userData.noOutline=true; tip.rotation.copy(q.rotation); core.add(tip);
+    }
+    const neck=new THREE.Group(); neck.position.set(.42,.08,0); core.add(neck);
+    const head=pbox(.36,.3,.4,hideM); head.position.x=.18; neck.add(head);
+    const snout=pbox(.22,.16,.22,bellyM); snout.position.set(.3,-.04,0); neck.add(snout);
+    eyePair(neck,0xe8c0ff,.1,.1,.14,.07,.08);
+    const tail=new THREE.Group(); tail.position.set(-.48,.1,0); core.add(tail);
+    const t1=pbox(.14,.14,.2,hideM); t1.position.x=-.1; tail.add(t1);
+    const t2=pbox(.1,.2,.1,quillM); t2.position.set(-.22,.08,0); tail.add(t2);
+    const legs=[];
+    [.32,-.32].forEach((x,xi)=>{ [-1,1].forEach(s=>{
+      const hip=new THREE.Group(); hip.position.set(x,-.12,s*.26); core.add(hip);
+      const up=pbox(.14,.28,.14,hideM); up.position.y=-.12; hip.add(up);
+      const knee=new THREE.Group(); knee.position.y=-.26; hip.add(knee);
+      const lo=pbox(.12,.24,.12,bellyM); lo.position.y=-.1; knee.add(lo);
+      const paw=pbox(.16,.08,.2,hideM); paw.position.set(0,-.24,.03); knee.add(paw);
+      legs.push({hip,knee,phase:xi*2+(s>0?1:0)});
+    });});
+    addOutlines(g);
+    const st={move:0,alert:0};
+    return {group:g, st,
+      anim(t,state,dt){
+        ease(st,'move',state==='move'?1:0,8,dt);
+        ease(st,'alert',state==='alert'?1:0,11,dt);
+        tipM.emissiveIntensity=1.1+Math.sin(t*8)*.4+st.alert*1.2;
+        quillM.emissiveIntensity=.5+st.alert*.9;
+        core.position.y=.55+Math.sin(t*(6+st.move*5))*.04*st.move;
+        neck.rotation.y=(1-st.alert)*Math.sin(t*1.2)*.2;
+        neck.rotation.x=-st.alert*.15;
+        tail.rotation.y=Math.sin(t*3)*.4;
+        const f=t*10;
+        legs.forEach(L=>{ const s=Math.sin(f+L.phase*Math.PI/2)*st.move;
+          L.hip.rotation.z=s*.65; L.knee.rotation.z=-Math.max(0,-s)*.85-.15; });
+      }};
+  }
+
+  // ---- 15. BRINEBLINK — sideways night skitterer ----
+  function buildBrineblink(){
+    const shellM=std(0x2a4850,{metal:.25,rough:.55}), shellD=std(0x1a3038,{metal:.2}),
+          clawM=std(0x3a6870), glowM=std(0x5cffd0,{emissive:0x2aeeaa,ei:1.5});
+    const g=new THREE.Group(); const core=new THREE.Group(); core.position.y=.42; g.add(core);
+    const carapace=pbox(.7,.28,.85,shellM); core.add(carapace);
+    const ridge=pbox(.5,.12,.7,shellD); ridge.position.y=.16; core.add(ridge);
+    [-1,1].forEach(s=>{
+      const eyeStalk=new THREE.Group(); eyeStalk.position.set(s*.18,.16,.38); core.add(eyeStalk);
+      const stalk=pbox(.06,.2,.06,shellD); stalk.position.y=.08; eyeStalk.add(stalk);
+      const eye=pbox(.12,.12,.1,glowM); eye.position.y=.2; eye.userData.noOutline=true; eyeStalk.add(eye);
+    });
+    const light=new THREE.PointLight(0x5cffd0,0.7,5); light.position.set(0,.3,.4); core.add(light);
+    const claws=[];
+    [-1,1].forEach(s=>{
+      const arm=new THREE.Group(); arm.position.set(s*.4,.02,.3); core.add(arm);
+      const a1=pbox(.1,.1,.28,clawM); a1.position.z=.12; arm.add(a1);
+      const a2=new THREE.Group(); a2.position.z=.28; arm.add(a2);
+      const pincer=pbox(.14,.12,.22,shellM); pincer.position.z=.1; a2.add(pincer);
+      const tip=pbox(.08,.08,.12,glowM); tip.position.z=.24; tip.userData.noOutline=true; a2.add(tip);
+      claws.push({arm,a2,s});
+    });
+    const legs=[];
+    for(let i=0;i<3;i++){
+      [-1,1].forEach(s=>{
+        const hip=new THREE.Group(); hip.position.set(s*.38,-.06,-.2+i*.22); core.add(hip);
+        const L=pbox(.06,.06,.34,clawM); L.position.set(s*.12,-.06,0); L.rotation.z=s*.9; hip.add(L);
+        legs.push({hip,s,i});
+      });
+    }
+    addOutlines(g);
+    const st={move:0,alert:0};
+    return {group:g, st,
+      anim(t,state,dt){
+        ease(st,'move',state==='move'?1:0,7,dt);
+        ease(st,'alert',state==='alert'?1:0,12,dt);
+        const blink=Math.sin(t*6)>.75?0.2:1.4;
+        glowM.emissiveIntensity=(blink+st.alert*1.2);
+        light.intensity=.4+glowM.emissiveIntensity*.35;
+        core.position.y=.42+Math.sin(t*8)*.02*st.move;
+        // sideways crab gait — rock on Z
+        core.rotation.z=Math.sin(t*(4+st.move*6))*.12*st.move;
+        claws.forEach(c=>{
+          c.arm.rotation.y=-c.s*(.2+st.alert*.5);
+          c.a2.rotation.x=-st.alert*Math.abs(Math.sin(t*7))*.5;
+        });
+        legs.forEach(L=>{
+          L.hip.rotation.y=Math.sin(t*9 - L.i*1.1)*st.move*.35*L.s;
+        });
+      }};
+  }
+
   /* =========================================================
      DEFS — the content registry the voxel world reads.
 
@@ -746,6 +902,22 @@
       hp:12, dmg:10, aggro:14, atkRange:2.0, atkCd:1.0, speed:4.2, prowl:true, longBody:true,
       cat:'Creature', desc:'An armored cave centipede the length of a corridor. Dozens of legs drive it faster than you can run.',
       sci:{ formula:'exoskeleton', kingdom:'Animal', fact:'Bugs wear their skeleton on the outside, like a suit of armor. It is called an exoskeleton and it protects the soft body inside.' } },
+    // Night-only prowlers (glowing so kids can spot them in the dark)
+    { id:'gloomwick', name:'Gloomwick', faction:'living', biome:'Night', temp:'Hostile', threat:'High',
+      build:buildGloomwick, on:[1,12,13,15,20], scale:0.78, fly:false, glow:true, shy:false, spawn:false, scanOn:1,
+      hp:14, dmg:11, aggro:16, atkRange:2.2, atkCd:1.25, speed:3.1, prowl:true,
+      cat:'Creature', desc:'A quiet night walker with a living lantern on its back. The flame never goes out — and it always finds warm things.',
+      sci:{ formula:'nocturnal', kingdom:'Animal', fact:'Nocturnal animals wake up when the sun goes down. Some sense body heat the way you feel a warm mug through your hands.' } },
+    { id:'thornpaw', name:'Thornpaw', faction:'living', biome:'Night', temp:'Hostile', threat:'High',
+      build:buildThornpaw, on:[1,12,13,15,36], scale:0.7, fly:false, glow:true, shy:false, spawn:false, scanOn:1,
+      hp:13, dmg:10, aggro:15, atkRange:2.1, atkCd:1.1, speed:3.8, prowl:true,
+      cat:'Creature', desc:'A bristling runner whose purple quills light up when it charges. Keep your distance when the tips flash.',
+      sci:{ formula:'defense', kingdom:'Animal', fact:'Some animals grow spines or quills for defense. The sharp points make predators think twice before taking a bite.' } },
+    { id:'brineblink', name:'Brineblink', faction:'living', biome:'Night', temp:'Hostile', threat:'Medium',
+      build:buildBrineblink, on:[1,4,12,13,20], scale:0.68, fly:false, glow:true, shy:false, spawn:false, scanOn:4,
+      hp:11, dmg:9, aggro:13, atkRange:2.0, atkCd:0.95, speed:3.6, prowl:true,
+      cat:'Creature', desc:'A sideways skitterer with salt-crusted shell and eyes that blink bright teal. It dashes in, then freezes in the dark.',
+      sci:{ formula:'crustacean', kingdom:'Animal', fact:'Crabs and their cousins are crustaceans — animals with a hard outer shell and jointed legs. Many walk sideways because of how their legs bend.' } },
     { id:'dustwurm', name:'Dustwurm', faction:'living', biome:'Dustfall', temp:'Hostile', threat:'BOSS',
       build:buildDustwurm, on:[6,5], scale:1.0, fly:false, glow:false, shy:false, spawn:false, scanOn:6, longBody:true,
       cat:'Boss', desc:'A segmented colossus that swims through loose rock and breaches to swallow anything on the surface whole.',

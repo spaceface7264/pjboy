@@ -1379,7 +1379,7 @@
             vxLangMsg('Night is coming — find shelter.', 'Natten nærmer sig — find ly.');
           } else if(to === 'night'){
             vxLangMsg('Night falls. Survive until dawn.', 'Natten falder på. Overlev til daggry.');
-            _nightSpawnLeft = 2 + ((Math.random() * 2) | 0);   // 2–3 staggered prowlers
+            _nightSpawnLeft = 3 + ((Math.random() * 2) | 0);   // 3–4 staggered prowlers
             _nightSpawnTimer = 0.35;
             _nightProwlAnnounced = false;
             // Clear peaceful wildlife so night threats are obvious (keeps Curator / dummies).
@@ -4757,7 +4757,8 @@ ${waveConsts}
             'Mosshorn': 'Moshorn', 'Frostmane': 'Frostmanke', 'Driftjelly': 'Drivgople',
             'Sporeling': 'Sporeyngel', 'Skate': 'Svæverokke', 'Glowmoth': 'Lysmøl',
             'Sentinel': 'Vagtdrone', 'Curator': 'Kurator', 'Warden': 'Vogter',
-            'Cinderhound': 'Glødehund', 'Razorpede': 'Klingekryb', 'Dustwurm': 'Støvorm'
+            'Cinderhound': 'Glødehund', 'Razorpede': 'Klingekryb', 'Dustwurm': 'Støvorm',
+            'Gloomwick': 'Skumrev', 'Thornpaw': 'Tornepote', 'Brineblink': 'Saltblink'
         };
 
         function fillScanPanelContent(b, id, cracking, expanded) {
@@ -10308,7 +10309,8 @@ ${waveConsts}
           // At night prefer glowing predators so kids can spot them in the dark.
           if(opts.preferGlow){
             const glowing = prowlers.filter((d) => d.glow);
-            if(glowing.length) prowlers = glowing;
+            // Mostly glowing threats at night; rare dark prowler keeps variety.
+            if(glowing.length && Math.random() < 0.82) prowlers = glowing;
           }
           const sp=prowlers[(Math.random()*prowlers.length)|0];
           const minR = (opts.minR != null) ? opts.minR : CRIT_MIN;
@@ -10342,8 +10344,9 @@ ${waveConsts}
           _nightSpawnTimer -= dt;
           if(_nightSpawnTimer > 0) return;
           _nightSpawnTimer = 1.2 + Math.random() * 1.2;
-          if(countHostiles() >= 3){ _nightSpawnLeft = 0; return; }
+          if(countHostiles() >= 4){ _nightSpawnLeft = 0; return; }
           // Night range is close enough to see/hear from a small base (old 26–46 was invisible).
+          // Prefer glowing prowlers so kids can spot them; still allow a dark one sometimes.
           const ok = spawnProwlerNearPlayer(_nightProwlAnnounced, {
             minR: 10, maxR: 24, preferGlow: true
           });
