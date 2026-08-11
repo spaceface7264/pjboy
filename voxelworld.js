@@ -9917,6 +9917,10 @@ ${waveConsts}
             }
             spendFromInventory(GATE_KEY_ID,1); AP.grantPlanet(prof,o.def.id); AP.save(prof);
             if(g.showMessage) g.showMessage('Gate Key spent — course locked!',1600);
+            try {
+              const { beat } = AP.recordGateStory ? AP.recordGateStory(AP.load()) : {};
+              if (beat) vxLangMsg(beat.en, beat.da, 3600);
+            } catch (_) {}
           }
           const id=o.def.id;
           clearSpace();
