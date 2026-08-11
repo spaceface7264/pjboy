@@ -1382,6 +1382,17 @@
             if(typeof despawnHostiles === 'function') despawnHostiles();
             if(from === 'night' || from === 'dusk'){
               vxLangMsg('You made it through the night!', 'Du klarede natten!');
+              // Progress the survive_night survey when the player sees dawn after night.
+              try {
+                const AP = getProfileApi();
+                if (AP && AP.recordSurviveNight) {
+                  const { completed } = AP.recordSurviveNight(AP.load());
+                  if (typeof updateJournalHud === 'function') updateJournalHud();
+                  if (completed && g.showMessage) {
+                    g.showMessage('Survey complete: ' + completed.title, 2800);
+                  }
+                }
+              } catch (_) {}
             }
           }
           updateDayChip();
@@ -5398,17 +5409,23 @@ ${waveConsts}
             if (!prog.mission) {
                 el.innerHTML = badge
                     + '<div class="vx-quest-title vx-quest-done">✓ Surveys complete</div>' + da('Opgaver fuldført')
-                    + '<div class="vx-quest-goal">Every objective done on this world — keep exploring.</div>'
-                    + da('Alt fuldført på denne verden — bliv ved med at udforske.')
+                    + '<div class="vx-quest-goal">Every survey done — chart new worlds, build, and explore.</div>'
+                    + da('Alle opgaver er klaret — kortlæg nye verdener, byg og udforsk.')
                     + '<div class="vx-quest-bar vx-quest-bar-done"><span style="width:100%"></span></div>';
                 return;
             }
             const cur = Math.max(0, prog.current | 0), tgt = Math.max(1, prog.target | 0);
             const pct = Math.max(0, Math.min(100, Math.round(cur / tgt * 100)));
             const m = prog.mission;
+            const tip = m.tip
+                ? '<div class="vx-quest-tip">👉 ' + m.tip
+                    + (m.tipDa ? ' <span class="vx-quest-badge-da">· ' + m.tipDa + '</span>' : '')
+                    + '</div>'
+                : '';
             el.innerHTML = badge
                 + '<div class="vx-quest-title">🔬 ' + m.title + '</div>' + (m.titleDa ? da(m.titleDa) : '')
                 + '<div class="vx-quest-goal">' + m.desc + '</div>' + (m.descDa ? da(m.descDa) : '')
+                + tip
                 + '<div class="vx-quest-bar"><span style="width:' + pct + '%"></span><em>' + cur + ' / ' + tgt + '</em></div>';
         }
 
@@ -6242,7 +6259,7 @@ ${waveConsts}
                 <h4>FP tuner</h4>
                 <span class="vx-fp-weapon" data-fp-tune-weapon>—</span>
             </div>
-            <p class="vx-fp-hint">Camera, pose (Q/E), power &amp; range. <b>F8</b> reopens after save.</p>`;
+            <p class="vx-fp-hint">Camera, pose (Q/E), power &amp; range. <b>Shift+F8</b> reopens after save.</p>`;
             html += camSection('Camera', FP_TUNER_CAM);
             html += `<div class="vx-fp-section"><b>Pivot &amp; mount</b>`;
             FP_TUNER_GLOBAL.forEach(([key, label, min, max, step]) => {
@@ -6271,7 +6288,7 @@ ${waveConsts}
             el.querySelector('[data-fp-save]').addEventListener('click', () => {
                 saveFpTune(true);
                 el.hidden = true;
-                if (g.showMessage) g.showMessage('FP camera & weapon saved (F8 to tweak again)', 2800);
+                if (g.showMessage) g.showMessage('FP camera & weapon saved (Shift+F8 to tweak again)', 2800);
             });
             el.querySelector('[data-fp-reset-cam]').addEventListener('click', () => {
                 fpTune.cam = defaultFpCam();
@@ -6572,7 +6589,7 @@ ${waveConsts}
                 <h4>TP camera tuner</h4>
                 <span class="vx-fp-weapon" data-tp-tune-weapon>—</span>
             </div>
-            <p class="vx-fp-hint">Camera, TP weapon grip (Q/E), power &amp; range. <b>F8</b> in 3rd person.</p>`;
+            <p class="vx-fp-hint">Camera, TP weapon grip (Q/E), power &amp; range. <b>Shift+F8</b> in 3rd person.</p>`;
             html += weaponStatsSectionHtml();
             html += `<div class="vx-fp-section"><b>TP weapon grip rest</b>`;
             TP_TUNER_WEAPON.forEach(([key, label, min, max, step]) => {
@@ -6598,7 +6615,7 @@ ${waveConsts}
                 saveFpTune();
                 saveTpTune(true);
                 el.hidden = true;
-                if (g.showMessage) g.showMessage('Camera & weapon stats saved (F8 to tweak again)', 2800);
+                if (g.showMessage) g.showMessage('Camera & weapon stats saved (Shift+F8 to tweak again)', 2800);
             });
             el.querySelector('[data-tp-reset-wpn]').addEventListener('click', () => {
                 const id = weaponDef ? weaponDef.id : 'sword';
@@ -6738,7 +6755,7 @@ ${waveConsts}
                 <h4>Aim highlight</h4>
                 <span class="vx-fp-weapon">block outline</span>
             </div>
-            <p class="vx-fp-hint">Mining target edges. <b>F9</b> toggles · aim at a block to preview.</p>
+            <p class="vx-fp-hint">Mining target edges. <b>Shift+F9</b> toggles · aim at a block to preview.</p>
             <div class="vx-fp-section"><b>Look</b>`;
             html += `<label class="vx-fp-row vx-aim-color-row">
                 <span class="vx-fp-lbl">Base color</span>
@@ -6764,7 +6781,7 @@ ${waveConsts}
             el.querySelector('[data-aim-save]').addEventListener('click', () => {
                 saveAimTune(true);
                 el.hidden = true;
-                if (g.showMessage) g.showMessage('Aim highlight saved (F9 to tweak)', 2400);
+                if (g.showMessage) g.showMessage('Aim highlight saved (Shift+F9 to tweak)', 2400);
             });
             el.querySelector('[data-aim-reset]').addEventListener('click', () => {
                 aimTune = defaultAimTune();
@@ -10856,6 +10873,10 @@ ${waveConsts}
             } else {
                 const _ce = document.getElementById('voxel-cloud'); if (_ce) _ce.hidden = true;
             }
+            // Refresh journal HUD when surveys grant a world (toast comes from meta UI).
+            on(window, 'pjboy:planetsGranted', () => {
+                if (typeof updateJournalHud === 'function') updateJournalHud();
+            });
             setFirstPerson(vxSettings.view === 'first');   // default camera
             weaponIndex = loadCharCfg().weapon;
             // Migrate a legacy pickaxe loadout to the Laser Handgun (sole mining tool).
@@ -10953,13 +10974,14 @@ ${waveConsts}
                     if (g.showMessage) g.showMessage('🚀 Jetpack boost ' + (jetBoost ? 'ON — hold Space to rocket up!' : 'off'), 1600);
                     return;
                 }
-                if (e.code === 'F8') {
+                // Dev tuners — require Shift so a kid mashing F-keys can't open them.
+                if (e.code === 'F8' && e.shiftKey) {
                     e.preventDefault();
                     hideAimTuner();
                     if (firstPerson) showFpTuner();
                     else showTpTuner();
                 }
-                if (e.code === 'F9') {
+                if (e.code === 'F9' && e.shiftKey) {
                     e.preventDefault();
                     if (aimTunerEl && !aimTunerEl.hidden) hideAimTuner();
                     else showAimTuner();

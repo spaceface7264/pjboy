@@ -2142,6 +2142,11 @@ body.mode-asteroid {
     color: var(--hud-text); margin-bottom: 2px;
 }
 .vx-quest-title.vx-quest-done { color: var(--hud-green); }
+.vx-quest-tip {
+    margin: 5px 0 6px;
+    font-size: 12px; font-weight: bold; letter-spacing: 0.3px;
+    color: var(--hud-amber-lit);
+}
 .vx-quest-goal {
     font-size: 11px; color: var(--hud-text-dim); line-height: 1.35; margin-bottom: 8px;
     display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;

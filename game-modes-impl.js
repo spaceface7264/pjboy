@@ -442,6 +442,18 @@
                     if (this.showMessage) this.showMessage(msg, 6000);
                 });
             }
+            if (!this._planetGrantBound) {
+                this._planetGrantBound = true;
+                window.addEventListener('pjboy:planetsGranted', (ev) => {
+                    const planets = (ev && ev.detail && ev.detail.planets) || [];
+                    if (!planets.length) return;
+                    const names = planets.map((pl) => pl.name + (pl.nameDa ? ' · ' + pl.nameDa : '')).join(', ');
+                    const msg = this.language === 'danish'
+                        ? ((planets.length > 1 ? 'Nye verdener kortlagt: ' : 'Ny verden kortlagt: ') + names + '!')
+                        : ((planets.length > 1 ? 'New worlds charted: ' : 'New world charted: ') + names + '!');
+                    if (this.showMessage) this.showMessage(msg, 4200);
+                });
+            }
 
             document.getElementById('meta-start-btn')?.addEventListener('click', () => {
                 this.audio && this.audio.play('uiClick');
@@ -924,15 +936,21 @@
             const prog = AP.missionProgress(p);
             if (prog.done && !prog.mission) {
                 missionEl.innerHTML = '<h3>Field journal <span class="meta-mission-da">🇩🇰 Feltjournal</span></h3>'
-                    + '<p>All starter surveys complete. Keep cataloging — more missions coming.</p>'
-                    + '<p class="meta-mission-da">🇩🇰 Alle startopgaver er fuldført. Bliv ved med at katalogisere — flere opgaver er på vej.</p>';
+                    + '<p>All surveys complete. Chart new planets, build your base, and keep exploring.</p>'
+                    + '<p class="meta-mission-da">🇩🇰 Alle opgaver er fuldført. Kortlæg nye planeter, byg din base, og bliv ved med at udforske.</p>';
             } else if (prog.mission) {
                 const m = prog.mission;
                 const titleDa = m.titleDa ? ' <span class="meta-mission-da">🇩🇰 ' + m.titleDa + '</span>' : '';
                 const descDa = m.descDa ? '<p class="meta-mission-da">🇩🇰 ' + m.descDa + '</p>' : '';
                 const progDa = prog.labelDa ? ' <span class="meta-mission-da">· ' + prog.labelDa + '</span>' : '';
+                const tip = m.tip
+                    ? '<div class="meta-mission-progress">👉 ' + m.tip
+                        + (m.tipDa ? ' <span class="meta-mission-da">· ' + m.tipDa + '</span>' : '')
+                        + '</div>'
+                    : '';
                 missionEl.innerHTML = '<h3>' + m.title + titleDa + '</h3>'
                     + '<p>' + m.desc + '</p>' + descDa
+                    + tip
                     + '<div class="meta-mission-progress">' + prog.label + progDa + '</div>';
             }
             this._renderCloudCard();

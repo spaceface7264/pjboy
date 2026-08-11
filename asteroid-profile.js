@@ -45,8 +45,30 @@
             desc: 'Craft TNT at the refinery, then blow it with the Remote Detonator.',
             descDa: 'Lav TNT i raffinaderiet, og spræng den så med fjerndetonatoren.',
             goal: { type: 'craft', itemId: 45, count: 1 }
+        },
+        {
+            id: 'craft_door',
+            title: 'Fit a door', titleDa: 'Sæt en dør i',
+            desc: 'Craft a Door at the refinery (2× Alloy + 1× Circuit), then press F to open it.',
+            descDa: 'Byg en dør i raffinaderiet (2× legering + 1× kredsløb), og tryk F for at åbne den.',
+            goal: { type: 'craft', itemId: 46, count: 1 },
+            tip: 'Tab → Refinery', tipDa: 'Tab → Raffinaderi'
+        },
+        {
+            id: 'survive_night',
+            title: 'First night', titleDa: 'Første nat',
+            desc: 'Stay alive until dawn when night falls. Build walls, close your door, keep a lamp lit.',
+            descDa: 'Overlev til daggry når natten falder på. Byg vægge, luk døren, hold en lampe tændt.',
+            goal: { type: 'survive_night', count: 1 },
+            tip: 'Shelter + Lamp', tipDa: 'Ly + Lampe'
         }
     ];
+    // Tips for the first five (kept out of the objects above so legacy ids stay tidy)
+    MISSIONS[0].tip = 'Hold Shift'; MISSIONS[0].tipDa = 'Hold Shift';
+    MISSIONS[1].tip = 'Hold Shift on new blocks'; MISSIONS[1].tipDa = 'Hold Shift på nye blokke';
+    MISSIONS[2].tip = 'Right-click to place'; MISSIONS[2].tipDa = 'Højreklik for at placere';
+    MISSIONS[3].tip = 'Tab → Refinery'; MISSIONS[3].tipDa = 'Tab → Raffinaderi';
+    MISSIONS[4].tip = 'Tab → Refinery'; MISSIONS[4].tipDa = 'Tab → Raffinaderi';
 
     const CRAFT_RECIPES = [
         {
@@ -282,7 +304,8 @@
                 scanned: {},
                 places: 0,
                 crafted: {},
-                creatures: {}
+                creatures: {},
+                nightsSurvived: 0
             },
             inventory: {
                 backpack: {},
@@ -315,11 +338,12 @@
         p.character = normalizeCharacter(p.character);
         p.characterSetupDone = !!p.characterSetupDone;
         p.system = normalizeSystem(p.system);
-        p.journal = Object.assign({ scanned: {}, places: 0, crafted: {}, creatures: {} }, p.journal || {});
+        p.journal = Object.assign({ scanned: {}, places: 0, crafted: {}, creatures: {}, nightsSurvived: 0 }, p.journal || {});
         p.journal.scanned = p.journal.scanned && typeof p.journal.scanned === 'object' ? p.journal.scanned : {};
         p.journal.places = p.journal.places | 0;
         p.journal.crafted = p.journal.crafted && typeof p.journal.crafted === 'object' ? p.journal.crafted : {};
         p.journal.creatures = p.journal.creatures && typeof p.journal.creatures === 'object' ? p.journal.creatures : {};
+        p.journal.nightsSurvived = p.journal.nightsSurvived | 0;
         p.inventory = Object.assign({}, base.inventory, p.inventory || {});
         p.inventory.backpack = p.inventory.backpack && typeof p.inventory.backpack === 'object' ? p.inventory.backpack : {};
         p.inventory.hotbar = Array.isArray(p.inventory.hotbar) ? p.inventory.hotbar.slice(0, 9) : Array(9).fill(null);
@@ -335,8 +359,13 @@
         p.inventory.droneTier = Math.max(1, Math.min(3, (p.inventory.droneTier | 0) || 1));
         p.inventory.scannerTier = Math.max(1, Math.min(5, (p.inventory.scannerTier | 0) || 1));
         p.missions = Object.assign({}, base.missions, p.missions || {});
-        if (!MISSIONS.some((m) => m.id === p.missions.active)) p.missions.active = MISSIONS[0].id;
         p.missions.completed = Array.isArray(p.missions.completed) ? p.missions.completed : [];
+        // Re-point active at the first incomplete mission so newly added surveys
+        // appear for players who already finished the old starter chain.
+        {
+            const next = MISSIONS.find((m) => !p.missions.completed.includes(m.id));
+            p.missions.active = next ? next.id : '';
+        }
         p.lastPlayed = p.lastPlayed | 0;
         return p;
     }
@@ -452,7 +481,7 @@
 
     function save(profile) {
         const p = normalizeProfile(profile);
-        evaluateGrants(p);
+        const newly = evaluateGrants(p);
         p.lastPlayed = Date.now();
         const idx = ensureIndex();
         writeJSON(slotKey(idx.active), p);
@@ -460,6 +489,12 @@
         if (e) { e.name = ((p.displayName || e.name || 'Explorer') + '').slice(0, 16); e.lastPlayed = p.lastPlayed; writeJSON(PROFILES_KEY, idx); }
         syncLegacyKeys(p);
         if (window.CloudSync) window.CloudSync.onProfileSaved(p);   // debounced cloud push (no-op if cloud off / unlinked)
+        // Fanfare for newly charted worlds (HUD listens — never blocks the save).
+        if (newly && newly.length) {
+            try {
+                window.dispatchEvent(new CustomEvent('pjboy:planetsGranted', { detail: { planets: newly } }));
+            } catch (_) {}
+        }
         return p;
     }
 
@@ -531,7 +566,11 @@
     }
 
     function activeMission(profile) {
-        return missionById(profile.missions.active) || MISSIONS[0];
+        // Prefer the stored active id when still incomplete; otherwise first incomplete
+        // in chain order so newly added missions appear for players who finished the old set.
+        const cur = missionById(profile.missions.active);
+        if (cur && !profile.missions.completed.includes(cur.id)) return cur;
+        return MISSIONS.find((m) => !profile.missions.completed.includes(m.id)) || null;
     }
 
     function journalUniqueCount(profile) {
@@ -540,7 +579,7 @@
 
     function missionProgress(profile) {
         const m = activeMission(profile);
-        if (!m || profile.missions.completed.includes(m.id)) {
+        if (!m) {
             return { done: true, current: 0, target: 0, label: 'All surveys complete', labelDa: 'Alle opgaver fuldført' };
         }
         const g = m.goal;
@@ -558,6 +597,9 @@
         } else if (g.type === 'craft') {
             current = (profile.journal.crafted && profile.journal.crafted[String(g.itemId | 0)]) | 0;
             label = `Crafted: ${current} / ${g.count}`; labelDa = `Bygget: ${current} / ${g.count}`;
+        } else if (g.type === 'survive_night') {
+            current = (profile.journal && profile.journal.nightsSurvived) | 0;
+            label = `Nights survived: ${current} / ${g.count}`; labelDa = `Nætter overlevet: ${current} / ${g.count}`;
         }
         return { done: current >= g.count, current, target: g.count, label, labelDa, mission: m };
     }
@@ -608,6 +650,13 @@
         const completed = advanceMissionIfDone(profile);
         save(profile);
         return { completed };
+    }
+
+    function recordSurviveNight(profile) {
+        profile.journal.nightsSurvived = (profile.journal.nightsSurvived | 0) + 1;
+        const completed = advanceMissionIfDone(profile);
+        save(profile);
+        return { completed, nights: profile.journal.nightsSurvived };
     }
 
     // ---- Planet system accessors ----
@@ -890,6 +939,7 @@
         recordScan,
         recordPlace,
         recordCraft,
+        recordSurviveNight,
         recordCreature,
         upsertBlockEdit,
         upsertBlockEdits,
